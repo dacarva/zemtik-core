@@ -1,0 +1,26 @@
+# Rust build
+/target
+circuit/target
+
+# Noir generated
+circuit/Prover.toml
+circuit/Verifier.toml
+circuit/proofs/
+proofs/
+
+# Environment secrets
+.env
+
+# Audit records (generated per run)
+audit/
+
+# OS
+.DS_Store
+
+# IDE / tooling
+.agents/
+.claude/
+
+# Debugging
+*.log
+debug/
