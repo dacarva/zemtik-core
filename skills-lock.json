@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "skills": {
+    "documentation-writer": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "computedHash": "ee53d65b163cd7eb953a930c95841cfe398cc2c0bd24c06508bbaa07c432be35"
+    },
+    "excalidraw-diagram-generator": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "computedHash": "e24e3c4cab4b5a07bc1d1801db14868f3a1cd184f7f28f5dd2c4a2b234bf2f2d"
+    },
+    "noir-idioms": {
+      "source": "noir-lang/noir",
+      "sourceType": "github",
+      "computedHash": "283a61d3c378aa97bd89b6b207e6da4bb497b14c89fc2923b57b23022e0c9375"
+    },
+    "noir-optimize-acir": {
+      "source": "noir-lang/noir",
+      "sourceType": "github",
+      "computedHash": "7f2b375d61d3be96c70051322356c297696d382aea5d0d2d415cba9716d98819"
+    },
+    "open-source-checker": {
+      "source": "shipshitdev/library",
+      "sourceType": "github",
+      "computedHash": "0be8a1ddd6263f90b109d0c30453e620fca06ee22c24e202aaf6438adc875d0a"
+    },
+    "open-source-strategy": {
+      "source": "kostja94/marketing-skills",
+      "sourceType": "github",
+      "computedHash": "b294c58addc5ed64640c883770417902d5a448990d74108a85478926f9b43b23"
+    },
+    "openai-docs": {
+      "source": "openai/skills",
+      "sourceType": "github",
+      "computedHash": "7c0cb31b80f601a4394449bf27bc865a9ff31cd0daaa1088a017fdb57b7ae306"
+    },
+    "rust-best-practices": {
+      "source": "apollographql/skills",
+      "sourceType": "github",
+      "computedHash": "fd336f2f772eb46ddf8658de5f9dd8faa1f35615b316665307fc82eeb4b2e658"
+    }
+  }
+}
