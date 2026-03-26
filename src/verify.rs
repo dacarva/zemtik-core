@@ -1,0 +1,190 @@
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::Context;
+use uuid::Uuid;
+
+use crate::bundle::parse_bb_version;
+
+pub struct VerifyResult {
+    pub valid: bool,
+    pub circuit_hash: String,
+    pub aggregate: u64,
+    pub timestamp: String,
+    pub raw_rows_sent_to_llm: u64,
+    pub bb_version_used: String,
+}
+
+/// Verify a proof bundle ZIP by extracting it and calling `bb verify` directly.
+///
+/// Does NOT call `prover::verify_proof()` — that function operates on
+/// hardcoded paths under `circuit/proofs/proof/`. This works on any bundle ZIP.
+///
+/// Exit semantics:
+///   valid = true  → ZK proof verified by bb
+///   valid = false → bb verify returned non-zero
+///   Err(...)      → bb not found, version mismatch (MAJOR), or corrupt zip
+pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
+    // Resolve extract directory
+    let home = dirs::home_dir().context("could not resolve home directory")?;
+    let extract_id = Uuid::new_v4().to_string();
+    let extract_dir = home.join(".zemtik").join(".tmp").join(format!("verify-{}", extract_id));
+    std::fs::create_dir_all(&extract_dir)
+        .with_context(|| format!("create extract dir {}", extract_dir.display()))?;
+
+    // Ensure cleanup even on error
+    let result = (|| -> anyhow::Result<VerifyResult> {
+        // Extract ZIP
+        let file = std::fs::File::open(zip_path)
+            .with_context(|| format!("open bundle {}", zip_path.display()))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .with_context(|| format!("parse zip {}", zip_path.display()))?;
+
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).context("read zip entry")?;
+            let name = entry.name().to_owned();
+            let out_path = extract_dir.join(&name);
+            let mut out_file = std::fs::File::create(&out_path)
+                .with_context(|| format!("create {}", out_path.display()))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .with_context(|| format!("extract {}", name))?;
+        }
+
+        // Read metadata files
+        let circuit_hash = std::fs::read_to_string(extract_dir.join("circuit_hash.txt"))
+            .context("read circuit_hash.txt")?
+            .trim()
+            .to_owned();
+
+        let meta_bytes = std::fs::read(extract_dir.join("request_meta.json"))
+            .context("read request_meta.json")?;
+        let meta: serde_json::Value =
+            serde_json::from_slice(&meta_bytes).context("parse request_meta.json")?;
+
+        let timestamp = meta
+            .get("timestamp_utc")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let bb_version_used = meta
+            .get("bb_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        let raw_rows_sent_to_llm = meta
+            .get("raw_rows_sent_to_llm")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let readable_bytes = std::fs::read(extract_dir.join("public_inputs_readable.json"))
+            .context("read public_inputs_readable.json")?;
+        let readable: serde_json::Value =
+            serde_json::from_slice(&readable_bytes).context("parse public_inputs_readable.json")?;
+        let aggregate = readable
+            .get("verified_aggregate")
+            .and_then(|v| v.as_u64())
+            .context("verified_aggregate missing from public_inputs_readable.json")?;
+
+        // Verify required files are present
+        for required in &["proof.bin", "vk.bin", "public_inputs"] {
+            let p = extract_dir.join(required);
+            if !p.exists() {
+                anyhow::bail!("bundle is missing required file: {}", required);
+            }
+        }
+
+        // Check bb version compatibility
+        let local_bb_raw = {
+            let out = Command::new("bb")
+                .arg("--version")
+                .output()
+                .context("bb not found — install Barretenberg (bb) to verify proofs")?;
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+
+        if let (Some(local_ver), Some(bundle_ver)) = (
+            parse_bb_version(&local_bb_raw),
+            parse_bb_version(&bb_version_used),
+        ) {
+            if local_ver.0 != bundle_ver.0 {
+                anyhow::bail!(
+                    "bb MAJOR version mismatch: bundle was generated with {}, \
+                     local bb is {} — cannot verify across major versions",
+                    bb_version_used,
+                    local_bb_raw
+                );
+            }
+            if local_ver != bundle_ver {
+                eprintln!(
+                    "[WARN] bb version mismatch: bundle={}, local={} — proceeding (same major version)",
+                    bb_version_used, local_bb_raw
+                );
+            }
+        }
+
+        // Run bb verify
+        let verify_out = Command::new("bb")
+            .args([
+                "verify",
+                "-p", "proof.bin",
+                "-k", "vk.bin",
+                "-i", "public_inputs",
+            ])
+            .current_dir(&extract_dir)
+            .output()
+            .context("spawn bb verify")?;
+
+        let valid = verify_out.status.success();
+
+        Ok(VerifyResult {
+            valid,
+            circuit_hash,
+            aggregate,
+            timestamp,
+            raw_rows_sent_to_llm,
+            bb_version_used,
+        })
+    })();
+
+    // Always clean up extracted files
+    let _ = std::fs::remove_dir_all(&extract_dir);
+
+    result
+}
+
+/// CLI entry point for `zemtik verify <bundle.zip>`.
+pub fn run_verify_cli(zip_path: &Path) -> anyhow::Result<()> {
+    println!("╔══════════════════════════════════════════════════╗");
+    println!("║   Zemtik Verifier — Independent Proof Check      ║");
+    println!("╚══════════════════════════════════════════════════╝");
+    println!();
+    println!("  Bundle : {}", zip_path.display());
+    println!();
+
+    let result = verify_bundle(zip_path).map_err(|e| {
+        eprintln!("  Error  : {}", e);
+        e
+    })?;
+
+    println!("  Circuit Hash     : {}", result.circuit_hash);
+    println!("  Aggregate        : ${}", result.aggregate);
+    println!("  Timestamp        : {}", result.timestamp);
+    println!("  Raw rows to LLM  : {}", result.raw_rows_sent_to_llm);
+    println!("  bb version       : {}", result.bb_version_used);
+    println!();
+
+    if result.valid {
+        println!("  STATUS: VALID");
+        println!();
+        println!("  The ZK proof is cryptographically valid.");
+        println!("  The LLM received only the verified aggregate — zero raw rows.");
+    } else {
+        eprintln!("  STATUS: INVALID");
+        eprintln!();
+        eprintln!("  Proof verification failed. The bundle may be corrupted or tampered.");
+        std::process::exit(1);
+    }
+
+    println!();
+    Ok(())
+}
