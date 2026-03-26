@@ -43,7 +43,13 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).context("read zip entry")?;
             let name = entry.name().to_owned();
-            let out_path = extract_dir.join(&name);
+            // Strip directory components to prevent zip-slip path traversal.
+            // A malicious bundle with entries like "../../.ssh/authorized_keys"
+            // would otherwise escape the temp directory.
+            let filename = std::path::Path::new(&name)
+                .file_name()
+                .with_context(|| format!("zip entry '{}' has no filename component", name))?;
+            let out_path = extract_dir.join(filename);
             let mut out_file = std::fs::File::create(&out_path)
                 .with_context(|| format!("create {}", out_path.display()))?;
             std::io::copy(&mut entry, &mut out_file)
