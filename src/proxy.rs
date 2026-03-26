@@ -454,13 +454,13 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
 </p>
 </body>
 </html>"#,
-        id = r.id,
+        id = html_escape(&r.id),
         badge_color = badge_color,
         status_label = status_label,
         aggregate = aggregate,
         category = category,
         proof_status = html_escape(&r.proof_status),
-        circuit_hash = r.circuit_hash,
+        circuit_hash = html_escape(&r.circuit_hash),
         bb_version = html_escape(&r.bb_version),
         created_at = html_escape(&r.created_at),
     )
