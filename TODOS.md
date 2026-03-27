@@ -1,5 +1,16 @@
 # TODOS
 
+## P1 — Deferred from plan
+
+### Demo video script (docs/DEMO-SCRIPT.md)
+- **What:** Create `docs/DEMO-SCRIPT.md` — 2:30 demo video script showing the proxy intercepting an OpenAI call with ZK pipeline.
+- **Why:** Planned deliverable for YC application (plan: synthetic-marinating-bengio.md, Task 3.2). Deferred from initial open source release.
+- **How to apply:** Sections: Problem (0:00–0:15) → Solution (0:15–0:30) → Start proxy (0:30–0:45) → Live query (0:45–1:45) → Audit record (1:45–2:05) → Commercial boundary (2:05–2:25) → Close (2:25–2:30).
+- **Effort:** S (human) → S (CC+gstack)
+- **Deferred:** feat/verifier-flow ship 2026-03-26
+
+---
+
 ## P2 — Blocking for productized distribution
 
 ### CIRCUIT_DIR configurable
@@ -33,3 +44,15 @@
 - **Effort:** S (human) → S (CC+gstack)
 - **Trigger:** feat/verifier-flow adds `verify` as 2nd subcommand. Migrate before adding a 3rd.
 - **Depends on:** feat/verifier-flow merged
+
+### bb verify timeout (prevents proxy deadlock)
+- **What:** Add a timeout to the `Command::new("bb").args(["verify", ...]).output()` call in `verify_bundle`.
+- **Why:** `bb` can hang indefinitely (CRS download, stalled network, native deadlock). In proxy mode, the hung `bb` holds `pipeline_lock` forever, deadlocking all subsequent requests. Found by Claude adversarial review (feat/verifier-flow, 2026-03-26).
+- **How to apply:** Spawn `bb verify` as a child process, set a deadline (e.g., 60s), and kill it if it exceeds the limit. Return an error to the caller.
+- **Effort:** S (human) → S (CC+gstack)
+
+### Integration tests for bb-dependent paths
+- **What:** Integration tests for `verify_bundle` happy path, `generate_bundle`, and `run_verify_cli` that require the `bb` binary.
+- **Why:** Unit tests cover parse logic and DB CRUD (63% coverage). The ZK proof round-trip paths are excluded because they require `bb` — a gap noted in Step 3.4 of the ship audit.
+- **How to apply:** Add a `tests/integration/` directory, conditionally run with `#[cfg(feature = "integration")]` or behind `RUN_INTEGRATION_TESTS=1` env guard. Require `bb` to be in PATH.
+- **Effort:** M (human) → M (CC+gstack)
