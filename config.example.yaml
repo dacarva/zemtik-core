@@ -1,0 +1,12 @@
+# Zemtik configuration file
+# Copy to ~/.zemtik/config.yaml and uncomment fields to override defaults.
+# All paths default to ~/.zemtik/...
+# Environment variables and CLI flags take precedence over this file.
+
+proxy_port: 4000
+# circuit_dir: ~/.zemtik/circuit
+# runs_dir: ~/.zemtik/runs
+# keys_dir: ~/.zemtik/keys
+# db_path: ~/.zemtik/zemtik.db
+# receipts_db_path: ~/.zemtik/receipts.db
+# receipts_dir: ~/.zemtik/receipts

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Context;
@@ -8,8 +8,6 @@ use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
 use crate::types::{QueryParams, SignatureData};
-
-const CIRCUIT_DIR: &str = "circuit";
 
 pub struct BundleResult {
     pub bundle_id: String,
@@ -81,15 +79,16 @@ mod tests {
 
 /// Generate a portable proof bundle ZIP after a successful ZK proof.
 ///
-/// Reads raw artifacts from `circuit/proofs/proof/` and writes them atomically
-/// to `~/.zemtik/receipts/{uuid}.zip` via a temp file + rename.
+/// Reads raw artifacts from `run_dir/proofs/proof/`, reads the circuit JSON from
+/// `circuit_dir/target/zemtik_circuit.json`, and writes the bundle atomically to
+/// `receipts_dir/{uuid}.zip` via a temp file + rename.
 ///
 /// Bundle contents:
 ///   proof.bin                — raw proof bytes (for `bb verify -p`)
 ///   vk.bin                   — verification key (for `bb verify -k`)
 ///   public_inputs            — raw binary public inputs (for `bb verify -i`)
 ///   public_inputs_readable.json — human-readable labeled public inputs
-///   circuit_hash.txt         — SHA-256 of circuit/target/zemtik_circuit.json
+///   circuit_hash.txt         — SHA-256 of the circuit ACIR JSON
 ///   request_meta.json        — bundle metadata
 pub fn generate_bundle(
     params: &QueryParams,
@@ -98,16 +97,19 @@ pub fn generate_bundle(
     sig: &SignatureData,
     request_hash: Option<&str>,
     prompt_hash: Option<&str>,
+    run_dir: &Path,
+    circuit_dir: &Path,
+    receipts_dir: &Path,
 ) -> anyhow::Result<BundleResult> {
     let bundle_id = Uuid::new_v4().to_string();
     let bb_version = detect_bb_version();
     let timestamp = Utc::now().to_rfc3339();
 
     // Paths to proof artifacts produced by `bb prove`
-    let proof_path = PathBuf::from(CIRCUIT_DIR).join("proofs/proof/proof");
-    let vk_path = PathBuf::from(CIRCUIT_DIR).join("proofs/proof/vk");
-    let public_inputs_path = PathBuf::from(CIRCUIT_DIR).join("proofs/proof/public_inputs");
-    let circuit_json_path = PathBuf::from(CIRCUIT_DIR).join("target/zemtik_circuit.json");
+    let proof_path = run_dir.join("proofs/proof/proof");
+    let vk_path = run_dir.join("proofs/proof/vk");
+    let public_inputs_path = run_dir.join("proofs/proof/public_inputs");
+    let circuit_json_path = circuit_dir.join("target/zemtik_circuit.json");
 
     // Compute circuit hash
     let circuit_bytes = std::fs::read(&circuit_json_path)
@@ -156,13 +158,12 @@ pub fn generate_bundle(
         serde_json::to_vec_pretty(&request_meta).context("serialize request_meta")?;
 
     // Resolve output paths
-    let home = dirs::home_dir().context("could not resolve home directory")?;
-    let base = home.join(".zemtik");
-    let tmp_dir = base.join(".tmp");
-    let receipts_dir = base.join("receipts");
+    let tmp_dir = receipts_dir.parent()
+        .map(|p| p.join(".tmp"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
     std::fs::create_dir_all(&tmp_dir)
         .with_context(|| format!("create {}", tmp_dir.display()))?;
-    std::fs::create_dir_all(&receipts_dir)
+    std::fs::create_dir_all(receipts_dir)
         .with_context(|| format!("create {}", receipts_dir.display()))?;
 
     let tmp_path = tmp_dir.join(format!("{}.zip.tmp", bundle_id));

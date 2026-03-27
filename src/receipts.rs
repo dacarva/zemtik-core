@@ -13,16 +13,15 @@ pub struct Receipt {
     pub created_at: String, // ISO 8601 UTC
 }
 
-/// Open (or create) the file-based receipts SQLite database at `~/.zemtik/receipts.db`.
-/// Creates the directory and the `receipts` table if they don't exist.
-pub fn open_receipts_db() -> anyhow::Result<Connection> {
-    let home = dirs::home_dir().context("could not resolve home directory")?;
-    let dir = home.join(".zemtik");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create directory {}", dir.display()))?;
+/// Open (or create) the file-based receipts SQLite database at `db_path`.
+/// Creates parent directories and the `receipts` table if they don't exist.
+pub fn open_receipts_db(db_path: &std::path::Path) -> anyhow::Result<Connection> {
+    if let Some(dir) = db_path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create directory {}", dir.display()))?;
+    }
 
-    let db_path = dir.join("receipts.db");
-    let conn = Connection::open(&db_path)
+    let conn = Connection::open(db_path)
         .with_context(|| format!("open receipts DB at {}", db_path.display()))?;
 
     conn.execute_batch(
