@@ -503,10 +503,10 @@ pub fn sign_transaction_batches(
     txns: &[Transaction],
     key: &PrivateKey,
 ) -> anyhow::Result<Vec<(Vec<Transaction>, SignatureData)>> {
-    assert_eq!(
-        txns.len() % BATCH_SIZE,
-        0,
-        "transaction count must be a multiple of BATCH_SIZE ({})",
+    anyhow::ensure!(
+        txns.len() % BATCH_SIZE == 0,
+        "transaction count ({}) must be a multiple of BATCH_SIZE ({})",
+        txns.len(),
         BATCH_SIZE
     );
 
@@ -536,4 +536,56 @@ pub fn sign_transaction_batches(
     }
 
     Ok(batches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Transaction;
+
+    fn make_txns(n: usize) -> Vec<Transaction> {
+        (0..n)
+            .map(|i| Transaction { id: i as i64, client_id: 1, amount: i as u64 + 1, category: 2, timestamp: Q1_START + i as u64 })
+            .collect()
+    }
+
+    #[test]
+    fn fr_to_decimal_zero() {
+        let fr = fr_from_u64(0);
+        assert_eq!(fr_to_decimal(&fr), "0");
+    }
+
+    #[test]
+    fn fr_to_decimal_one() {
+        let fr = fr_from_u64(1);
+        assert_eq!(fr_to_decimal(&fr), "1");
+    }
+
+    #[test]
+    fn fr_to_decimal_known_value() {
+        let fr = fr_from_u64(12345);
+        assert_eq!(fr_to_decimal(&fr), "12345");
+    }
+
+    #[test]
+    fn compute_tx_commitment_is_deterministic() {
+        let txns = make_txns(BATCH_SIZE);
+        let h1 = compute_tx_commitment(&txns).unwrap();
+        let h2 = compute_tx_commitment(&txns).unwrap();
+        assert_eq!(fr_to_decimal(&h1), fr_to_decimal(&h2));
+    }
+
+    #[test]
+    fn compute_tx_commitment_differs_for_different_inputs() {
+        let mut txns_a = make_txns(BATCH_SIZE);
+        let txns_b = {
+            let mut b = txns_a.clone();
+            b[0].amount += 1;
+            b
+        };
+        let h_a = compute_tx_commitment(&txns_a).unwrap();
+        let h_b = compute_tx_commitment(&txns_b).unwrap();
+        assert_ne!(fr_to_decimal(&h_a), fr_to_decimal(&h_b));
+        let _ = txns_a; // suppress unused warning
+    }
 }

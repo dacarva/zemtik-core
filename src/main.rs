@@ -162,6 +162,10 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     println!("[NOIR] Generating UltraHonk proof (bb v4, CRS auto-download)...");
     let run_dir = prover::prepare_run_dir(&app_config.runs_dir, &app_config.circuit_dir)?;
+    // RAII guard: cleans up the per-run work directory on any exit (success or error).
+    struct RunDirGuard(std::path::PathBuf);
+    impl Drop for RunDirGuard { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let _run_dir_guard = RunDirGuard(run_dir.clone());
     let proof_generated = prover::generate_proof(&run_dir)?;
 
     // -----------------------------------------------------------------------
@@ -233,9 +237,6 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Clean up per-run work directory
-    let _ = std::fs::remove_dir_all(&run_dir);
-
     // -----------------------------------------------------------------------
     // Step 9: Send ONLY the verified aggregate to OpenAI
     // -----------------------------------------------------------------------
@@ -250,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         params.category_name,
         "2024-01-01",
         "2024-03-31",
+        app_config.openai_api_key.as_deref(),
     )
     .await?;
 

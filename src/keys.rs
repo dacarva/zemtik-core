@@ -1,3 +1,5 @@
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::Context;
@@ -25,7 +27,12 @@ pub fn load_or_generate_key(keys_dir: &Path) -> anyhow::Result<PrivateKey> {
             .map_err(|e| anyhow::anyhow!("import key from {}: {}", key_path.display(), e))
     } else {
         let seed: [u8; 32] = rand::thread_rng().gen();
-        std::fs::write(&key_path, &seed)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)
+            .and_then(|mut f| f.write_all(&seed))
             .with_context(|| format!("write key to {}", key_path.display()))?;
         PrivateKey::import(seed.to_vec())
             .map_err(|e| anyhow::anyhow!("import generated key: {}", e))

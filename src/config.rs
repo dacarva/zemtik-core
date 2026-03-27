@@ -4,6 +4,19 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::Deserialize;
 
+/// Expand a leading `~` to the home directory so users can write `~/foo` in
+/// config.yaml and env vars.  Paths that don't start with `~` are unchanged.
+fn expand_tilde(s: &str) -> PathBuf {
+    if let Some(rest) = s.strip_prefix("~/") {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        home.join(rest)
+    } else if s == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+    } else {
+        PathBuf::from(s)
+    }
+}
+
 /// Application-wide configuration resolved from defaults → YAML → env vars → CLI flags.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -68,9 +81,15 @@ pub fn load_from_sources(
     // Layer 1: defaults
     let mut config = AppConfig::default();
 
-    // Layer 2: YAML — serde fills missing fields from Default
+    // Layer 2: YAML — serde fills missing fields from Default; expand ~ in paths
     if let Some(yaml_str) = yaml {
         config = serde_yaml::from_str(yaml_str).context("parse config YAML")?;
+        config.circuit_dir = expand_tilde(&config.circuit_dir.to_string_lossy());
+        config.runs_dir = expand_tilde(&config.runs_dir.to_string_lossy());
+        config.keys_dir = expand_tilde(&config.keys_dir.to_string_lossy());
+        config.db_path = expand_tilde(&config.db_path.to_string_lossy());
+        config.receipts_db_path = expand_tilde(&config.receipts_db_path.to_string_lossy());
+        config.receipts_dir = expand_tilde(&config.receipts_dir.to_string_lossy());
     }
 
     // Layer 3: env vars
@@ -78,22 +97,22 @@ pub fn load_from_sources(
         config.proxy_port = v.parse().context("parse ZEMTIK_PROXY_PORT")?;
     }
     if let Some(v) = env.get("ZEMTIK_CIRCUIT_DIR") {
-        config.circuit_dir = PathBuf::from(v);
+        config.circuit_dir = expand_tilde(v);
     }
     if let Some(v) = env.get("ZEMTIK_RUNS_DIR") {
-        config.runs_dir = PathBuf::from(v);
+        config.runs_dir = expand_tilde(v);
     }
     if let Some(v) = env.get("ZEMTIK_KEYS_DIR") {
-        config.keys_dir = PathBuf::from(v);
+        config.keys_dir = expand_tilde(v);
     }
     if let Some(v) = env.get("ZEMTIK_DB_PATH") {
-        config.db_path = PathBuf::from(v);
+        config.db_path = expand_tilde(v);
     }
     if let Some(v) = env.get("ZEMTIK_RECEIPTS_DB_PATH") {
-        config.receipts_db_path = PathBuf::from(v);
+        config.receipts_db_path = expand_tilde(v);
     }
     if let Some(v) = env.get("ZEMTIK_RECEIPTS_DIR") {
-        config.receipts_dir = PathBuf::from(v);
+        config.receipts_dir = expand_tilde(v);
     }
     if let Some(v) = env.get("OPENAI_API_KEY") {
         config.openai_api_key = Some(v.clone());

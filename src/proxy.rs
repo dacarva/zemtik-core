@@ -114,9 +114,10 @@ async fn handle_chat_completions(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_owned())
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+        .or_else(|| state.config.openai_api_key.clone())
         .ok_or_else(|| {
             ProxyError(anyhow::anyhow!(
-                "No Authorization header and OPENAI_API_KEY not set"
+                "No Authorization header, OPENAI_API_KEY env var, or openai_api_key in config.yaml"
             ))
         })?;
 
@@ -137,13 +138,15 @@ async fn handle_chat_completions(
 
     let config_clone = Arc::clone(&state.config);
     let key_bytes = state.signing_key_bytes.clone();
+    let req_hash = request_hash.clone();
+    let prm_hash = prompt_hash.clone();
 
     let zk = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build local runtime")?;
-        rt.block_on(run_zk_pipeline(config_clone, key_bytes))
+        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash))
     })
     .await
     .context("ZK blocking task panicked")??;
@@ -153,13 +156,14 @@ async fn handle_chat_completions(
         "AWS Infrastructure", zk.aggregate, zk.circuit_execution_secs, zk.proof_status
     );
 
-    // Insert bundle into receipts DB if generated
-    if let Some(ref br) = zk.bundle_result {
+    // Insert bundle into receipts DB if generated; clear it if the insert fails
+    // so we never emit headers pointing to a non-existent bundle.
+    let committed_bundle: Option<&bundle::BundleResult> = if let Some(ref br) = zk.bundle_result {
         println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
         println!("[BUNDLE] ID: {}", br.bundle_id);
 
         let db_guard = state.receipts_db.lock().await;
-        if let Err(e) = receipts::insert_receipt(
+        match receipts::insert_receipt(
             &db_guard,
             &receipts::Receipt {
                 id: br.bundle_id.clone(),
@@ -172,10 +176,16 @@ async fn handle_chat_completions(
                 created_at: Utc::now().to_rfc3339(),
             },
         ) {
-            eprintln!("[BUNDLE] Failed to insert receipt: {}", e);
-            let _ = std::fs::remove_file(&br.bundle_path);
+            Ok(()) => Some(br),
+            Err(e) => {
+                eprintln!("[BUNDLE] Failed to insert receipt — discarding bundle: {}", e);
+                let _ = std::fs::remove_file(&br.bundle_path);
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
     let params = QueryParams {
         client_id: 123,
@@ -273,7 +283,7 @@ async fn handle_chat_completions(
         .unwrap_or((0, 0, 0));
 
     let audit_record = AuditRecord::build(
-        zk.bundle_result.as_ref().map(|b| b.bundle_id.clone()),
+        committed_bundle.map(|b| b.bundle_id.clone()),
         zk.txns_len,
         zk.batch_count,
         db::BATCH_SIZE,
@@ -318,7 +328,7 @@ async fn handle_chat_completions(
     )
         .into_response();
 
-    if let Some(ref br) = zk.bundle_result {
+    if let Some(br) = committed_bundle {
         if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
             response.headers_mut().insert("x-zemtik-bundle-id", val);
         }
@@ -465,11 +475,21 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// RAII guard that removes a per-run work directory on drop (success or error).
+struct RunDirGuard(std::path::PathBuf);
+impl Drop for RunDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Run the full ZK pipeline (DB → sign → circuit → proof → bundle).
 /// Called from within spawn_blocking so DbBackend's !Sync is not an issue.
 async fn run_zk_pipeline(
     config: Arc<AppConfig>,
     key_bytes: Vec<u8>,
+    request_hash: String,
+    prompt_hash: String,
 ) -> anyhow::Result<ZkPipelineResult> {
     let params = QueryParams {
         client_id: 123,
@@ -513,6 +533,8 @@ async fn run_zk_pipeline(
     println!("[ZK] Generating UltraHonk proof...");
     let run_dir = prover::prepare_run_dir(&config.runs_dir, &config.circuit_dir)
         .context("prepare run dir")?;
+    // Ensure the run directory is cleaned up regardless of success or error.
+    let _run_dir_guard = RunDirGuard(run_dir.clone());
 
     let proof_generated = prover::generate_proof(&run_dir).context("generate proof")?;
     let proof_status = if proof_generated {
@@ -538,15 +560,15 @@ async fn run_zk_pipeline(
         None => (None, None),
     };
 
-    // Generate bundle while run_dir is still present
+    // Generate bundle while run_dir is still present (guard cleans it up after)
     let bundle_result = if fully_verifiable {
         match bundle::generate_bundle(
             &params,
             aggregate,
             proof_status,
             &first_sig,
-            None,
-            None,
+            Some(&request_hash),
+            Some(&prompt_hash),
             &run_dir,
             &config.circuit_dir,
             &config.receipts_dir,
@@ -560,9 +582,6 @@ async fn run_zk_pipeline(
     } else {
         None
     };
-
-    // Clean up per-run work directory
-    let _ = std::fs::remove_dir_all(&run_dir);
 
     Ok(ZkPipelineResult {
         txns_len,
