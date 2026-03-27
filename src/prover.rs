@@ -16,6 +16,8 @@ pub fn generate_batched_prover_toml(
     params: &QueryParams,
     circuit_dir: &Path,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(!batches.is_empty(), "no transaction batches to write to Prover.toml");
+
     let capacity = batches.len() * BATCH_SIZE * 200 + batches.len() * 100 + 512;
     let mut toml = String::with_capacity(capacity);
 

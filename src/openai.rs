@@ -70,7 +70,8 @@ pub async fn query_openai(
 ) -> anyhow::Result<OpenAiResult> {
     let api_key = config_api_key
         .map(|s| s.to_owned())
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.trim().is_empty()))
         .context("OPENAI_API_KEY not set (set via env var or openai_api_key in config.yaml)")?;
 
     let client = Client::new();

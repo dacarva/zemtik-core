@@ -28,6 +28,8 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 echo "[INSTALL] Platform: $OS / $ARCH"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Create ~/.zemtik directory structure
 echo "[INSTALL] Creating ~/.zemtik directory structure..."
 mkdir -p "$ZEMTIK_HOME/circuit"
@@ -51,13 +53,16 @@ fi
 echo "[INSTALL] Installing zemtik binary to $BINARY_DIR..."
 mkdir -p "$BINARY_DIR"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/target/release/zemtik" ]; then
     cp "$SCRIPT_DIR/target/release/zemtik" "$BINARY_DIR/zemtik"
     chmod +x "$BINARY_DIR/zemtik"
     echo "[INSTALL] Copied release binary to $BINARY_DIR/zemtik"
+elif [ -f "$SCRIPT_DIR/zemtik" ]; then
+    cp "$SCRIPT_DIR/zemtik" "$BINARY_DIR/zemtik"
+    chmod +x "$BINARY_DIR/zemtik"
+    echo "[INSTALL] Copied pre-built binary to $BINARY_DIR/zemtik"
 else
-    echo "[INSTALL] No release binary found at target/release/zemtik"
+    echo "[INSTALL] No binary found at target/release/zemtik or alongside install.sh"
     echo "[INSTALL] Build with: cargo build --release"
     echo "[INSTALL] Then re-run this installer."
     exit 1
@@ -68,6 +73,7 @@ CONFIG_FILE="$ZEMTIK_HOME/config.yaml"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "[INSTALL] Creating default config at $CONFIG_FILE..."
     cp "$SCRIPT_DIR/config.example.yaml" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
 fi
 
 # Update PATH in the relevant shell rc file
