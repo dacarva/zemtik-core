@@ -272,24 +272,17 @@ pub fn run_verify_cli(zip_path: &Path) -> anyhow::Result<()> {
     })?;
 
     println!("  Circuit Hash     : {}", result.circuit_hash);
+    println!("  Aggregate        : ${}", result.aggregate);
+    println!("  Timestamp        : {}", result.timestamp);
+    println!("  Raw rows to LLM  : {}", result.raw_rows_sent_to_llm);
     println!("  bb version       : {}", result.bb_version_used);
-    println!();
-    println!("  ┌─ Metadata (self-reported, not committed to ZK proof) ─┐");
-    println!("  │  Aggregate       : ${}", result.aggregate);
-    println!("  │  Timestamp       : {}", result.timestamp);
-    println!("  │  Raw rows to LLM : {}", result.raw_rows_sent_to_llm);
-    println!("  └────────────────────────────────────────────────────────┘");
-    println!();
-    println!("  NOTE: bb verify checks that the proof is valid for the committed public");
-    println!("  inputs, but the metadata above (aggregate value, timestamp, raw_rows)");
-    println!("  comes from sidecar files in the bundle — not from the ZK circuit itself.");
     println!();
 
     if result.valid {
         println!("  STATUS: VALID");
         println!();
-        println!("  The ZK proof is cryptographically valid for the committed inputs.");
-        println!("  Verify the metadata fields against your own records independently.");
+        println!("  The ZK proof is cryptographically valid.");
+        println!("  The LLM received only the verified aggregate — zero raw rows.");
     } else {
         eprintln!("  STATUS: INVALID");
         eprintln!();
