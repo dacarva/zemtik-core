@@ -1,3 +1,4 @@
+use chrono::Utc;
 use serde::Serialize;
 
 /// A single row from the bank's ledger (private circuit witness).
@@ -39,6 +40,7 @@ pub struct SignatureData {
 #[derive(Serialize)]
 pub struct AuditRecord {
     pub timestamp: String,
+    pub bundle_id: Option<String>,
     pub pipeline: PipelineInfo,
     pub zk_proof: ZkProofLog,
     pub openai_request: OpenAiRequestLog,
@@ -113,6 +115,71 @@ pub struct ZkPublicInputs {
 pub struct PrivacyAttestation {
     pub raw_rows_transmitted: u32,
     pub fields_transmitted: Vec<String>,
+}
+
+impl AuditRecord {
+    /// Build a complete AuditRecord, deduplicating construction across CLI and proxy modes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build(
+        bundle_id: Option<String>,
+        txns_len: usize,
+        batch_count: usize,
+        batch_size: usize,
+        params: &QueryParams,
+        aggregate: u64,
+        proof_status: String,
+        circuit_execution_secs: f32,
+        sig: &SignatureData,
+        proof_hex: Option<String>,
+        vk_hex: Option<String>,
+        fully_verifiable: bool,
+        openai_request: OpenAiRequestLog,
+        openai_response: OpenAiResponseLog,
+        total_elapsed_secs: f32,
+    ) -> Self {
+        AuditRecord {
+            timestamp: Utc::now().to_rfc3339(),
+            bundle_id,
+            pipeline: PipelineInfo {
+                total_transaction_count: txns_len,
+                batch_count,
+                batch_size,
+                proof_scheme: "ultra_honk".to_owned(),
+                client_id: params.client_id,
+                query: params.clone(),
+                zk_aggregate: aggregate,
+                proof_status,
+                circuit_execution_secs,
+            },
+            zk_proof: ZkProofLog {
+                proof_hex,
+                verification_key_hex: vk_hex,
+                public_inputs: ZkPublicInputs {
+                    target_category: params.target_category,
+                    start_time: params.start_time,
+                    end_time: params.end_time,
+                    bank_pub_key_x: sig.pub_key_x.clone(),
+                    bank_pub_key_y: sig.pub_key_y.clone(),
+                    verified_aggregate: aggregate,
+                },
+                fully_verifiable,
+            },
+            openai_request,
+            openai_response,
+            privacy_attestation: PrivacyAttestation {
+                raw_rows_transmitted: 0,
+                fields_transmitted: vec![
+                    "category".to_owned(),
+                    "total_spend_usd".to_owned(),
+                    "period_start".to_owned(),
+                    "period_end".to_owned(),
+                    "data_provenance".to_owned(),
+                    "raw_data_transmitted".to_owned(),
+                ],
+            },
+            total_elapsed_secs,
+        }
+    }
 }
 
 /// Enriched result returned by `query_openai`, carrying both the advisory

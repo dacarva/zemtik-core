@@ -1,24 +1,34 @@
 mod audit;
+mod bundle;
 mod db;
 mod openai;
 mod proxy;
 mod prover;
+mod receipts;
 mod types;
+mod verify;
 
 use std::time::Instant;
 
 use chrono::Utc;
-use types::{AuditRecord, PipelineInfo, PrivacyAttestation, QueryParams, ZkProofLog, ZkPublicInputs};
+use types::{OpenAiResponseLog, QueryParams};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env if present (never fails if the file doesn't exist)
     let _ = dotenvy::dotenv();
 
-    // Route to proxy mode if --proxy flag is passed.
+    // Route based on CLI arguments.
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(|s| s.as_str()) == Some("--proxy") {
-        return proxy::run_proxy().await;
+    match args.get(1).map(|s| s.as_str()) {
+        Some("--proxy") => return proxy::run_proxy().await,
+        Some("verify") => {
+            let path = args.get(2).ok_or_else(|| {
+                anyhow::anyhow!("Usage: zemtik verify <bundle.zip>")
+            })?;
+            return verify::run_verify_cli(std::path::Path::new(path));
+        }
+        _ => {} // fall through to default pipeline
     }
 
     println!("╔══════════════════════════════════════════════════╗");
@@ -101,11 +111,6 @@ async fn main() -> anyhow::Result<()> {
 
     // -----------------------------------------------------------------------
     // Step 6: Generate UltraHonk ZK proof
-    //
-    // noir-edwards based EdDSA eliminates the BigField incompatibility with
-    // bb v4.0.0-nightly. CRS is auto-downloaded if missing (~32 MB for this
-    // circuit size). Single-function ACIR (no #[fold]) is compatible with
-    // the ultra_honk scheme.
     // -----------------------------------------------------------------------
     println!("[NOIR] Generating UltraHonk proof (bb v4, CRS auto-download)...");
     let proof_generated = prover::generate_proof()?;
@@ -127,11 +132,50 @@ async fn main() -> anyhow::Result<()> {
         "VERIFIED (nargo execute - all constraints including EdDSA satisfied)"
     };
 
+    let proof_artifacts = prover::read_proof_artifacts()?;
+    let fully_verifiable = proof_artifacts.is_some() && proof_generated;
+    let (proof_hex, vk_hex) = match proof_artifacts {
+        Some((p, v)) => (Some(p), Some(v)),
+        None => (None, None),
+    };
+
+    // -----------------------------------------------------------------------
+    // Step 7b: Generate proof bundle
+    // -----------------------------------------------------------------------
+    let bundle_result = if fully_verifiable {
+        println!("[BUNDLE] Generating proof bundle...");
+        match bundle::generate_bundle(&params, aggregate, proof_status, first_sig, None, None) {
+            Ok(br) => {
+                println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
+                println!("[BUNDLE] ID: {}", br.bundle_id);
+
+                let conn = receipts::open_receipts_db()?;
+                receipts::insert_receipt(
+                    &conn,
+                    &receipts::Receipt {
+                        id: br.bundle_id.clone(),
+                        bundle_path: br.bundle_path.display().to_string(),
+                        proof_status: proof_status.to_owned(),
+                        circuit_hash: br.circuit_hash.clone(),
+                        bb_version: br.bb_version.clone(),
+                        prompt_hash: String::new(),
+                        request_hash: String::new(),
+                        created_at: Utc::now().to_rfc3339(),
+                    },
+                )?;
+                Some(br)
+            }
+            Err(e) => {
+                eprintln!("[BUNDLE] Warning: bundle generation failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // -----------------------------------------------------------------------
     // Step 8: Send ONLY the verified aggregate to OpenAI
-    //
-    // Zero raw transaction rows are included. The LLM receives a JSON payload
-    // whose figures are backed by a mathematically verified ZK proof.
     // -----------------------------------------------------------------------
     println!("\n[AI] Querying gpt-5.4-nano with ZK-verified payload...");
     println!(
@@ -152,58 +196,27 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     let elapsed = total_start.elapsed();
 
-    let proof_artifacts = prover::read_proof_artifacts()?;
-    let fully_verifiable = proof_artifacts.is_some() && proof_generated;
-    let (proof_hex, vk_hex) = match proof_artifacts {
-        Some((p, v)) => (Some(p), Some(v)),
-        None => (None, None),
-    };
-
-    let audit_record = AuditRecord {
-        timestamp: Utc::now().to_rfc3339(),
-        pipeline: PipelineInfo {
-            total_transaction_count: txns.len(),
-            batch_count,
-            batch_size: db::BATCH_SIZE,
-            proof_scheme: "ultra_honk".to_owned(),
-            client_id: params.client_id,
-            query: params.clone(),
-            zk_aggregate: aggregate,
-            proof_status: proof_status.to_owned(),
-            circuit_execution_secs,
-        },
-        zk_proof: ZkProofLog {
-            proof_hex,
-            verification_key_hex: vk_hex,
-            public_inputs: ZkPublicInputs {
-                target_category: params.target_category,
-                start_time: params.start_time,
-                end_time: params.end_time,
-                bank_pub_key_x: first_sig.pub_key_x.clone(),
-                bank_pub_key_y: first_sig.pub_key_y.clone(),
-                verified_aggregate: aggregate,
-            },
-            fully_verifiable,
-        },
-        openai_request: ai_result.request_log,
-        openai_response: types::OpenAiResponseLog {
+    let audit_record = types::AuditRecord::build(
+        bundle_result.as_ref().map(|b| b.bundle_id.clone()),
+        txns.len(),
+        batch_count,
+        db::BATCH_SIZE,
+        &params,
+        aggregate,
+        proof_status.to_owned(),
+        circuit_execution_secs,
+        first_sig,
+        proof_hex,
+        vk_hex,
+        fully_verifiable,
+        ai_result.request_log,
+        OpenAiResponseLog {
             content: ai_result.content.clone(),
             model: ai_result.model,
             usage: ai_result.usage,
         },
-        privacy_attestation: PrivacyAttestation {
-            raw_rows_transmitted: 0,
-            fields_transmitted: vec![
-                "category".to_owned(),
-                "total_spend_usd".to_owned(),
-                "period_start".to_owned(),
-                "period_end".to_owned(),
-                "data_provenance".to_owned(),
-                "raw_data_transmitted".to_owned(),
-            ],
-        },
-        total_elapsed_secs: elapsed.as_secs_f32(),
-    };
+        elapsed.as_secs_f32(),
+    );
 
     let audit_path = audit::write_audit_record(&audit_record)?;
 
@@ -218,6 +231,12 @@ async fn main() -> anyhow::Result<()> {
     println!("  Aggregate: ${}", aggregate);
     println!("  ZK Proof : {}", proof_status);
     println!("  Raw rows sent to OpenAI: 0");
+
+    if let Some(ref br) = bundle_result {
+        println!("  Bundle   : {}", br.bundle_path.display());
+        println!("  Verify   : zemtik verify {}", br.bundle_path.display());
+    }
+
     println!("\n  AI Advisory (gpt-5.4-nano):");
     for line in ai_result.content.lines() {
         println!("  {}", line);

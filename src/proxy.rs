@@ -2,26 +2,31 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{any, post};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use rusqlite::Connection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 
 use crate::types::{
-    AuditRecord, OpenAiRequestLog, OpenAiResponseLog, PipelineInfo, PrivacyAttestation, QueryParams,
-    SignatureData, TokenUsage, ZkProofLog, ZkPublicInputs,
+    AuditRecord, OpenAiRequestLog, OpenAiResponseLog, QueryParams, SignatureData, TokenUsage,
 };
-use crate::{audit, db, prover};
+use crate::{audit, bundle, db, prover, receipts};
 
 const PROXY_PORT: u16 = 4000;
 const OPENAI_BASE_URL: &str = "https://api.openai.com";
 
 struct ProxyState {
     http_client: reqwest::Client,
+    /// Serializes ZK pipeline executions — the circuit uses shared files in circuit/.
+    pipeline_lock: tokio::sync::Mutex<()>,
+    /// File-based receipts DB (~/.zemtik/receipts.db), shared across requests.
+    receipts_db: tokio::sync::Mutex<Connection>,
 }
 
 // Results returned from the blocking ZK pipeline.
@@ -39,12 +44,16 @@ struct ZkPipelineResult {
 
 /// Entry point for proxy mode. Starts Axum on localhost:4000.
 pub async fn run_proxy() -> anyhow::Result<()> {
+    let receipts_conn = receipts::open_receipts_db().context("open receipts DB")?;
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
+        pipeline_lock: tokio::sync::Mutex::new(()),
+        receipts_db: tokio::sync::Mutex::new(receipts_conn),
     });
 
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/verify/{id}", get(handle_verify))
         .route("/{*path}", any(handle_passthrough))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -64,6 +73,7 @@ pub async fn run_proxy() -> anyhow::Result<()> {
         "[PROXY] Point your app to http://localhost:{} instead of api.openai.com",
         PROXY_PORT
     );
+    println!("[PROXY] Verify receipts at http://localhost:{}/verify/<bundle-id>", PROXY_PORT);
     println!();
 
     axum::serve(listener, app).await?;
@@ -92,7 +102,22 @@ async fn handle_chat_completions(
             ))
         })?;
 
+    // Compute request_hash and prompt_hash BEFORE spawn_blocking, from the original body.
+    let request_hash = hex::encode(Sha256::digest(
+        &serde_json::to_vec(&body).context("serialize request body for hashing").map_err(ProxyError)?,
+    ));
+    let prompt_hash = hex::encode(Sha256::digest(
+        &serde_json::to_vec(&body["messages"])
+            .context("serialize messages for hashing")
+            .map_err(ProxyError)?,
+    ));
+
     println!("[ZK] Request intercepted → starting ZK pipeline");
+
+    // -----------------------------------------------------------------------
+    // Acquire pipeline lock — only one ZK pipeline at a time (circuit/ is shared).
+    // -----------------------------------------------------------------------
+    let _pipeline_guard = state.pipeline_lock.lock().await;
 
     // -----------------------------------------------------------------------
     // Run ZK pipeline in a blocking thread.
@@ -116,6 +141,62 @@ async fn handle_chat_completions(
         "[ZK] Verified {} spend = ${} ({:.2}s circuit, proof: {})",
         "AWS Infrastructure", zk.aggregate, zk.circuit_execution_secs, zk.proof_status
     );
+
+    // -----------------------------------------------------------------------
+    // Generate proof bundle (if fully verifiable).
+    // -----------------------------------------------------------------------
+    let params = QueryParams {
+        client_id: 123,
+        target_category: db::CAT_AWS,
+        category_name: "AWS Infrastructure",
+        start_time: db::Q1_START,
+        end_time: db::Q1_END,
+    };
+
+    let bundle_result = if zk.fully_verifiable {
+        match bundle::generate_bundle(
+            &params,
+            zk.aggregate,
+            zk.proof_status,
+            &zk.first_sig,
+            Some(&request_hash),
+            Some(&prompt_hash),
+        ) {
+            Ok(br) => {
+                println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
+                println!("[BUNDLE] ID: {}", br.bundle_id);
+
+                // Insert into receipts DB
+                let db_guard = state.receipts_db.lock().await;
+                if let Err(e) = receipts::insert_receipt(
+                    &db_guard,
+                    &receipts::Receipt {
+                        id: br.bundle_id.clone(),
+                        bundle_path: br.bundle_path.display().to_string(),
+                        proof_status: zk.proof_status.to_owned(),
+                        circuit_hash: br.circuit_hash.clone(),
+                        bb_version: br.bb_version.clone(),
+                        prompt_hash: prompt_hash.clone(),
+                        request_hash: request_hash.clone(),
+                        created_at: Utc::now().to_rfc3339(),
+                    },
+                ) {
+                    eprintln!("[BUNDLE] Failed to insert receipt: {}", e);
+                    // Delete the orphaned bundle
+                    let _ = std::fs::remove_file(&br.bundle_path);
+                    None
+                } else {
+                    Some(br)
+                }
+            }
+            Err(e) => {
+                eprintln!("[BUNDLE] Bundle generation failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // -----------------------------------------------------------------------
     // Replace the last user message with the ZK-verified payload.
@@ -212,47 +293,26 @@ async fn handle_chat_completions(
         })
         .unwrap_or((0, 0, 0));
 
-    let params = QueryParams {
-        client_id: 123,
-        target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure",
-        start_time: db::Q1_START,
-        end_time: db::Q1_END,
-    };
-
-    let audit_record = AuditRecord {
-        timestamp: Utc::now().to_rfc3339(),
-        pipeline: PipelineInfo {
-            total_transaction_count: zk.txns_len,
-            batch_count: zk.batch_count,
-            batch_size: db::BATCH_SIZE,
-            proof_scheme: "ultra_honk".to_owned(),
-            client_id: params.client_id,
-            query: params.clone(),
-            zk_aggregate: zk.aggregate,
-            proof_status: zk.proof_status.to_owned(),
-            circuit_execution_secs: zk.circuit_execution_secs,
-        },
-        zk_proof: ZkProofLog {
-            proof_hex: zk.proof_hex,
-            verification_key_hex: zk.vk_hex,
-            public_inputs: ZkPublicInputs {
-                target_category: params.target_category,
-                start_time: params.start_time,
-                end_time: params.end_time,
-                bank_pub_key_x: zk.first_sig.pub_key_x,
-                bank_pub_key_y: zk.first_sig.pub_key_y,
-                verified_aggregate: zk.aggregate,
-            },
-            fully_verifiable: zk.fully_verifiable,
-        },
-        openai_request: OpenAiRequestLog {
+    let audit_record = AuditRecord::build(
+        bundle_result.as_ref().map(|b| b.bundle_id.clone()),
+        zk.txns_len,
+        zk.batch_count,
+        db::BATCH_SIZE,
+        &params,
+        zk.aggregate,
+        zk.proof_status.to_owned(),
+        zk.circuit_execution_secs,
+        &zk.first_sig,
+        zk.proof_hex,
+        zk.vk_hex,
+        zk.fully_verifiable,
+        OpenAiRequestLog {
             model: model.clone(),
             system_prompt: "[forwarded from client]".to_owned(),
             user_message: zk_message,
             max_completion_tokens: 0,
         },
-        openai_response: OpenAiResponseLog {
+        OpenAiResponseLog {
             content: content.clone(),
             model: resp_model,
             usage: TokenUsage {
@@ -261,19 +321,8 @@ async fn handle_chat_completions(
                 total_tokens,
             },
         },
-        privacy_attestation: PrivacyAttestation {
-            raw_rows_transmitted: 0,
-            fields_transmitted: vec![
-                "category".to_owned(),
-                "total_spend_usd".to_owned(),
-                "period_start".to_owned(),
-                "period_end".to_owned(),
-                "data_provenance".to_owned(),
-                "raw_data_transmitted".to_owned(),
-            ],
-        },
-        total_elapsed_secs: elapsed.as_secs_f32(),
-    };
+        elapsed.as_secs_f32(),
+    );
 
     if let Ok(audit_path) = audit::write_audit_record(&audit_record) {
         println!("[ZK] Audit record: {}", audit_path.display());
@@ -284,11 +333,161 @@ async fn handle_chat_completions(
         elapsed.as_secs_f32()
     );
 
-    Ok((
+    // Build response with optional bundle headers
+    let mut response = (
         StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
         Json(resp_body),
     )
-        .into_response())
+        .into_response();
+
+    if let Some(ref br) = bundle_result {
+        if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
+            response.headers_mut().insert("x-zemtik-bundle-id", val);
+        }
+        let verify_url = format!("http://localhost:{}/verify/{}", PROXY_PORT, br.bundle_id);
+        if let Ok(val) = HeaderValue::from_str(&verify_url) {
+            response.headers_mut().insert("x-zemtik-verify-url", val);
+        }
+    }
+
+    Ok(response)
+}
+
+/// Serve the /verify/:id page — server-rendered HTML receipt.
+async fn handle_verify(
+    State(state): State<Arc<ProxyState>>,
+    Path(id): Path<String>,
+) -> Result<Response, ProxyError> {
+    let db_guard = state.receipts_db.lock().await;
+    let receipt = receipts::get_receipt(&db_guard, &id).map_err(ProxyError)?;
+    drop(db_guard);
+
+    match receipt {
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Html(render_not_found(&id)),
+        )
+            .into_response()),
+        Some(r) => {
+            // Read public_inputs_readable.json from the bundle for aggregate + params
+            let readable = read_public_inputs_from_bundle(&r.bundle_path);
+            Ok(Html(render_verify_page(&r, readable.as_ref())).into_response())
+        }
+    }
+}
+
+/// Read public_inputs_readable.json from a bundle ZIP.
+fn read_public_inputs_from_bundle(bundle_path: &str) -> Option<serde_json::Value> {
+    let file = std::fs::File::open(bundle_path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut entry = archive.by_name("public_inputs_readable.json").ok()?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut entry, &mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value>) -> String {
+    let (badge_color, status_label) = if r.proof_status.starts_with("VALID") {
+        ("#22c55e", "VALID")
+    } else {
+        ("#ef4444", "INVALID")
+    };
+
+    let aggregate = readable
+        .and_then(|v| v.get("verified_aggregate"))
+        .and_then(|v| v.as_u64())
+        .map(|n| format!("${}", n))
+        .unwrap_or_else(|| "—".to_owned());
+
+    let category = readable
+        .and_then(|v| v.get("target_category"))
+        .and_then(|v| v.as_u64())
+        .map(|n| match n {
+            1 => "Payroll".to_owned(),
+            2 => "AWS Infrastructure".to_owned(),
+            3 => "Coffee & Meals".to_owned(),
+            _ => format!("Category {}", n),
+        })
+        .unwrap_or_else(|| "—".to_owned());
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zemtik Receipt — {id}</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 700px; margin: 48px auto; padding: 0 24px; color: #1a1a1a; }}
+  h1 {{ font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }}
+  .subtitle {{ color: #666; font-size: 0.9rem; margin-bottom: 32px; }}
+  .badge {{ display: inline-block; padding: 6px 18px; border-radius: 6px; font-weight: 700;
+            font-size: 1.1rem; color: white; background: {badge_color}; margin-bottom: 24px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; }}
+  td {{ padding: 10px 0; border-bottom: 1px solid #e5e5e5; vertical-align: top; }}
+  td:first-child {{ font-weight: 600; width: 200px; color: #444; }}
+  .mono {{ font-family: monospace; font-size: 0.85rem; word-break: break-all; }}
+  .footer {{ margin-top: 32px; font-size: 0.8rem; color: #999; }}
+  @media print {{ .footer {{ display: none; }} }}
+</style>
+</head>
+<body>
+<h1>Zemtik Cryptographic Receipt</h1>
+<p class="subtitle">Independent ZK proof verification — no raw data was transmitted to the LLM</p>
+
+<div class="badge">{status_label}</div>
+
+<table>
+  <tr><td>Bundle ID</td><td class="mono">{id}</td></tr>
+  <tr><td>Verified Aggregate</td><td><strong>{aggregate}</strong></td></tr>
+  <tr><td>Category</td><td>{category}</td></tr>
+  <tr><td>Proof Status</td><td>{proof_status}</td></tr>
+  <tr><td>Circuit Hash</td><td class="mono">{circuit_hash}</td></tr>
+  <tr><td>bb Version</td><td class="mono">{bb_version}</td></tr>
+  <tr><td>Generated At</td><td>{created_at}</td></tr>
+  <tr><td>Raw Rows to LLM</td><td>0</td></tr>
+</table>
+
+<p class="footer">
+  Verify this receipt independently: <code>zemtik verify &lt;bundle.zip&gt;</code><br>
+  Requires only the <code>bb</code> binary (Barretenberg ≥ v4).
+</p>
+</body>
+</html>"#,
+        id = html_escape(&r.id),
+        badge_color = badge_color,
+        status_label = status_label,
+        aggregate = aggregate,
+        category = category,
+        proof_status = html_escape(&r.proof_status),
+        circuit_hash = html_escape(&r.circuit_hash),
+        bb_version = html_escape(&r.bb_version),
+        created_at = html_escape(&r.created_at),
+    )
+}
+
+fn render_not_found(id: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Receipt not found</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:600px;margin:80px auto;padding:0 24px;color:#1a1a1a;}}</style>
+</head>
+<body>
+<h1>Receipt not found</h1>
+<p>No receipt with ID <code>{}</code> exists in this Zemtik instance.</p>
+<p style="color:#999;font-size:0.9rem">The bundle may have been generated on a different machine or the receipts database may have been reset.</p>
+</body>
+</html>"#,
+        html_escape(id)
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Run the full ZK pipeline (DB → sign → circuit → proof) on the current thread.
@@ -342,7 +541,11 @@ async fn run_zk_pipeline() -> anyhow::Result<ZkPipelineResult> {
         "VERIFIED (nargo execute - all constraints including EdDSA satisfied)"
     };
 
-    let first_sig = batches.into_iter().next().map(|(_, sig)| sig).unwrap();
+    let first_sig = batches
+        .into_iter()
+        .next()
+        .map(|(_, sig)| sig)
+        .context("no signed batches produced — zero transactions matched the query")?;
 
     let proof_artifacts = prover::read_proof_artifacts().context("read proof artifacts")?;
     let fully_verifiable = proof_artifacts.is_some() && proof_generated;
