@@ -1,16 +1,5 @@
 # TODOS
 
-## P1 — Deferred from plan
-
-### Demo video script (docs/DEMO-SCRIPT.md)
-- **What:** Create `docs/DEMO-SCRIPT.md` — 2:30 demo video script showing the proxy intercepting an OpenAI call with ZK pipeline.
-- **Why:** Planned deliverable for YC application (plan: synthetic-marinating-bengio.md, Task 3.2). Deferred from initial open source release.
-- **How to apply:** Sections: Problem (0:00–0:15) → Solution (0:15–0:30) → Start proxy (0:30–0:45) → Live query (0:45–1:45) → Audit record (1:45–2:05) → Commercial boundary (2:05–2:25) → Close (2:25–2:30).
-- **Effort:** S (human) → S (CC+gstack)
-- **Deferred:** feat/verifier-flow ship 2026-03-26
-
----
-
 ## P2 — Blocking for productized distribution
 
 ### CIRCUIT_DIR configurable
