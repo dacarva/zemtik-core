@@ -32,7 +32,7 @@ This creates `~/.zemtik/` and installs the binary.
 ## Step 3 — Copy the circuit (~1 min)
 
 ```sh
-cp -r circuit ~/.zemtik/circuit
+cp -r circuit/. ~/.zemtik/circuit/
 ```
 
 The circuit directory contains the Noir source and gets compiled on first run.
