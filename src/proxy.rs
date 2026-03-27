@@ -439,14 +439,26 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
 
 <table>
   <tr><td>Bundle ID</td><td class="mono">{id}</td></tr>
-  <tr><td>Verified Aggregate</td><td><strong>{aggregate}</strong></td></tr>
-  <tr><td>Category</td><td>{category}</td></tr>
   <tr><td>Proof Status</td><td>{proof_status}</td></tr>
   <tr><td>Circuit Hash</td><td class="mono">{circuit_hash}</td></tr>
   <tr><td>bb Version</td><td class="mono">{bb_version}</td></tr>
   <tr><td>Generated At</td><td>{created_at}</td></tr>
-  <tr><td>Raw Rows to LLM</td><td>0</td></tr>
 </table>
+
+<details style="margin:1.5rem 0;padding:1rem;background:#fffbe6;border:1px solid #f0c040;border-radius:8px;">
+  <summary style="cursor:pointer;font-weight:600;color:#856404;">ℹ Metadata transparency note</summary>
+  <p style="margin:.75rem 0 0;font-size:.9rem;color:#555;">
+    The fields below come from sidecar files in the proof bundle and are
+    <strong>self-reported</strong> — they are <em>not</em> committed to the ZK circuit.
+    Only the proof status and circuit hash above are cryptographically verified by <code>bb verify</code>.
+    Cross-check the aggregate and raw-rows count against your own records independently.
+  </p>
+  <table style="margin-top:.75rem;width:100%">
+    <tr><td>Reported Aggregate</td><td><strong>{aggregate}</strong></td></tr>
+    <tr><td>Category</td><td>{category}</td></tr>
+    <tr><td>Raw Rows to LLM</td><td>0</td></tr>
+  </table>
+</details>
 
 <p class="footer">
   Verify this receipt independently: <code>zemtik verify &lt;bundle.zip&gt;</code><br>
@@ -541,7 +553,11 @@ async fn run_zk_pipeline() -> anyhow::Result<ZkPipelineResult> {
         "VERIFIED (nargo execute - all constraints including EdDSA satisfied)"
     };
 
-    let first_sig = batches.into_iter().next().map(|(_, sig)| sig).unwrap();
+    let first_sig = batches
+        .into_iter()
+        .next()
+        .map(|(_, sig)| sig)
+        .context("no signed batches produced — zero transactions matched the query")?;
 
     let proof_artifacts = prover::read_proof_artifacts().context("read proof artifacts")?;
     let fully_verifiable = proof_artifacts.is_some() && proof_generated;

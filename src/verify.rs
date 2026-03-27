@@ -40,20 +40,43 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
         let mut archive = zip::ZipArchive::new(file)
             .with_context(|| format!("parse zip {}", zip_path.display()))?;
 
+        // Guard against zip bombs: abort if the archive is unreasonably large.
+        const MAX_ENTRIES: usize = 64;
+        const MAX_EXTRACTED_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
+        if archive.len() > MAX_ENTRIES {
+            anyhow::bail!(
+                "bundle has {} entries (max {}); refusing to extract",
+                archive.len(),
+                MAX_ENTRIES
+            );
+        }
+        let mut total_extracted: u64 = 0;
+
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).context("read zip entry")?;
             let name = entry.name().to_owned();
             // Strip directory components to prevent zip-slip path traversal.
             // A malicious bundle with entries like "../../.ssh/authorized_keys"
             // would otherwise escape the temp directory.
-            let filename = std::path::Path::new(&name)
-                .file_name()
-                .with_context(|| format!("zip entry '{}' has no filename component", name))?;
+            // Directory entries (names ending in '/') have no filename component
+            // and must be skipped rather than treated as errors — many ZIP tools
+            // emit them automatically.
+            let filename = match std::path::Path::new(&name).file_name() {
+                Some(f) => f.to_owned(),
+                None => continue, // directory entry — skip
+            };
             let out_path = extract_dir.join(filename);
             let mut out_file = std::fs::File::create(&out_path)
                 .with_context(|| format!("create {}", out_path.display()))?;
-            std::io::copy(&mut entry, &mut out_file)
+            let written = std::io::copy(&mut entry, &mut out_file)
                 .with_context(|| format!("extract {}", name))?;
+            total_extracted += written;
+            if total_extracted > MAX_EXTRACTED_BYTES {
+                anyhow::bail!(
+                    "bundle extraction exceeded {} MiB limit; aborting",
+                    MAX_EXTRACTED_BYTES / (1024 * 1024)
+                );
+            }
         }
 
         // Read metadata files
@@ -105,6 +128,12 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
                 .arg("--version")
                 .output()
                 .context("bb not found — install Barretenberg (bb) to verify proofs")?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "bb --version exited with status {} — check your Barretenberg installation",
+                    out.status
+                );
+            }
             String::from_utf8_lossy(&out.stdout).trim().to_owned()
         };
 
@@ -243,17 +272,24 @@ pub fn run_verify_cli(zip_path: &Path) -> anyhow::Result<()> {
     })?;
 
     println!("  Circuit Hash     : {}", result.circuit_hash);
-    println!("  Aggregate        : ${}", result.aggregate);
-    println!("  Timestamp        : {}", result.timestamp);
-    println!("  Raw rows to LLM  : {}", result.raw_rows_sent_to_llm);
     println!("  bb version       : {}", result.bb_version_used);
+    println!();
+    println!("  ┌─ Metadata (self-reported, not committed to ZK proof) ─┐");
+    println!("  │  Aggregate       : ${}", result.aggregate);
+    println!("  │  Timestamp       : {}", result.timestamp);
+    println!("  │  Raw rows to LLM : {}", result.raw_rows_sent_to_llm);
+    println!("  └────────────────────────────────────────────────────────┘");
+    println!();
+    println!("  NOTE: bb verify checks that the proof is valid for the committed public");
+    println!("  inputs, but the metadata above (aggregate value, timestamp, raw_rows)");
+    println!("  comes from sidecar files in the bundle — not from the ZK circuit itself.");
     println!();
 
     if result.valid {
         println!("  STATUS: VALID");
         println!();
-        println!("  The ZK proof is cryptographically valid.");
-        println!("  The LLM received only the verified aggregate — zero raw rows.");
+        println!("  The ZK proof is cryptographically valid for the committed inputs.");
+        println!("  Verify the metadata fields against your own records independently.");
     } else {
         eprintln!("  STATUS: INVALID");
         eprintln!();
