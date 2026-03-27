@@ -24,3 +24,4 @@ audit/
 # Debugging
 *.log
 debug/
+.gstack/
