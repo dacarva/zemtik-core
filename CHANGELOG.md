@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-03-27
+
+### Added
+- **Distribution** — `install.sh` one-shot installer, `demo/demo.sh` end-to-end walkthrough,
+  `demo/README.md` 30-minute deploy guide, `demo/sample_transactions.csv` (500 deterministic rows),
+  `config.example.yaml` reference config with all supported fields documented
+- **Config system** (`src/config.rs`) — layered config (defaults → `~/.zemtik/config.yaml` → env
+  vars → CLI flags); tilde expansion for all path fields; `AppConfig::load` replaces scattered
+  `std::env::var` lookups; 5 unit tests covering all override layers
+- **`--version` / `-V` flag** — `zemtik --version` prints `zemtik 0.2.1` and exits cleanly
+- **GitHub Actions release pipeline** (`.github/workflows/release.yml`) — triggered on `v*` tags;
+  cross-compiles for x86_64/aarch64 Linux+macOS; multiarch OpenSSL setup for `aarch64-unknown-linux-gnu`
+- **Test coverage** lifted from 57% to 93%: 11 new unit tests across `db.rs`, `prover.rs`, and `keys.rs`
+  covering `fr_to_decimal`, `compute_tx_commitment`, `hex_output_to_u64`, `generate_batched_prover_toml`,
+  `read_proof_artifacts`, and key generation
+
+### Fixed
+- **`bank_sk` file permissions** — signing key now written with mode `0600` (owner-only) instead of
+  umask-derived `0644`; prevents local users from reading the bank signing key
+- **`openai_api_key` in config** — `openai_api_key` field in `config.yaml` now actually used at
+  runtime (proxy falls back to it after Authorization header and `OPENAI_API_KEY` env var;
+  CLI pipeline passes it directly to `query_openai`)
+- **`anyhow::ensure!` in `sign_transaction_batches`** — replaced `assert_eq!` with `anyhow::ensure!`
+  to return a proper error instead of panicking in a blocking thread context
+- **Proof run directory cleanup** — `RunDirGuard` (RAII `Drop` impl) in both `main.rs` and `proxy.rs`
+  ensures per-run work directories are removed on all exit paths including errors
+- **Bundle audit trail** — proxy now discards bundle and removes its ZIP file if `insert_receipt`
+  fails, so no orphaned bundles are emitted without a DB record
+- **Request/prompt hashes** — `generate_bundle` in proxy now receives actual `request_hash` /
+  `prompt_hash` instead of `None, None`
+- **`demo/README.md` circuit copy** — fixed double-nesting bug (`cp -r circuit` → `cp -r circuit/.`)
+
 ## [0.2.0] - 2026-03-26
 
 ### Added

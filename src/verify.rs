@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Context;
+use num_bigint::BigUint;
 use uuid::Uuid;
 
 use crate::bundle::parse_bb_version;
@@ -122,6 +123,9 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
             }
         }
 
+        // Cross-verify binary public_inputs against the human-readable sidecar
+        cross_verify_sidecar(&extract_dir)?;
+
         // Check bb version compatibility
         let local_bb_raw = {
             let out = Command::new("bb")
@@ -190,6 +194,7 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use tempfile::tempdir;
     use zip::write::SimpleFileOptions;
 
     /// Regression: ISSUE-001 — zip-slip path traversal in verify_bundle
@@ -255,6 +260,208 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
     }
+
+    // -----------------------------------------------------------------------
+    // cross_verify_sidecar tests
+    // -----------------------------------------------------------------------
+
+    fn write_cross_verify_fixtures(
+        dir: &std::path::Path,
+        binary: &[u8; 192],
+        pk_x_decimal: &str,
+        pk_y_decimal: &str,
+        category: u64,
+        start: u64,
+        end: u64,
+        aggregate: u64,
+    ) {
+        std::fs::write(dir.join("public_inputs"), binary).unwrap();
+        let json = serde_json::json!({
+            "target_category": category,
+            "start_time": start,
+            "end_time": end,
+            "bank_pub_key_x": pk_x_decimal,
+            "bank_pub_key_y": pk_y_decimal,
+            "verified_aggregate": aggregate
+        });
+        std::fs::write(
+            dir.join("public_inputs_readable.json"),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn valid_proof_and_sidecar_match_passes() {
+        let dir = tempdir().unwrap();
+        let pk_x = [0u8; 32];
+        let pk_y = [0u8; 32];
+        let binary = super::build_public_inputs_binary(2, 1000, 2000, &pk_x, &pk_y, 42);
+        write_cross_verify_fixtures(dir.path(), &binary, "0", "0", 2, 1000, 2000, 42);
+
+        let result = super::cross_verify_sidecar(dir.path());
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[test]
+    fn mismatched_aggregate_returns_error() {
+        let dir = tempdir().unwrap();
+        let pk_x = [0u8; 32];
+        let pk_y = [0u8; 32];
+        // binary says 42, sidecar says 9999999
+        let binary = super::build_public_inputs_binary(2, 1000, 2000, &pk_x, &pk_y, 42);
+        write_cross_verify_fixtures(dir.path(), &binary, "0", "0", 2, 1000, 2000, 9_999_999);
+
+        let err = super::cross_verify_sidecar(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("mismatch"),
+            "expected 'mismatch' in error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn missing_sidecar_field_returns_error() {
+        let dir = tempdir().unwrap();
+        let pk_x = [0u8; 32];
+        let pk_y = [0u8; 32];
+        let binary = super::build_public_inputs_binary(2, 1000, 2000, &pk_x, &pk_y, 42);
+        std::fs::write(dir.path().join("public_inputs"), &binary).unwrap();
+        // JSON without verified_aggregate
+        let json = serde_json::json!({
+            "target_category": 2,
+            "start_time": 1000,
+            "end_time": 2000,
+            "bank_pub_key_x": "0",
+            "bank_pub_key_y": "0"
+        });
+        std::fs::write(
+            dir.path().join("public_inputs_readable.json"),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        )
+        .unwrap();
+
+        let err = super::cross_verify_sidecar(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("verified_aggregate"),
+            "expected field name in error: {}",
+            err
+        );
+    }
+}
+
+/// Cross-verify the binary `public_inputs` file against `public_inputs_readable.json`.
+///
+/// The binary file encodes 6 × 32-byte big-endian BN254 field elements in this order:
+///   [target_category, start_time, end_time, bank_pub_key_x, bank_pub_key_y, verified_aggregate]
+///
+/// u64 fields (indices 0, 1, 2, 5) must have the first 24 bytes zero; the last 8 are
+/// interpreted as a big-endian u64.
+/// Pubkey fields (indices 3, 4) are compared as BigUint byte representations.
+fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
+    let binary_path = extract_dir.join("public_inputs");
+    let binary = std::fs::read(&binary_path)
+        .with_context(|| format!("read {}", binary_path.display()))?;
+
+    if binary.len() != 192 {
+        anyhow::bail!(
+            "public_inputs has unexpected size: {} bytes (expected 192)",
+            binary.len()
+        );
+    }
+
+    let readable_bytes = std::fs::read(extract_dir.join("public_inputs_readable.json"))
+        .context("read public_inputs_readable.json for cross-verification")?;
+    let readable: serde_json::Value =
+        serde_json::from_slice(&readable_bytes).context("parse public_inputs_readable.json")?;
+
+    // Helper to parse a 32-byte chunk at index i as a u64 (first 24 bytes must be zero).
+    let parse_u64_field = |i: usize, name: &str| -> anyhow::Result<u64> {
+        let chunk = &binary[i * 32..(i + 1) * 32];
+        if chunk[..24].iter().any(|&b| b != 0) {
+            anyhow::bail!(
+                "public inputs mismatch: field '{}' has non-zero high bytes",
+                name
+            );
+        }
+        Ok(u64::from_be_bytes(chunk[24..32].try_into().unwrap()))
+    };
+
+    // Parse the 6 fields
+    let bin_category = parse_u64_field(0, "target_category")?;
+    let bin_start = parse_u64_field(1, "start_time")?;
+    let bin_end = parse_u64_field(2, "end_time")?;
+    let bin_pk_x = BigUint::from_bytes_be(&binary[3 * 32..4 * 32]);
+    let bin_pk_y = BigUint::from_bytes_be(&binary[4 * 32..5 * 32]);
+    let bin_aggregate = parse_u64_field(5, "verified_aggregate")?;
+
+    // Compare against sidecar JSON
+    let get_u64 = |key: &str| -> anyhow::Result<u64> {
+        readable
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("public inputs mismatch: '{}' missing or invalid in sidecar", key))
+    };
+    let get_str = |key: &str| -> anyhow::Result<&str> {
+        readable
+            .get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("public inputs mismatch: '{}' missing or invalid in sidecar", key))
+    };
+
+    let sid_category = get_u64("target_category")?;
+    let sid_start = get_u64("start_time")?;
+    let sid_end = get_u64("end_time")?;
+    let sid_pk_x = BigUint::parse_bytes(get_str("bank_pub_key_x")?.as_bytes(), 10)
+        .ok_or_else(|| anyhow::anyhow!("public inputs mismatch: 'bank_pub_key_x' is not a valid decimal"))?;
+    let sid_pk_y = BigUint::parse_bytes(get_str("bank_pub_key_y")?.as_bytes(), 10)
+        .ok_or_else(|| anyhow::anyhow!("public inputs mismatch: 'bank_pub_key_y' is not a valid decimal"))?;
+    let sid_aggregate = get_u64("verified_aggregate")?;
+
+    if bin_category != sid_category {
+        anyhow::bail!("public inputs mismatch: target_category binary={} sidecar={}", bin_category, sid_category);
+    }
+    if bin_start != sid_start {
+        anyhow::bail!("public inputs mismatch: start_time binary={} sidecar={}", bin_start, sid_start);
+    }
+    if bin_end != sid_end {
+        anyhow::bail!("public inputs mismatch: end_time binary={} sidecar={}", bin_end, sid_end);
+    }
+    if bin_pk_x != sid_pk_x {
+        anyhow::bail!("public inputs mismatch: bank_pub_key_x diverges");
+    }
+    if bin_pk_y != sid_pk_y {
+        anyhow::bail!("public inputs mismatch: bank_pub_key_y diverges");
+    }
+    if bin_aggregate != sid_aggregate {
+        anyhow::bail!("public inputs mismatch: verified_aggregate binary={} sidecar={}", bin_aggregate, sid_aggregate);
+    }
+
+    Ok(())
+}
+
+/// Build a 192-byte public_inputs binary from the 6 BN254 field values.
+/// Each value is encoded as a 32-byte big-endian buffer.
+#[cfg(test)]
+fn build_public_inputs_binary(
+    category: u64,
+    start: u64,
+    end: u64,
+    pk_x: &[u8; 32],
+    pk_y: &[u8; 32],
+    aggregate: u64,
+) -> [u8; 192] {
+    let mut buf = [0u8; 192];
+    let encode_u64 = |val: u64, slot: &mut [u8]| {
+        slot[24..32].copy_from_slice(&val.to_be_bytes());
+    };
+    encode_u64(category, &mut buf[0..32]);
+    encode_u64(start, &mut buf[32..64]);
+    encode_u64(end, &mut buf[64..96]);
+    buf[96..128].copy_from_slice(pk_x);
+    buf[128..160].copy_from_slice(pk_y);
+    encode_u64(aggregate, &mut buf[160..192]);
+    buf
 }
 
 /// CLI entry point for `zemtik verify <bundle.zip>`.

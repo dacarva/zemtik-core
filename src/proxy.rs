@@ -13,23 +13,27 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 
+use crate::config::AppConfig;
 use crate::types::{
     AuditRecord, OpenAiRequestLog, OpenAiResponseLog, QueryParams, SignatureData, TokenUsage,
 };
-use crate::{audit, bundle, db, prover, receipts};
+use crate::{audit, bundle, db, keys, prover, receipts};
 
-const PROXY_PORT: u16 = 4000;
 const OPENAI_BASE_URL: &str = "https://api.openai.com";
 
 struct ProxyState {
     http_client: reqwest::Client,
-    /// Serializes ZK pipeline executions — the circuit uses shared files in circuit/.
+    /// Serializes ZK pipeline executions — the circuit uses shared files in circuit_dir.
     pipeline_lock: tokio::sync::Mutex<()>,
-    /// File-based receipts DB (~/.zemtik/receipts.db), shared across requests.
+    /// File-based receipts DB, shared across requests.
     receipts_db: tokio::sync::Mutex<Connection>,
+    /// Application configuration (ports, paths).
+    config: Arc<AppConfig>,
+    /// Bank signing key bytes (loaded once at startup, passed into spawn_blocking).
+    signing_key_bytes: Vec<u8>,
 }
 
-// Results returned from the blocking ZK pipeline.
+// Results returned from the blocking ZK pipeline (includes optional bundle).
 struct ZkPipelineResult {
     txns_len: usize,
     batch_count: usize,
@@ -40,15 +44,30 @@ struct ZkPipelineResult {
     proof_hex: Option<String>,
     vk_hex: Option<String>,
     fully_verifiable: bool,
+    bundle_result: Option<bundle::BundleResult>,
 }
 
-/// Entry point for proxy mode. Starts Axum on localhost:4000.
-pub async fn run_proxy() -> anyhow::Result<()> {
-    let receipts_conn = receipts::open_receipts_db().context("open receipts DB")?;
+/// Entry point for proxy mode. Starts Axum on the configured port.
+pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
+    // Fail fast: verify circuit directory has all required files before accepting requests.
+    prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
+
+    let config = Arc::new(config);
+
+    let receipts_conn =
+        receipts::open_receipts_db(&config.receipts_db_path).context("open receipts DB")?;
+
+    // Load (or generate) the bank signing key once at startup.
+    let signing_key = keys::load_or_generate_key(&config.keys_dir)
+        .context("load or generate signing key")?;
+    let signing_key_bytes = signing_key.key.to_vec();
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_lock: tokio::sync::Mutex::new(()),
         receipts_db: tokio::sync::Mutex::new(receipts_conn),
+        config: Arc::clone(&config),
+        signing_key_bytes,
     });
 
     let app = Router::new()
@@ -58,7 +77,7 @@ pub async fn run_proxy() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{}", PROXY_PORT);
+    let addr = format!("127.0.0.1:{}", config.proxy_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     println!("╔══════════════════════════════════════════════════╗");
@@ -71,9 +90,12 @@ pub async fn run_proxy() -> anyhow::Result<()> {
     );
     println!(
         "[PROXY] Point your app to http://localhost:{} instead of api.openai.com",
-        PROXY_PORT
+        config.proxy_port
     );
-    println!("[PROXY] Verify receipts at http://localhost:{}/verify/<bundle-id>", PROXY_PORT);
+    println!(
+        "[PROXY] Verify receipts at http://localhost:{}/verify/<bundle-id>",
+        config.proxy_port
+    );
     println!();
 
     axum::serve(listener, app).await?;
@@ -89,22 +111,23 @@ async fn handle_chat_completions(
 ) -> Result<Response, ProxyError> {
     let total_start = Instant::now();
 
-    // Extract the caller's API key from the Authorization header.
     let api_key = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_owned())
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+        .or_else(|| state.config.openai_api_key.clone())
         .ok_or_else(|| {
             ProxyError(anyhow::anyhow!(
-                "No Authorization header and OPENAI_API_KEY not set"
+                "No Authorization header, OPENAI_API_KEY env var, or openai_api_key in config.yaml"
             ))
         })?;
 
-    // Compute request_hash and prompt_hash BEFORE spawn_blocking, from the original body.
     let request_hash = hex::encode(Sha256::digest(
-        &serde_json::to_vec(&body).context("serialize request body for hashing").map_err(ProxyError)?,
+        &serde_json::to_vec(&body)
+            .context("serialize request body for hashing")
+            .map_err(ProxyError)?,
     ));
     let prompt_hash = hex::encode(Sha256::digest(
         &serde_json::to_vec(&body["messages"])
@@ -114,25 +137,19 @@ async fn handle_chat_completions(
 
     println!("[ZK] Request intercepted → starting ZK pipeline");
 
-    // -----------------------------------------------------------------------
-    // Acquire pipeline lock — only one ZK pipeline at a time (circuit/ is shared).
-    // -----------------------------------------------------------------------
     let _pipeline_guard = state.pipeline_lock.lock().await;
 
-    // -----------------------------------------------------------------------
-    // Run ZK pipeline in a blocking thread.
-    //
-    // DbBackend::Sqlite wraps rusqlite::Connection which is !Sync.
-    // &DbBackend is therefore !Send, which prevents holding it across .await
-    // in a multi-threaded Axum runtime. We isolate all DB + ZK work in a
-    // spawn_blocking call with its own single-threaded Tokio runtime.
-    // -----------------------------------------------------------------------
-    let zk = tokio::task::spawn_blocking(|| {
+    let config_clone = Arc::clone(&state.config);
+    let key_bytes = state.signing_key_bytes.clone();
+    let req_hash = request_hash.clone();
+    let prm_hash = prompt_hash.clone();
+
+    let zk = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build local runtime")?;
-        rt.block_on(run_zk_pipeline())
+        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash))
     })
     .await
     .context("ZK blocking task panicked")??;
@@ -142,9 +159,37 @@ async fn handle_chat_completions(
         "AWS Infrastructure", zk.aggregate, zk.circuit_execution_secs, zk.proof_status
     );
 
-    // -----------------------------------------------------------------------
-    // Generate proof bundle (if fully verifiable).
-    // -----------------------------------------------------------------------
+    // Insert bundle into receipts DB if generated; clear it if the insert fails
+    // so we never emit headers pointing to a non-existent bundle.
+    let committed_bundle: Option<&bundle::BundleResult> = if let Some(ref br) = zk.bundle_result {
+        println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
+        println!("[BUNDLE] ID: {}", br.bundle_id);
+
+        let db_guard = state.receipts_db.lock().await;
+        match receipts::insert_receipt(
+            &db_guard,
+            &receipts::Receipt {
+                id: br.bundle_id.clone(),
+                bundle_path: br.bundle_path.display().to_string(),
+                proof_status: zk.proof_status.to_owned(),
+                circuit_hash: br.circuit_hash.clone(),
+                bb_version: br.bb_version.clone(),
+                prompt_hash: prompt_hash.clone(),
+                request_hash: request_hash.clone(),
+                created_at: Utc::now().to_rfc3339(),
+            },
+        ) {
+            Ok(()) => Some(br),
+            Err(e) => {
+                eprintln!("[BUNDLE] Failed to insert receipt — discarding bundle: {}", e);
+                let _ = std::fs::remove_file(&br.bundle_path);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let params = QueryParams {
         client_id: 123,
         target_category: db::CAT_AWS,
@@ -153,55 +198,6 @@ async fn handle_chat_completions(
         end_time: db::Q1_END,
     };
 
-    let bundle_result = if zk.fully_verifiable {
-        match bundle::generate_bundle(
-            &params,
-            zk.aggregate,
-            zk.proof_status,
-            &zk.first_sig,
-            Some(&request_hash),
-            Some(&prompt_hash),
-        ) {
-            Ok(br) => {
-                println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
-                println!("[BUNDLE] ID: {}", br.bundle_id);
-
-                // Insert into receipts DB
-                let db_guard = state.receipts_db.lock().await;
-                if let Err(e) = receipts::insert_receipt(
-                    &db_guard,
-                    &receipts::Receipt {
-                        id: br.bundle_id.clone(),
-                        bundle_path: br.bundle_path.display().to_string(),
-                        proof_status: zk.proof_status.to_owned(),
-                        circuit_hash: br.circuit_hash.clone(),
-                        bb_version: br.bb_version.clone(),
-                        prompt_hash: prompt_hash.clone(),
-                        request_hash: request_hash.clone(),
-                        created_at: Utc::now().to_rfc3339(),
-                    },
-                ) {
-                    eprintln!("[BUNDLE] Failed to insert receipt: {}", e);
-                    // Delete the orphaned bundle
-                    let _ = std::fs::remove_file(&br.bundle_path);
-                    None
-                } else {
-                    Some(br)
-                }
-            }
-            Err(e) => {
-                eprintln!("[BUNDLE] Bundle generation failed: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // -----------------------------------------------------------------------
-    // Replace the last user message with the ZK-verified payload.
-    // Zero raw transaction rows are included.
-    // -----------------------------------------------------------------------
     let zk_payload = serde_json::json!({
         "category": "AWS Infrastructure",
         "total_spend_usd": zk.aggregate,
@@ -233,9 +229,6 @@ async fn handle_chat_completions(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Forward the sanitized request to OpenAI.
-    // -----------------------------------------------------------------------
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
@@ -260,9 +253,6 @@ async fn handle_chat_completions(
         .context("parse OpenAI response")
         .map_err(ProxyError)?;
 
-    // -----------------------------------------------------------------------
-    // Write audit record.
-    // -----------------------------------------------------------------------
     let elapsed = total_start.elapsed();
 
     let content = resp_body
@@ -288,13 +278,15 @@ async fn handle_chat_completions(
                 u.get("completion_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32,
-                u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                u.get("total_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
             )
         })
         .unwrap_or((0, 0, 0));
 
     let audit_record = AuditRecord::build(
-        bundle_result.as_ref().map(|b| b.bundle_id.clone()),
+        committed_bundle.map(|b| b.bundle_id.clone()),
         zk.txns_len,
         zk.batch_count,
         db::BATCH_SIZE,
@@ -333,18 +325,20 @@ async fn handle_chat_completions(
         elapsed.as_secs_f32()
     );
 
-    // Build response with optional bundle headers
     let mut response = (
         StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
         Json(resp_body),
     )
         .into_response();
 
-    if let Some(ref br) = bundle_result {
+    if let Some(br) = committed_bundle {
         if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
             response.headers_mut().insert("x-zemtik-bundle-id", val);
         }
-        let verify_url = format!("http://localhost:{}/verify/{}", PROXY_PORT, br.bundle_id);
+        let verify_url = format!(
+            "http://localhost:{}/verify/{}",
+            state.config.proxy_port, br.bundle_id
+        );
         if let Ok(val) = HeaderValue::from_str(&verify_url) {
             response.headers_mut().insert("x-zemtik-verify-url", val);
         }
@@ -363,20 +357,14 @@ async fn handle_verify(
     drop(db_guard);
 
     match receipt {
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Html(render_not_found(&id)),
-        )
-            .into_response()),
+        None => Ok((StatusCode::NOT_FOUND, Html(render_not_found(&id))).into_response()),
         Some(r) => {
-            // Read public_inputs_readable.json from the bundle for aggregate + params
             let readable = read_public_inputs_from_bundle(&r.bundle_path);
             Ok(Html(render_verify_page(&r, readable.as_ref())).into_response())
         }
     }
 }
 
-/// Read public_inputs_readable.json from a bundle ZIP.
 fn read_public_inputs_from_bundle(bundle_path: &str) -> Option<serde_json::Value> {
     let file = std::fs::File::open(bundle_path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
@@ -490,9 +478,22 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Run the full ZK pipeline (DB → sign → circuit → proof) on the current thread.
+/// RAII guard that removes a per-run work directory on drop (success or error).
+struct RunDirGuard(std::path::PathBuf);
+impl Drop for RunDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run the full ZK pipeline (DB → sign → circuit → proof → bundle).
 /// Called from within spawn_blocking so DbBackend's !Sync is not an issue.
-async fn run_zk_pipeline() -> anyhow::Result<ZkPipelineResult> {
+async fn run_zk_pipeline(
+    config: Arc<AppConfig>,
+    key_bytes: Vec<u8>,
+    request_hash: String,
+    prompt_hash: String,
+) -> anyhow::Result<ZkPipelineResult> {
     let params = QueryParams {
         client_id: 123,
         target_category: db::CAT_AWS,
@@ -512,27 +513,35 @@ async fn run_zk_pipeline() -> anyhow::Result<ZkPipelineResult> {
     let batch_count = txns_len / db::BATCH_SIZE;
     println!("[ZK] Loaded {} transactions ({} batches)", txns_len, batch_count);
 
-    let batches = db::sign_transaction_batches(&txns).context("sign batches")?;
+    let key = db::PrivateKey::import(key_bytes)
+        .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
+    let batches = db::sign_transaction_batches(&txns, &key).context("sign batches")?;
     println!("[ZK] Signed {} batches with BabyJubJub EdDSA", batch_count);
 
-    prover::generate_batched_prover_toml(&batches, &params).context("write Prover.toml")?;
+    prover::generate_batched_prover_toml(&batches, &params, &config.circuit_dir)
+        .context("write Prover.toml")?;
 
-    let circuit_json = std::path::Path::new("circuit/target/zemtik_circuit.json");
+    let circuit_json = config.circuit_dir.join("target/zemtik_circuit.json");
     if !circuit_json.exists() {
         println!("[ZK] Compiling circuit (first run, ~10s)...");
-        prover::compile_circuit().context("compile circuit")?;
+        prover::compile_circuit(&config.circuit_dir).context("compile circuit")?;
     }
 
     println!("[ZK] Executing circuit (EdDSA verification + aggregation)...");
     let circuit_exec_start = Instant::now();
-    let hex_output = prover::execute_circuit().context("execute circuit")?;
+    let hex_output = prover::execute_circuit(&config.circuit_dir).context("execute circuit")?;
     let circuit_execution_secs = circuit_exec_start.elapsed().as_secs_f32();
     let aggregate = prover::hex_output_to_u64(&hex_output).context("parse aggregate")?;
 
     println!("[ZK] Generating UltraHonk proof...");
-    let proof_generated = prover::generate_proof().context("generate proof")?;
+    let run_dir = prover::prepare_run_dir(&config.runs_dir, &config.circuit_dir)
+        .context("prepare run dir")?;
+    // Ensure the run directory is cleaned up regardless of success or error.
+    let _run_dir_guard = RunDirGuard(run_dir.clone());
+
+    let proof_generated = prover::generate_proof(&run_dir).context("generate proof")?;
     let proof_status = if proof_generated {
-        match prover::verify_proof().context("verify proof")? {
+        match prover::verify_proof(&run_dir).context("verify proof")? {
             Some(true) => "VALID (ZK proof generated and verified)",
             Some(false) => anyhow::bail!("Proof verification failed"),
             None => "VERIFIED (nargo execute - circuit constraints satisfied)",
@@ -547,11 +556,34 @@ async fn run_zk_pipeline() -> anyhow::Result<ZkPipelineResult> {
         .map(|(_, sig)| sig)
         .context("no signed batches produced — zero transactions matched the query")?;
 
-    let proof_artifacts = prover::read_proof_artifacts().context("read proof artifacts")?;
+    let proof_artifacts = prover::read_proof_artifacts(&run_dir).context("read proof artifacts")?;
     let fully_verifiable = proof_artifacts.is_some() && proof_generated;
     let (proof_hex, vk_hex) = match proof_artifacts {
         Some((p, v)) => (Some(p), Some(v)),
         None => (None, None),
+    };
+
+    // Generate bundle while run_dir is still present (guard cleans it up after)
+    let bundle_result = if fully_verifiable {
+        match bundle::generate_bundle(
+            &params,
+            aggregate,
+            proof_status,
+            &first_sig,
+            Some(&request_hash),
+            Some(&prompt_hash),
+            &run_dir,
+            &config.circuit_dir,
+            &config.receipts_dir,
+        ) {
+            Ok(br) => Some(br),
+            Err(e) => {
+                eprintln!("[BUNDLE] Bundle generation failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
     };
 
     Ok(ZkPipelineResult {
@@ -564,6 +596,7 @@ async fn run_zk_pipeline() -> anyhow::Result<ZkPipelineResult> {
         proof_hex,
         vk_hex,
         fully_verifiable,
+        bundle_result,
     })
 }
 

@@ -66,10 +66,13 @@ pub async fn query_openai(
     category_name: &str,
     start_date: &str,
     end_date: &str,
+    config_api_key: Option<&str>,
 ) -> anyhow::Result<OpenAiResult> {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_URL"))
-        .context("OPENAI_API_KEY (or OPENAI_API_URL) environment variable not set")?;
+    let api_key = config_api_key
+        .map(|s| s.to_owned())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.trim().is_empty()))
+        .context("OPENAI_API_KEY not set (set via env var or openai_api_key in config.yaml)")?;
 
     let client = Client::new();
 

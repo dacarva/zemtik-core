@@ -1,5 +1,6 @@
 use anyhow::Context;
-use babyjubjub_rs::{Fr, PrivateKey};
+pub use babyjubjub_rs::PrivateKey;
+use babyjubjub_rs::Fr;
 use ff_ce::{PrimeField, PrimeFieldRepr};
 use num_bigint::{BigInt, Sign};
 use poseidon_rs::Poseidon;
@@ -17,13 +18,6 @@ pub const CAT_COFFEE: u64 = 3;
 pub const Q1_START: u64 = 1_704_067_200; // 2024-01-01 00:00:00 UTC
 pub const Q1_END: u64 = 1_711_929_599; // 2024-03-31 23:59:59 UTC
 
-/// Deterministic bank private key seed for the demo.
-/// In production this would come from an HSM/KMS.
-const BANK_SK_SEED: [u8; 32] = [
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f, 0x20,
-];
 
 /// Number of transactions per batch. Must match TX_COUNT in main.nr.
 pub const BATCH_SIZE: usize = 50;
@@ -475,20 +469,19 @@ pub fn compute_tx_commitment(txns: &[Transaction]) -> anyhow::Result<Fr> {
     h(l3)
 }
 
-/// Sign the transaction array with the bank's BabyJubJub EdDSA key.
+/// Sign the transaction array with the provided BabyJubJub EdDSA key.
 ///
 /// Returns all signature components as BN254 decimal strings for Prover.toml.
-pub fn sign_transactions(txns: &[Transaction]) -> anyhow::Result<SignatureData> {
-    let priv_key = PrivateKey::import(BANK_SK_SEED.to_vec())
-        .map_err(|e| anyhow::anyhow!("key import: {}", e))?;
-    let pub_key = priv_key.public();
+#[allow(dead_code)]
+pub fn sign_transactions(txns: &[Transaction], key: &PrivateKey) -> anyhow::Result<SignatureData> {
+    let pub_key = key.public();
 
     let msg_hash_fr = compute_tx_commitment(txns)?;
     let msg_hash_dec = fr_to_decimal(&msg_hash_fr);
     let msg_hash_bigint =
         BigInt::parse_bytes(msg_hash_dec.as_bytes(), 10).expect("decimal string from fr_to_decimal");
 
-    let sig = priv_key
+    let sig = key
         .sign(msg_hash_bigint)
         .map_err(|e| anyhow::anyhow!("EdDSA sign: {}", e))?;
 
@@ -508,17 +501,16 @@ pub fn sign_transactions(txns: &[Transaction]) -> anyhow::Result<SignatureData> 
 /// ready for `generate_batched_prover_toml`.
 pub fn sign_transaction_batches(
     txns: &[Transaction],
+    key: &PrivateKey,
 ) -> anyhow::Result<Vec<(Vec<Transaction>, SignatureData)>> {
-    assert_eq!(
-        txns.len() % BATCH_SIZE,
-        0,
-        "transaction count must be a multiple of BATCH_SIZE ({})",
+    anyhow::ensure!(
+        txns.len() % BATCH_SIZE == 0,
+        "transaction count ({}) must be a multiple of BATCH_SIZE ({})",
+        txns.len(),
         BATCH_SIZE
     );
 
-    let priv_key = PrivateKey::import(BANK_SK_SEED.to_vec())
-        .map_err(|e| anyhow::anyhow!("key import: {}", e))?;
-    let pub_key = priv_key.public();
+    let pub_key = key.public();
 
     let mut batches = Vec::with_capacity(txns.len() / BATCH_SIZE);
 
@@ -528,7 +520,7 @@ pub fn sign_transaction_batches(
         let msg_hash_bigint = BigInt::parse_bytes(msg_hash_dec.as_bytes(), 10)
             .expect("decimal string from fr_to_decimal");
 
-        let sig = priv_key
+        let sig = key
             .sign(msg_hash_bigint)
             .map_err(|e| anyhow::anyhow!("EdDSA sign batch: {}", e))?;
 
@@ -544,4 +536,56 @@ pub fn sign_transaction_batches(
     }
 
     Ok(batches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Transaction;
+
+    fn make_txns(n: usize) -> Vec<Transaction> {
+        (0..n)
+            .map(|i| Transaction { id: i as i64, client_id: 1, amount: i as u64 + 1, category: 2, timestamp: Q1_START + i as u64 })
+            .collect()
+    }
+
+    #[test]
+    fn fr_to_decimal_zero() {
+        let fr = fr_from_u64(0);
+        assert_eq!(fr_to_decimal(&fr), "0");
+    }
+
+    #[test]
+    fn fr_to_decimal_one() {
+        let fr = fr_from_u64(1);
+        assert_eq!(fr_to_decimal(&fr), "1");
+    }
+
+    #[test]
+    fn fr_to_decimal_known_value() {
+        let fr = fr_from_u64(12345);
+        assert_eq!(fr_to_decimal(&fr), "12345");
+    }
+
+    #[test]
+    fn compute_tx_commitment_is_deterministic() {
+        let txns = make_txns(BATCH_SIZE);
+        let h1 = compute_tx_commitment(&txns).unwrap();
+        let h2 = compute_tx_commitment(&txns).unwrap();
+        assert_eq!(fr_to_decimal(&h1), fr_to_decimal(&h2));
+    }
+
+    #[test]
+    fn compute_tx_commitment_differs_for_different_inputs() {
+        let mut txns_a = make_txns(BATCH_SIZE);
+        let txns_b = {
+            let mut b = txns_a.clone();
+            b[0].amount += 1;
+            b
+        };
+        let h_a = compute_tx_commitment(&txns_a).unwrap();
+        let h_b = compute_tx_commitment(&txns_b).unwrap();
+        assert_ne!(fr_to_decimal(&h_a), fr_to_decimal(&h_b));
+        let _ = txns_a; // suppress unused warning
+    }
 }

@@ -1,6 +1,8 @@
 mod audit;
 mod bundle;
+mod config;
 mod db;
+mod keys;
 mod openai;
 mod proxy;
 mod prover;
@@ -8,9 +10,12 @@ mod receipts;
 mod types;
 mod verify;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
+use anyhow::Context;
 use chrono::Utc;
+use config::{CliArgs, Command};
 use types::{OpenAiResponseLog, QueryParams};
 
 #[tokio::main]
@@ -18,18 +23,61 @@ async fn main() -> anyhow::Result<()> {
     // Load .env if present (never fails if the file doesn't exist)
     let _ = dotenvy::dotenv();
 
-    // Route based on CLI arguments.
+    // Parse CLI arguments into CliArgs
     let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(|s| s.as_str()) {
-        Some("--proxy") => return proxy::run_proxy().await,
-        Some("verify") => {
-            let path = args.get(2).ok_or_else(|| {
-                anyhow::anyhow!("Usage: zemtik verify <bundle.zip>")
-            })?;
-            return verify::run_verify_cli(std::path::Path::new(path));
+    let mut cli = CliArgs::default();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--version" | "-V" => {
+                println!("zemtik {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--proxy" => {
+                cli.command = Command::Proxy;
+            }
+            "verify" => {
+                let path = args.get(i + 1).ok_or_else(|| {
+                    anyhow::anyhow!("Usage: zemtik verify <bundle.zip>")
+                })?;
+                cli.command = Command::Verify(PathBuf::from(path));
+                i += 1;
+            }
+            "--port" => {
+                let port_str = args.get(i + 1).ok_or_else(|| {
+                    anyhow::anyhow!("--port requires a value")
+                })?;
+                cli.port = Some(port_str.parse().map_err(|_| {
+                    anyhow::anyhow!("--port value must be a valid port number")
+                })?);
+                i += 1;
+            }
+            "--circuit-dir" => {
+                let dir = args.get(i + 1).ok_or_else(|| {
+                    anyhow::anyhow!("--circuit-dir requires a value")
+                })?;
+                cli.circuit_dir = Some(PathBuf::from(dir));
+                i += 1;
+            }
+            _ => {}
         }
-        _ => {} // fall through to default pipeline
+        i += 1;
     }
+
+    let app_config = config::AppConfig::load(&cli)?;
+
+    match cli.command {
+        Command::Proxy => return proxy::run_proxy(app_config).await,
+        Command::Verify(ref path) => {
+            return verify::run_verify_cli(path);
+        }
+        Command::Pipeline => {} // fall through to default pipeline
+    }
+
+    // Fail fast: verify circuit directory before starting the pipeline.
+    prover::validate_circuit_dir(&app_config.circuit_dir)
+        .context("circuit directory validation")?;
 
     println!("╔══════════════════════════════════════════════════╗");
     println!("║   Zemtik: ZK Middleware POC (Rust + Noir + AI)   ║");
@@ -61,14 +109,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 2: Bank KMS signs each batch independently with BabyJubJub EdDSA
+    // Step 2: Load (or generate) the installation-specific bank signing key
+    // -----------------------------------------------------------------------
+    let bank_key = keys::load_or_generate_key(&app_config.keys_dir)?;
+
+    // -----------------------------------------------------------------------
+    // Step 3: Bank KMS signs each batch independently with BabyJubJub EdDSA
     // -----------------------------------------------------------------------
     print!(
         "[KMS] Signing {} batches of {} transactions with BabyJubJub EdDSA... ",
         batch_count,
         db::BATCH_SIZE
     );
-    let batches = db::sign_transaction_batches(&txns)?;
+    let batches = db::sign_transaction_batches(&txns, &bank_key)?;
     println!("OK");
     let first_sig = &batches[0].1;
     println!(
@@ -78,25 +131,25 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // -----------------------------------------------------------------------
-    // Step 3: Generate the Prover.toml input file for the Noir circuit
+    // Step 4: Generate the Prover.toml input file for the Noir circuit
     // -----------------------------------------------------------------------
     print!("[NOIR] Writing Prover.toml ({} batches)... ", batch_count);
-    prover::generate_batched_prover_toml(&batches, &params)?;
+    prover::generate_batched_prover_toml(&batches, &params, &app_config.circuit_dir)?;
     println!("OK");
 
     // -----------------------------------------------------------------------
-    // Step 4: Compile the Noir circuit (cached after first run)
+    // Step 5: Compile the Noir circuit (cached after first run)
     // -----------------------------------------------------------------------
-    let circuit_json = std::path::Path::new("circuit/target/zemtik_circuit.json");
+    let circuit_json = app_config.circuit_dir.join("target/zemtik_circuit.json");
     if !circuit_json.exists() {
         print!("[NOIR] Compiling circuit (first run only)... ");
-        prover::compile_circuit()?;
+        prover::compile_circuit(&app_config.circuit_dir)?;
     } else {
         println!("[NOIR] Circuit already compiled, skipping nargo compile");
     }
 
     // -----------------------------------------------------------------------
-    // Step 5: Execute the circuit -- verifies all EdDSA signatures and
+    // Step 6: Execute the circuit — verifies all EdDSA signatures and
     // aggregates spend across all batches
     // -----------------------------------------------------------------------
     println!(
@@ -104,22 +157,27 @@ async fn main() -> anyhow::Result<()> {
         batch_count
     );
     let circuit_exec_start = Instant::now();
-    let hex_output = prover::execute_circuit()?;
+    let hex_output = prover::execute_circuit(&app_config.circuit_dir)?;
     let circuit_execution_secs = circuit_exec_start.elapsed().as_secs_f32();
     let aggregate = prover::hex_output_to_u64(&hex_output)?;
     println!("[NOIR] Verified aggregate {} spend = ${}", params.category_name, aggregate);
 
     // -----------------------------------------------------------------------
-    // Step 6: Generate UltraHonk ZK proof
+    // Step 7: Prepare per-run work directory and generate UltraHonk ZK proof
     // -----------------------------------------------------------------------
     println!("[NOIR] Generating UltraHonk proof (bb v4, CRS auto-download)...");
-    let proof_generated = prover::generate_proof()?;
+    let run_dir = prover::prepare_run_dir(&app_config.runs_dir, &app_config.circuit_dir)?;
+    // RAII guard: cleans up the per-run work directory on any exit (success or error).
+    struct RunDirGuard(std::path::PathBuf);
+    impl Drop for RunDirGuard { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let _run_dir_guard = RunDirGuard(run_dir.clone());
+    let proof_generated = prover::generate_proof(&run_dir)?;
 
     // -----------------------------------------------------------------------
-    // Step 7: Verify the proof
+    // Step 8: Verify the proof
     // -----------------------------------------------------------------------
     let proof_status = if proof_generated {
-        match prover::verify_proof()? {
+        match prover::verify_proof(&run_dir)? {
             Some(true) => "VALID (ZK proof generated and verified)",
             Some(false) => {
                 anyhow::bail!("Proof verification failed -- aborting OpenAI call");
@@ -132,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         "VERIFIED (nargo execute - all constraints including EdDSA satisfied)"
     };
 
-    let proof_artifacts = prover::read_proof_artifacts()?;
+    let proof_artifacts = prover::read_proof_artifacts(&run_dir)?;
     let fully_verifiable = proof_artifacts.is_some() && proof_generated;
     let (proof_hex, vk_hex) = match proof_artifacts {
         Some((p, v)) => (Some(p), Some(v)),
@@ -140,16 +198,26 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 7b: Generate proof bundle
+    // Step 8b: Generate proof bundle
     // -----------------------------------------------------------------------
     let bundle_result = if fully_verifiable {
         println!("[BUNDLE] Generating proof bundle...");
-        match bundle::generate_bundle(&params, aggregate, proof_status, first_sig, None, None) {
+        match bundle::generate_bundle(
+            &params,
+            aggregate,
+            proof_status,
+            first_sig,
+            None,
+            None,
+            &run_dir,
+            &app_config.circuit_dir,
+            &app_config.receipts_dir,
+        ) {
             Ok(br) => {
                 println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
                 println!("[BUNDLE] ID: {}", br.bundle_id);
 
-                let conn = receipts::open_receipts_db()?;
+                let conn = receipts::open_receipts_db(&app_config.receipts_db_path)?;
                 receipts::insert_receipt(
                     &conn,
                     &receipts::Receipt {
@@ -175,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 8: Send ONLY the verified aggregate to OpenAI
+    // Step 9: Send ONLY the verified aggregate to OpenAI
     // -----------------------------------------------------------------------
     println!("\n[AI] Querying gpt-5.4-nano with ZK-verified payload...");
     println!(
@@ -188,11 +256,12 @@ async fn main() -> anyhow::Result<()> {
         params.category_name,
         "2024-01-01",
         "2024-03-31",
+        app_config.openai_api_key.as_deref(),
     )
     .await?;
 
     // -----------------------------------------------------------------------
-    // Step 9: Write the audit record
+    // Step 10: Write the audit record
     // -----------------------------------------------------------------------
     let elapsed = total_start.elapsed();
 
