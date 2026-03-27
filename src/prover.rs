@@ -50,6 +50,7 @@ pub fn generate_batched_prover_toml(
 
 /// Serialize a single batch of circuit inputs to `circuit_dir/Prover.toml`.
 /// Kept for backward compatibility with single-batch use cases.
+#[allow(dead_code)]
 pub fn generate_prover_toml(
     txns: &[Transaction],
     sig: &SignatureData,

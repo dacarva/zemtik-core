@@ -472,6 +472,7 @@ pub fn compute_tx_commitment(txns: &[Transaction]) -> anyhow::Result<Fr> {
 /// Sign the transaction array with the provided BabyJubJub EdDSA key.
 ///
 /// Returns all signature components as BN254 decimal strings for Prover.toml.
+#[allow(dead_code)]
 pub fn sign_transactions(txns: &[Transaction], key: &PrivateKey) -> anyhow::Result<SignatureData> {
     let pub_key = key.public();
 
