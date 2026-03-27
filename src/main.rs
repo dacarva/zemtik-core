@@ -29,6 +29,10 @@ async fn main() -> anyhow::Result<()> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--version" | "-V" => {
+                println!("zemtik {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             "--proxy" => {
                 cli.command = Command::Proxy;
             }
