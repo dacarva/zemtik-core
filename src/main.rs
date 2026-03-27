@@ -13,6 +13,7 @@ mod verify;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use anyhow::Context;
 use chrono::Utc;
 use config::{CliArgs, Command};
 use types::{OpenAiResponseLog, QueryParams};
@@ -73,6 +74,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Pipeline => {} // fall through to default pipeline
     }
+
+    // Fail fast: verify circuit directory before starting the pipeline.
+    prover::validate_circuit_dir(&app_config.circuit_dir)
+        .context("circuit directory validation")?;
 
     println!("╔══════════════════════════════════════════════════╗");
     println!("║   Zemtik: ZK Middleware POC (Rust + Noir + AI)   ║");

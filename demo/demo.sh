@@ -26,6 +26,11 @@ if [ -z "$OPENAI_API_KEY" ]; then
 fi
 
 echo "[DEMO] Prerequisites OK"
+
+if [ ! -f "$HOME/.zemtik/circuit/Nargo.toml" ]; then
+    echo "[ERROR] Circuit not installed at ~/.zemtik/circuit/. Run install.sh first." >&2
+    exit 1
+fi
 echo ""
 
 # Step 1: Run the full ZK pipeline

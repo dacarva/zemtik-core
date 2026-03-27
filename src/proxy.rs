@@ -49,6 +49,9 @@ struct ZkPipelineResult {
 
 /// Entry point for proxy mode. Starts Axum on the configured port.
 pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
+    // Fail fast: verify circuit directory has all required files before accepting requests.
+    prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
+
     let config = Arc::new(config);
 
     let receipts_conn =

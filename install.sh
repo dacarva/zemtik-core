@@ -36,6 +36,17 @@ mkdir -p "$ZEMTIK_HOME/keys"
 mkdir -p "$ZEMTIK_HOME/receipts"
 mkdir -p "$ZEMTIK_HOME/.tmp"
 
+# Copy circuit source and vendor dependency (required for nargo)
+if [ -d "$SCRIPT_DIR/circuit" ]; then
+    echo "[INSTALL] Copying circuit files to $ZEMTIK_HOME/circuit/..."
+    cp -r "$SCRIPT_DIR/circuit/." "$ZEMTIK_HOME/circuit/"
+fi
+if [ -d "$SCRIPT_DIR/vendor" ]; then
+    echo "[INSTALL] Copying vendor dependencies to $ZEMTIK_HOME/vendor/..."
+    mkdir -p "$ZEMTIK_HOME/vendor"
+    cp -r "$SCRIPT_DIR/vendor/." "$ZEMTIK_HOME/vendor/"
+fi
+
 # Install binary
 echo "[INSTALL] Installing zemtik binary to $BINARY_DIR..."
 mkdir -p "$BINARY_DIR"
@@ -94,7 +105,6 @@ fi
 echo ""
 echo "  Next steps:"
 echo "  1. Set OPENAI_API_KEY in your environment or ~/.zemtik/config.yaml"
-echo "  2. Copy your circuit to ~/.zemtik/circuit/"
-echo "  3. Run: zemtik --proxy"
-echo "  4. Point your app to http://localhost:4000"
+echo "  2. Run: zemtik --proxy"
+echo "  3. Point your app to http://localhost:4000"
 echo ""

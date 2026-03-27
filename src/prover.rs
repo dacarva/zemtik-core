@@ -48,6 +48,49 @@ pub fn generate_batched_prover_toml(
     Ok(())
 }
 
+/// Validate that `circuit_dir` has the files nargo needs to compile and execute.
+///
+/// Called at startup so failures surface immediately with a clear remediation message
+/// instead of mid-pipeline as an opaque "No such file or directory" error.
+pub fn validate_circuit_dir(circuit_dir: &Path) -> anyhow::Result<()> {
+    let nargo_toml = circuit_dir.join("Nargo.toml");
+    anyhow::ensure!(
+        nargo_toml.exists(),
+        "Circuit directory '{}' is missing Nargo.toml.\n\
+         Run install.sh from the repo root, or copy manually:\n\
+         cp -r circuit/. {} && mkdir -p {}/vendor && cp -r vendor/. {}/vendor/",
+        circuit_dir.display(),
+        circuit_dir.display(),
+        circuit_dir.parent().unwrap_or(circuit_dir).display(),
+        circuit_dir.parent().unwrap_or(circuit_dir).display()
+    );
+
+    let main_nr = circuit_dir.join("src/main.nr");
+    anyhow::ensure!(
+        main_nr.exists(),
+        "Circuit directory '{}' is missing src/main.nr.\n\
+         Run install.sh from the repo root, or copy manually:\n\
+         cp -r circuit/. {}",
+        circuit_dir.display(),
+        circuit_dir.display()
+    );
+
+    // Nargo.toml references eddsa as `path = "../vendor/eddsa"` — relative to circuit_dir.
+    let vendor_eddsa = circuit_dir.join("../vendor/eddsa/Nargo.toml");
+    anyhow::ensure!(
+        vendor_eddsa.exists(),
+        "Vendor dependency missing at '{}'.\n\
+         Nargo.toml expects ../vendor/eddsa relative to the circuit directory.\n\
+         Run install.sh from the repo root, or copy manually:\n\
+         mkdir -p {}/vendor && cp -r vendor/. {}/vendor/",
+        vendor_eddsa.display(),
+        circuit_dir.parent().unwrap_or(circuit_dir).display(),
+        circuit_dir.parent().unwrap_or(circuit_dir).display()
+    );
+
+    Ok(())
+}
+
 /// Serialize a single batch of circuit inputs to `circuit_dir/Prover.toml`.
 /// Kept for backward compatibility with single-batch use cases.
 #[allow(dead_code)]

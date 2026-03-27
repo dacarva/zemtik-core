@@ -29,10 +29,16 @@ export PATH="$PATH:$HOME/.local/bin"
 
 This creates `~/.zemtik/` and installs the binary.
 
-## Step 3 — Copy the circuit (~1 min)
+## Step 3 — Circuit files (handled by install.sh)
+
+`install.sh` automatically copies `circuit/` and `vendor/` to `~/.zemtik/`.
+No manual step needed.
+
+If you skipped `install.sh` or are using a custom `ZEMTIK_CIRCUIT_DIR`, copy manually:
 
 ```sh
 cp -r circuit/. ~/.zemtik/circuit/
+mkdir -p ~/.zemtik/vendor && cp -r vendor/. ~/.zemtik/vendor/
 ```
 
 The circuit directory contains the Noir source and gets compiled on first run.
