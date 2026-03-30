@@ -32,10 +32,13 @@ cargo build --release
 cargo run
 
 # Run proxy mode (OpenAI-compatible HTTP server on :4000)
-cargo run -- --proxy
+cargo run -- proxy
 
 # Verify a proof bundle offline
 cargo run -- verify <bundle.zip>
+
+# List recent receipts
+cargo run -- list
 
 # Tests
 cargo test
@@ -53,8 +56,9 @@ Zemtik Core is a **Rust + Noir ZK middleware** that enforces zero-knowledge proo
 | Mode | Entry point | What it does |
 |------|-------------|--------------|
 | CLI pipeline | `cargo run` | One-shot: seed 500 txs → sign → prove → verify → call OpenAI |
-| Proxy | `cargo run -- --proxy` | Axum HTTP server on `:4000`; intercepts `POST /v1/chat/completions`, runs ZK pipeline, forwards sanitized request |
+| Proxy | `cargo run -- proxy` | Axum HTTP server on `:4000`; intercepts `POST /v1/chat/completions`, runs ZK pipeline, forwards sanitized request |
 | Verify | `cargo run -- verify <bundle.zip>` | Offline bundle verification via `bb verify` |
+| List | `cargo run -- list` | List recent receipts from `~/.zemtik/receipts.db` |
 
 ### ZK Data Flow
 
