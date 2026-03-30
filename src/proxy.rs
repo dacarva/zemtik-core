@@ -190,10 +190,18 @@ async fn handle_chat_completions(
             let _ = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string());
             drop(db_guard);
             println!("[ROUTE] Intent rejection: {}", e);
-            return Err(ProxyError(anyhow::anyhow!(
-                "Intent extraction failed: {}. Supported patterns: 'Q[1-4] YYYY [table]', '[table] spend YYYY'.",
-                e
-            )));
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!(
+                            "Intent extraction failed: {}. Supported patterns: 'Q[1-4] YYYY [table]', '[table] spend YYYY'.",
+                            e
+                        ),
+                        "type": "zemtik_intent_rejection"
+                    }
+                })),
+            ).into_response());
         }
     };
 
