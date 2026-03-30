@@ -36,7 +36,7 @@ fn fast_lane_sign_never_exceeds_field() {
         let result = run_fast_lane(
             &conn,
             &key,
-            "AWS Infrastructure",
+            "aws_spend",
             1704067200,
             1711929599,
         );

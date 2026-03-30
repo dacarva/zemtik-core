@@ -14,6 +14,19 @@ pub const CAT_PAYROLL: u64 = 1;
 pub const CAT_AWS: u64 = 2;
 pub const CAT_COFFEE: u64 = 3;
 
+/// Map a schema-config table key to its Noir circuit category code.
+///
+/// Returns `None` if the table key is not recognized in the demo dataset.
+/// Used by the ZK slow lane to build QueryParams from extracted intent.
+pub fn schema_key_to_category_code(schema_key: &str) -> Option<u64> {
+    match schema_key {
+        "payroll" => Some(CAT_PAYROLL),
+        "aws_spend" => Some(CAT_AWS),
+        "travel" => Some(CAT_COFFEE),
+        _ => None,
+    }
+}
+
 // Q1 2024 UNIX timestamp boundaries.
 pub const Q1_START: u64 = 1_704_067_200; // 2024-01-01 00:00:00 UTC
 pub const Q1_END: u64 = 1_711_929_599; // 2024-03-31 23:59:59 UTC
@@ -22,13 +35,17 @@ pub const Q1_END: u64 = 1_711_929_599; // 2024-03-31 23:59:59 UTC
 /// Number of transactions per batch. Must match TX_COUNT in main.nr.
 pub const BATCH_SIZE: usize = 50;
 
-/// Map a category integer to its human-readable name (for the DB display column).
+/// Map a category integer to its schema-config key (must match schema_config.json table keys).
+///
+/// These values are stored in transactions.category_name and used by FastLane's
+/// sum_by_category() query. They must align with the keys in schema_config.json
+/// so that intent.rs → extract_intent() → category_name routes correctly.
 fn category_name(cat: u64) -> &'static str {
     match cat {
-        CAT_PAYROLL => "Payroll",
-        CAT_AWS => "AWS Infrastructure",
-        CAT_COFFEE => "Coffee & Snacks",
-        _ => "Unknown",
+        CAT_PAYROLL => "payroll",
+        CAT_AWS => "aws_spend",
+        CAT_COFFEE => "travel",
+        _ => "unknown",
     }
 }
 

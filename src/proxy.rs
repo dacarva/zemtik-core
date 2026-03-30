@@ -212,7 +212,7 @@ async fn handle_chat_completions(
             handle_fast_lane(state, body, api_key, intent_result, total_start).await
         }
         Route::ZkSlowLane => {
-            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, total_start).await
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, total_start).await
         }
     }
 }
@@ -395,6 +395,7 @@ async fn handle_zk_slow_lane(
     api_key: String,
     request_hash: String,
     prompt_hash: String,
+    intent: crate::types::IntentResult,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
@@ -405,20 +406,21 @@ async fn handle_zk_slow_lane(
     let key_bytes = state.signing_key_bytes.clone();
     let req_hash = request_hash.clone();
     let prm_hash = prompt_hash.clone();
+    let intent_clone = intent.clone();
 
     let zk = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build local runtime")?;
-        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash))
+        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone))
     })
     .await
     .context("ZK blocking task panicked")??;
 
     println!(
         "[ZK] Verified {} spend = ${} ({:.2}s circuit, proof: {})",
-        "AWS Infrastructure", zk.aggregate, zk.circuit_execution_secs, zk.proof_status
+        intent.category_name, zk.aggregate, zk.circuit_execution_secs, zk.proof_status
     );
 
     // Insert bundle into receipts DB if generated; clear it if the insert fails
@@ -455,19 +457,18 @@ async fn handle_zk_slow_lane(
         None
     };
 
+    let target_category = db::schema_key_to_category_code(&intent.table).unwrap_or(db::CAT_AWS);
     let params = QueryParams {
         client_id: 123,
-        target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure".to_owned(),
-        start_time: db::Q1_START,
-        end_time: db::Q1_END,
+        target_category,
+        category_name: intent.category_name.clone(),
+        start_time: intent.start_unix_secs as u64,
+        end_time: intent.end_unix_secs as u64,
     };
 
     let zk_payload = serde_json::json!({
-        "category": "AWS Infrastructure",
+        "category": intent.category_name,
         "total_spend_usd": zk.aggregate,
-        "period_start": "2024-01-01",
-        "period_end": "2024-03-31",
         "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
         "raw_data_transmitted": false
     });
@@ -479,8 +480,8 @@ async fn handle_zk_slow_lane(
     );
 
     println!(
-        "[ZK] Payload: {{ category: \"AWS Infrastructure\", total_spend_usd: {}, provenance: \"ZEMTIK_VALID_ZK_PROOF\" }}",
-        zk.aggregate
+        "[ZK] Payload: {{ category: \"{}\", total_spend_usd: {}, provenance: \"ZEMTIK_VALID_ZK_PROOF\" }}",
+        intent.category_name, zk.aggregate
     );
     println!("[ZK] Raw rows transmitted to OpenAI: 0");
 
@@ -761,13 +762,15 @@ async fn run_zk_pipeline(
     key_bytes: Vec<u8>,
     request_hash: String,
     prompt_hash: String,
+    intent: crate::types::IntentResult,
 ) -> anyhow::Result<ZkPipelineResult> {
+    let target_category = db::schema_key_to_category_code(&intent.table).unwrap_or(db::CAT_AWS);
     let params = QueryParams {
         client_id: 123,
-        target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure".to_owned(),
-        start_time: db::Q1_START,
-        end_time: db::Q1_END,
+        target_category,
+        category_name: intent.category_name.clone(),
+        start_time: intent.start_unix_secs as u64,
+        end_time: intent.end_unix_secs as u64,
     };
 
     let backend = db::init_db().await.context("init DB")?;

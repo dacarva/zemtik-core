@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     let params = QueryParams {
         client_id: 123,
         target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure".to_owned(),
+        category_name: "aws_spend".to_owned(),
         start_time: db::Q1_START,
         end_time: db::Q1_END,
     };

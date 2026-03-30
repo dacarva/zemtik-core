@@ -196,6 +196,7 @@ pub struct OpenAiResult {
 // ---------------------------------------------------------------------------
 
 /// Resolved intent extracted from a user prompt.
+#[derive(Clone)]
 pub struct IntentResult {
     pub table: String,
     pub category_name: String,
