@@ -76,6 +76,19 @@ if [ ! -f "$CONFIG_FILE" ]; then
     chmod 600 "$CONFIG_FILE"
 fi
 
+# Copy schema_config.example.json → ~/.zemtik/schema_config.json if not present
+SCHEMA_FILE="$ZEMTIK_HOME/schema_config.json"
+if [ ! -f "$SCHEMA_FILE" ]; then
+    if [ -f "$SCRIPT_DIR/schema_config.example.json" ]; then
+        echo "[INSTALL] Creating default schema_config at $SCHEMA_FILE..."
+        cp "$SCRIPT_DIR/schema_config.example.json" "$SCHEMA_FILE"
+        chmod 600 "$SCHEMA_FILE"
+    else
+        echo "[INSTALL] Warning: schema_config.example.json not found — skipping schema_config setup"
+        echo "[INSTALL] Create $SCHEMA_FILE manually before running in proxy mode."
+    fi
+fi
+
 # Update PATH in the relevant shell rc file
 update_path() {
     RC_FILE="$1"
@@ -111,6 +124,8 @@ fi
 echo ""
 echo "  Next steps:"
 echo "  1. Set OPENAI_API_KEY in your environment or ~/.zemtik/config.yaml"
-echo "  2. Run: zemtik --proxy"
-echo "  3. Point your app to http://localhost:4000"
+echo "  2. Edit ~/.zemtik/schema_config.json to configure your table sensitivities"
+echo "  3. Run: zemtik proxy"
+echo "  4. Point your app to http://localhost:4000"
+echo "  5. Run: zemtik list  (to view receipts)"
 echo ""

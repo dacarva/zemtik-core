@@ -1,76 +1,67 @@
-mod audit;
-mod bundle;
-mod config;
-mod db;
-mod keys;
-mod openai;
-mod proxy;
-mod prover;
-mod receipts;
-mod types;
-mod verify;
+use zemtik::{audit, bundle, config, db, keys, openai, prover, proxy, receipts, types, verify};
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
-use config::{CliArgs, Command};
+use clap::{Parser, Subcommand};
+use config::Command;
 use types::{OpenAiResponseLog, QueryParams};
+
+#[derive(Parser)]
+#[command(name = "zemtik", version, about = "ZK middleware for enterprise AI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+    /// Override the proxy port
+    #[arg(long)]
+    port: Option<u16>,
+    /// Override the circuit directory
+    #[arg(long)]
+    circuit_dir: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run in OpenAI-compatible proxy mode on :4000
+    Proxy,
+    /// Verify a proof bundle offline
+    Verify {
+        /// Path to the bundle zip file
+        path: PathBuf,
+    },
+    /// List recent receipts
+    List,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env if present (never fails if the file doesn't exist)
     let _ = dotenvy::dotenv();
 
-    // Parse CLI arguments into CliArgs
-    let args: Vec<String> = std::env::args().collect();
-    let mut cli = CliArgs::default();
+    let cli = Cli::parse();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--version" | "-V" => {
-                println!("zemtik {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            "--proxy" => {
-                cli.command = Command::Proxy;
-            }
-            "verify" => {
-                let path = args.get(i + 1).ok_or_else(|| {
-                    anyhow::anyhow!("Usage: zemtik verify <bundle.zip>")
-                })?;
-                cli.command = Command::Verify(PathBuf::from(path));
-                i += 1;
-            }
-            "--port" => {
-                let port_str = args.get(i + 1).ok_or_else(|| {
-                    anyhow::anyhow!("--port requires a value")
-                })?;
-                cli.port = Some(port_str.parse().map_err(|_| {
-                    anyhow::anyhow!("--port value must be a valid port number")
-                })?);
-                i += 1;
-            }
-            "--circuit-dir" => {
-                let dir = args.get(i + 1).ok_or_else(|| {
-                    anyhow::anyhow!("--circuit-dir requires a value")
-                })?;
-                cli.circuit_dir = Some(PathBuf::from(dir));
-                i += 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+    // Build the config::CliArgs from clap output
+    let mut config_cli = config::CliArgs::default();
+    config_cli.port = cli.port;
+    config_cli.circuit_dir = cli.circuit_dir;
+    config_cli.command = match &cli.command {
+        Some(Commands::Proxy) => Command::Proxy,
+        Some(Commands::Verify { path }) => Command::Verify(path.clone()),
+        Some(Commands::List) => Command::List,
+        None => Command::Pipeline,
+    };
 
-    let app_config = config::AppConfig::load(&cli)?;
+    let app_config = config::AppConfig::load(&config_cli)?;
 
-    match cli.command {
+    match &config_cli.command {
         Command::Proxy => return proxy::run_proxy(app_config).await,
-        Command::Verify(ref path) => {
+        Command::Verify(path) => {
             return verify::run_verify_cli(path);
+        }
+        Command::List => {
+            return run_list(app_config);
         }
         Command::Pipeline => {} // fall through to default pipeline
     }
@@ -103,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     let params = QueryParams {
         client_id: 123,
         target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure",
+        category_name: "AWS Infrastructure".to_owned(),
         start_time: db::Q1_START,
         end_time: db::Q1_END,
     };
@@ -149,8 +140,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -----------------------------------------------------------------------
-    // Step 6: Execute the circuit — verifies all EdDSA signatures and
-    // aggregates spend across all batches
+    // Step 6: Execute the circuit
     // -----------------------------------------------------------------------
     println!(
         "[NOIR] Executing circuit ({} batches x EdDSA + aggregation)...",
@@ -167,7 +157,6 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     println!("[NOIR] Generating UltraHonk proof (bb v4, CRS auto-download)...");
     let run_dir = prover::prepare_run_dir(&app_config.runs_dir, &app_config.circuit_dir)?;
-    // RAII guard: cleans up the per-run work directory on any exit (success or error).
     struct RunDirGuard(std::path::PathBuf);
     impl Drop for RunDirGuard { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
     let _run_dir_guard = RunDirGuard(run_dir.clone());
@@ -229,6 +218,9 @@ async fn main() -> anyhow::Result<()> {
                         prompt_hash: String::new(),
                         request_hash: String::new(),
                         created_at: Utc::now().to_rfc3339(),
+                        engine_used: "zk_slow_lane".to_owned(),
+                        proof_hash: proof_hex.clone(),
+                        data_exfiltrated: 0,
                     },
                 )?;
                 Some(br)
@@ -253,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
 
     let ai_result = openai::query_openai(
         aggregate,
-        params.category_name,
+        &params.category_name,
         "2024-01-01",
         "2024-03-31",
         app_config.openai_api_key.as_deref(),
@@ -313,5 +305,34 @@ async fn main() -> anyhow::Result<()> {
     println!("\n  Audit record: {}", audit_path.display());
     println!("══════════════════════════════════════════════════════\n");
 
+    Ok(())
+}
+
+/// `zemtik list` — print receipts from the local receipts DB.
+fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
+    let conn = receipts::open_receipts_db(&config.receipts_db_path)
+        .context("open receipts DB")?;
+    let list = receipts::list_receipts(&conn).context("list receipts")?;
+
+    if list.is_empty() {
+        println!("No receipts found. Run zemtik (pipeline) or zemtik --proxy to generate receipts.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38}  {:<20}  {:>12}  {}",
+        "Receipt ID", "Engine", "Status", "Created At"
+    );
+    println!("{}", "-".repeat(100));
+    for r in &list {
+        println!(
+            "{:<38}  {:<20}  {:>12}  {}",
+            r.id,
+            r.engine_used,
+            &r.proof_status[..r.proof_status.len().min(12)],
+            r.created_at,
+        );
+    }
+    println!("\n{} receipt(s) total.", list.len());
     Ok(())
 }

@@ -1,5 +1,18 @@
 # TODOS
 
+## P1 — Gating questions (blocking implementation)
+
+### SF client demand confirmation (feat/routing-engine, before implementation)
+- **What:** Ask SF client before starting implementation week: "If Zemtik could answer your standard analytics queries in under a second while keeping payroll/M&A ZK-verified, would that change how often your team uses it?"
+- **Why:** The design doc flags this as the gating question for the routing engine. The answer determines whether the feature solves a real blocker or a hypothetical problem. Build decision should be confirmed, not assumed.
+- **Pros:** Eliminates the risk of building the wrong feature.
+- **Cons:** 1-3 day delay waiting for response.
+- **Effort:** S (human) → S (CC+gstack)
+- **Priority:** P1 — do this before writing a line of routing engine code
+- **Depends on:** Nothing
+
+---
+
 ## P2 — Blocking for productized distribution
 
 ### ~~CIRCUIT_DIR configurable~~ ✓ DONE (feat/distribution-improvement, 2026-03-27)
@@ -82,3 +95,31 @@
 - **How to apply:** Add `sha256sum` step to GitHub Actions release workflow. Update install.sh to download and verify SHA256SUMS before proceeding. GPG signing can wait for post-canal-qualification.
 - **Effort:** S (human) → S (CC+gstack)
 - **Depends on:** feat/distribution-improvement merged (provides the release pipeline to extend).
+
+---
+
+## feat/routing-engine TODOs (added 2026-03-30, plan-eng-review)
+
+### Evaluate evidence.rs vs. bundle.rs overlap before implementing (P2, pre-implementation)
+- **What:** Before writing evidence.rs, evaluate whether FastLane Evidence Pack can be implemented as a new bundle type inside bundle.rs rather than a new module.
+- **Why:** bundle.rs and verify.rs already have ZIP artifact export infrastructure (request_meta.json, public_inputs, proof artifacts). Creating a parallel evidence.rs risks inconsistent artifact formats that confuse the verify path. Codex outside voice flagged this as potential module sprawl.
+- **Pros:** If FastLane Evidence Pack is just JSON (no ZIP, no proof.bin), evidence.rs is justified as a separate concern. If it can reuse the bundle write path, one fewer module.
+- **Cons:** Evaluation takes time upfront but prevents a refactor later.
+- **Context:** Current verify path (proxy.rs:365, verify.rs:118) expects ZIP bundles with proof.bin + vk.bin + public_inputs. FastLane Evidence Pack has only a BabyJubJub signature, no ZK proof binary. Decision: if the formats are incompatible, evidence.rs is the right call. If JSON-only Evidence Pack can coexist with ZIP bundles in a shared abstraction, extend bundle.rs.
+- **Depends on:** Nothing — evaluate before implementing evidence.rs.
+
+### db.rs::sum_by_category integer overflow guard (P3)
+- **What:** Add an explicit overflow check in sum_by_category: if the returned aggregate < 0, return Err(SumOverflow) instead of propagating a negative value.
+- **Why:** SQLite SUM silently wraps to -1 on integer overflow. For financial data (if amounts are in dollars not cents), a large bank's Q1 data could theoretically overflow i64::MAX. FastLane would return an incorrect aggregate with no error, and the Evidence Pack would silently record wrong data.
+- **Pros:** 2 lines of code. Prevents a silent correctness bug when real data is connected.
+- **Cons:** None. Trivial to implement.
+- **Context:** Not urgent for the synthetic PoC (500 seeded transactions with small amounts). Becomes a real risk when Supabase/real DB is connected. Implement alongside sum_by_category.
+- **Depends on:** db.rs::sum_by_category implemented (this PR).
+
+### intent.rs v2: multi-table query support (P3, post-v1)
+- **What:** Extend intent.rs to extract multiple table names from a single query and apply the cross-sensitivity OR rule across all extracted tables.
+- **Why:** v1 extracts only the first table match. A query like "What was Q1 payroll vs AWS spend?" would only process the first table found. The cross-sensitivity OR rule (if ANY table is critical → ZK SlowLane) is architecturally correct but unreachable in v1 for multi-table queries. v1 behavior: extract first table, add a note in the response: "Note: only processed [table] — multi-table queries not yet supported."
+- **Pros:** Unlocks the full OR rule. Enables comparative analytics queries (payroll vs AWS in one shot).
+- **Cons:** Multi-table output requires either two separate Evidence Packs or a new combined format. Schema for combined Evidence Pack needs design.
+- **Context:** v1 single-table is a conscious shortcut. The router.rs OR rule is implemented correctly but only exercised in unit tests with simulated multi-table intent. Real user queries will need this in v2.
+- **Depends on:** feat/routing-engine merged (provides the single-table v1 foundation).

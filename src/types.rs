@@ -17,7 +17,7 @@ pub struct QueryParams {
     pub client_id: i64,
     pub target_category: u64,
     /// Category name for display (e.g. "AWS")
-    pub category_name: &'static str,
+    pub category_name: String,
     pub start_time: u64,
     pub end_time: u64,
 }
@@ -189,4 +189,65 @@ pub struct OpenAiResult {
     pub model: String,
     pub usage: TokenUsage,
     pub request_log: OpenAiRequestLog,
+}
+
+// ---------------------------------------------------------------------------
+// Routing engine types
+// ---------------------------------------------------------------------------
+
+/// Resolved intent extracted from a user prompt.
+pub struct IntentResult {
+    pub table: String,
+    pub category_name: String,
+    pub start_unix_secs: i64,
+    pub end_unix_secs: i64,
+}
+
+/// Routing decision: fast BabyJubJub attestation vs. full ZK proof.
+pub enum Route {
+    FastLane,
+    ZkSlowLane,
+}
+
+/// Result of the FastLane engine.
+pub struct FastLaneResult {
+    pub aggregate: i64,
+    pub row_count: usize,
+    /// SHA-256(sig_bytes) hex
+    pub attestation_hash: String,
+    /// SHA-256(pub_key_x_bytes || pub_key_y_bytes) hex
+    pub key_id: String,
+    #[allow(dead_code)]
+    pub timestamp_unix: i64,
+    /// SHA-256(category_name || start.to_le_bytes() || end.to_le_bytes()) hex
+    #[allow(dead_code)]
+    pub query_hash: String,
+}
+
+/// Outcome returned by `engine_fast::run_fast_lane`.
+pub enum EngineResult {
+    Ok(FastLaneResult),
+    DbError(String),
+    EmptyResult,
+    SignError(String),
+}
+
+/// Evidence pack produced by both engines — serialized into the LLM response.
+#[derive(Serialize)]
+pub struct EvidencePack {
+    pub engine_used: String,
+    /// ZK path: SHA-256(ultraHonk_proof_bytes)
+    pub proof_hash: Option<String>,
+    /// FastLane path: SHA-256(sig_bytes)
+    pub attestation_hash: Option<String>,
+    /// Always 0 — no raw data transmitted
+    pub data_exfiltrated: u8,
+    /// Always "architectural_isolation"
+    pub privacy_model: String,
+    pub key_id: String,
+    pub schema_config_hash: String,
+    pub timestamp: String,
+    pub aggregate: i64,
+    pub row_count: usize,
+    pub receipt_id: String,
 }

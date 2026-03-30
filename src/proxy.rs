@@ -12,12 +12,14 @@ use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::types::{
-    AuditRecord, OpenAiRequestLog, OpenAiResponseLog, QueryParams, SignatureData, TokenUsage,
+    AuditRecord, EngineResult, OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route,
+    SignatureData, TokenUsage,
 };
-use crate::{audit, bundle, db, keys, prover, receipts};
+use crate::{audit, bundle, db, engine_fast, evidence, intent, keys, prover, receipts, router};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com";
 
@@ -27,10 +29,14 @@ struct ProxyState {
     pipeline_lock: tokio::sync::Mutex<()>,
     /// File-based receipts DB, shared across requests.
     receipts_db: tokio::sync::Mutex<Connection>,
+    /// Separate in-memory ledger DB for FastLane reads (avoids contention with receipts_db).
+    ledger_db: tokio::sync::Mutex<Connection>,
     /// Application configuration (ports, paths).
     config: Arc<AppConfig>,
     /// Bank signing key bytes (loaded once at startup, passed into spawn_blocking).
     signing_key_bytes: Vec<u8>,
+    /// SHA-256 of schema_config.json bytes (empty string when schema absent).
+    schema_config_hash: String,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -49,13 +55,34 @@ struct ZkPipelineResult {
 
 /// Entry point for proxy mode. Starts Axum on the configured port.
 pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
+    // Fail fast: schema_config.json is required for proxy mode routing.
+    if config.schema_config.is_none() {
+        eprintln!(
+            "Fatal: schema_config required for proxy mode. \
+             schema_config.json not found at {}. \
+             Copy schema_config.example.json to ~/.zemtik/schema_config.json \
+             and configure your table sensitivities.",
+            config.schema_config_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Validate sensitivity values
+    crate::config::validate_schema_config(config.schema_config.as_ref().unwrap())
+        .context("validate schema_config")?;
+
     // Fail fast: verify circuit directory has all required files before accepting requests.
     prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
+
+    let schema_config_hash = config.schema_config_hash.clone().unwrap_or_default();
 
     let config = Arc::new(config);
 
     let receipts_conn =
         receipts::open_receipts_db(&config.receipts_db_path).context("open receipts DB")?;
+
+    // Initialize ledger DB (in-memory, seeded) for FastLane reads.
+    let ledger_conn = db::init_ledger_sqlite().context("init ledger DB for FastLane")?;
 
     // Load (or generate) the bank signing key once at startup.
     let signing_key = keys::load_or_generate_key(&config.keys_dir)
@@ -66,8 +93,10 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         http_client: reqwest::Client::new(),
         pipeline_lock: tokio::sync::Mutex::new(()),
         receipts_db: tokio::sync::Mutex::new(receipts_conn),
+        ledger_db: tokio::sync::Mutex::new(ledger_conn),
         config: Arc::clone(&config),
         signing_key_bytes,
+        schema_config_hash,
     });
 
     let app = Router::new()
@@ -102,12 +131,11 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Intercept /v1/chat/completions: run ZK pipeline in a blocking thread
-/// (DbBackend is !Sync), replace last user message, forward to OpenAI.
+/// Intercept /v1/chat/completions: extract intent → route → FastLane or ZK pipeline.
 async fn handle_chat_completions(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Result<Response, ProxyError> {
     let total_start = Instant::now();
 
@@ -135,7 +163,233 @@ async fn handle_chat_completions(
             .map_err(ProxyError)?,
     ));
 
-    println!("[ZK] Request intercepted → starting ZK pipeline");
+    // Extract the last user message prompt for intent parsing
+    let prompt = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        })
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    // Extract intent using SchemaConfig
+    let schema = state.config.schema_config.as_ref().ok_or_else(|| {
+        ProxyError(anyhow::anyhow!("schema_config not loaded"))
+    })?;
+
+    let intent_result = match intent::extract_intent(&prompt, schema) {
+        Ok(r) => r,
+        Err(e) => {
+            // Log rejection and return 400
+            let db_guard = state.receipts_db.lock().await;
+            let _ = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string());
+            drop(db_guard);
+            println!("[ROUTE] Intent rejection: {}", e);
+            return Err(ProxyError(anyhow::anyhow!(
+                "Intent extraction failed: {}. Supported patterns: 'Q[1-4] YYYY [table]', '[table] spend YYYY'.",
+                e
+            )));
+        }
+    };
+
+    let route = router::decide_route(&intent_result, schema);
+
+    match route {
+        Route::FastLane => {
+            handle_fast_lane(state, body, api_key, intent_result, total_start).await
+        }
+        Route::ZkSlowLane => {
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, total_start).await
+        }
+    }
+}
+
+/// Handle a FastLane request: DB sum → attestation → synthetic evidence response.
+async fn handle_fast_lane(
+    state: Arc<ProxyState>,
+    mut body: Value,
+    api_key: String,
+    intent_result: crate::types::IntentResult,
+    total_start: Instant,
+) -> Result<Response, ProxyError> {
+    println!(
+        "[FAST] FastLane route → table='{}' start={} end={}",
+        intent_result.table, intent_result.start_unix_secs, intent_result.end_unix_secs
+    );
+
+    let category_name = intent_result.category_name.clone();
+    let start = intent_result.start_unix_secs;
+    let end = intent_result.end_unix_secs;
+    let key_bytes = state.signing_key_bytes.clone();
+    let schema_config_hash = state.schema_config_hash.clone();
+
+    // Run sum + attestation in blocking thread (rusqlite is !Send across await)
+    let ledger_guard = state.ledger_db.lock().await;
+    let signing_key = db::PrivateKey::import(key_bytes)
+        .map_err(|e| ProxyError(anyhow::anyhow!("import signing key: {}", e)))?;
+    let engine_result = engine_fast::run_fast_lane(&ledger_guard, &signing_key, &category_name, start, end);
+    drop(ledger_guard);
+
+    let fl = match engine_result {
+        EngineResult::Ok(r) => r,
+        EngineResult::DbError(e) => {
+            return Err(ProxyError(anyhow::anyhow!("FastLane DB error: {}", e)));
+        }
+        EngineResult::SignError(e) => {
+            return Err(ProxyError(anyhow::anyhow!("FastLane sign error: {}", e)));
+        }
+        EngineResult::EmptyResult => {
+            // Return 200 with aggregate=0
+            let receipt_id = Uuid::new_v4().to_string();
+            let timestamp = Utc::now().to_rfc3339();
+            let ev = evidence::build_evidence_pack(
+                &receipt_id, "fast_lane", 0, 0, None, None,
+                "", &schema_config_hash, &timestamp,
+            );
+            let payload = serde_json::json!({
+                "category": category_name,
+                "total_spend_usd": 0,
+                "row_count": 0,
+                "data_provenance": "ZEMTIK_FAST_LANE_ATTESTATION",
+                "raw_data_transmitted": false,
+                "note": "No rows matched the query criteria.",
+                "evidence": ev
+            });
+            return Ok(build_fast_lane_response(&mut body, payload, &state, &api_key, &receipt_id).await?);
+        }
+    };
+
+    let receipt_id = Uuid::new_v4().to_string();
+    let timestamp = Utc::now().to_rfc3339();
+
+    let ev = evidence::build_evidence_pack(
+        &receipt_id,
+        "fast_lane",
+        fl.aggregate,
+        fl.row_count,
+        None,
+        Some(fl.attestation_hash.clone()),
+        &fl.key_id,
+        &schema_config_hash,
+        &timestamp,
+    );
+
+    // Insert receipt
+    {
+        let db_guard = state.receipts_db.lock().await;
+        let _ = receipts::insert_receipt(
+            &db_guard,
+            &receipts::Receipt {
+                id: receipt_id.clone(),
+                bundle_path: String::new(),
+                proof_status: "FAST_LANE_ATTESTED".to_owned(),
+                circuit_hash: String::new(),
+                bb_version: String::new(),
+                prompt_hash: String::new(),
+                request_hash: String::new(),
+                created_at: timestamp.clone(),
+                engine_used: "fast_lane".to_owned(),
+                proof_hash: None,
+                data_exfiltrated: 0,
+            },
+        );
+    }
+
+    println!(
+        "[FAST] aggregate={} row_count={} attestation={} ({:.2}ms)",
+        fl.aggregate,
+        fl.row_count,
+        &fl.attestation_hash[..8],
+        total_start.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    let payload = serde_json::json!({
+        "category": category_name,
+        "total_spend_usd": fl.aggregate,
+        "row_count": fl.row_count,
+        "data_provenance": "ZEMTIK_FAST_LANE_ATTESTATION",
+        "raw_data_transmitted": false,
+        "evidence": ev
+    });
+
+    build_fast_lane_response(&mut body, payload, &state, &api_key, &receipt_id).await
+}
+
+/// Replace last user message with FastLane payload and forward to OpenAI.
+async fn build_fast_lane_response(
+    body: &mut Value,
+    payload: Value,
+    state: &Arc<ProxyState>,
+    api_key: &str,
+    receipt_id: &str,
+) -> Result<Response, ProxyError> {
+    let message = format!(
+        "Here is a cryptographically attested financial summary:\n\n{}",
+        serde_json::to_string_pretty(&payload)
+            .context("serialize FastLane payload")
+            .map_err(ProxyError)?
+    );
+
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        if let Some(last_user) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        {
+            last_user["content"] = Value::String(message);
+        }
+    }
+
+    let openai_url = format!("{}/v1/chat/completions", OPENAI_BASE_URL);
+    let openai_resp = state
+        .http_client
+        .post(&openai_url)
+        .bearer_auth(api_key)
+        .json(body)
+        .send()
+        .await
+        .context("forward FastLane request to OpenAI")
+        .map_err(ProxyError)?;
+
+    let resp_status = openai_resp.status();
+    let resp_body: Value = openai_resp
+        .json()
+        .await
+        .context("parse OpenAI response")
+        .map_err(ProxyError)?;
+
+    let mut response = (
+        StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
+        Json(resp_body),
+    )
+        .into_response();
+
+    if let Ok(val) = HeaderValue::from_str(receipt_id) {
+        response.headers_mut().insert("x-zemtik-receipt-id", val);
+    }
+    if let Ok(val) = HeaderValue::from_str("fast_lane") {
+        response.headers_mut().insert("x-zemtik-engine", val);
+    }
+
+    Ok(response)
+}
+
+/// Handle a ZK SlowLane request (existing full ZK pipeline).
+async fn handle_zk_slow_lane(
+    state: Arc<ProxyState>,
+    mut body: Value,
+    _headers: HeaderMap,
+    api_key: String,
+    request_hash: String,
+    prompt_hash: String,
+    total_start: Instant,
+) -> Result<Response, ProxyError> {
+    println!("[ZK] ZkSlowLane route → starting ZK pipeline");
 
     let _pipeline_guard = state.pipeline_lock.lock().await;
 
@@ -177,6 +431,9 @@ async fn handle_chat_completions(
                 prompt_hash: prompt_hash.clone(),
                 request_hash: request_hash.clone(),
                 created_at: Utc::now().to_rfc3339(),
+                engine_used: "zk_slow_lane".to_owned(),
+                proof_hash: zk.proof_hex.clone(),
+                data_exfiltrated: 0,
             },
         ) {
             Ok(()) => Some(br),
@@ -193,7 +450,7 @@ async fn handle_chat_completions(
     let params = QueryParams {
         client_id: 123,
         target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure",
+        category_name: "AWS Infrastructure".to_owned(),
         start_time: db::Q1_START,
         end_time: db::Q1_END,
     };
@@ -341,6 +598,9 @@ async fn handle_chat_completions(
         );
         if let Ok(val) = HeaderValue::from_str(&verify_url) {
             response.headers_mut().insert("x-zemtik-verify-url", val);
+        }
+        if let Ok(val) = HeaderValue::from_str("zk_slow_lane") {
+            response.headers_mut().insert("x-zemtik-engine", val);
         }
     }
 
@@ -497,7 +757,7 @@ async fn run_zk_pipeline(
     let params = QueryParams {
         client_id: 123,
         target_category: db::CAT_AWS,
-        category_name: "AWS Infrastructure",
+        category_name: "AWS Infrastructure".to_owned(),
         start_time: db::Q1_START,
         end_time: db::Q1_END,
     };
