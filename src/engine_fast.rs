@@ -45,7 +45,16 @@ pub fn run_fast_lane(
     let payload_bytes: [u8; 32] = payload_hasher.finalize().into();
 
     // 5. BabyJubJub sign
-    let msg = BigInt::from_bytes_le(num_bigint::Sign::Plus, &payload_bytes);
+    // SHA-256 output is 256 bits; the BN254 scalar field order r ≈ 2^254.
+    // ~25% of raw hashes exceed r and babyjubjub_rs::sign rejects them.
+    // Reduce mod r to guarantee the message is a valid field element.
+    let msg_raw = BigInt::from_bytes_le(num_bigint::Sign::Plus, &payload_bytes);
+    let field_order = BigInt::parse_bytes(
+        b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10,
+    )
+    .expect("BN254 scalar field order");
+    let msg = msg_raw % &field_order;
     let sig = match signing_key.sign(msg) {
         Ok(s) => s,
         Err(e) => return EngineResult::SignError(format!("{}", e)),
