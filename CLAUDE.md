@@ -56,36 +56,45 @@ Zemtik Core is a **Rust + Noir ZK middleware** that enforces zero-knowledge proo
 | Mode | Entry point | What it does |
 |------|-------------|--------------|
 | CLI pipeline | `cargo run` | One-shot: seed 500 txs → sign → prove → verify → call OpenAI |
-| Proxy | `cargo run -- proxy` | Axum HTTP server on `:4000`; intercepts `POST /v1/chat/completions`, runs ZK pipeline, forwards sanitized request |
+| Proxy | `cargo run -- proxy` | Axum HTTP server on `:4000`; intercepts `POST /v1/chat/completions`, extracts intent → routes to FastLane or ZK SlowLane → forwards sanitized request |
 | Verify | `cargo run -- verify <bundle.zip>` | Offline bundle verification via `bb verify` |
 | List | `cargo run -- list` | List recent receipts from `~/.zemtik/receipts.db` |
 
-### ZK Data Flow
+### Proxy Data Flow (v0.3+)
 
 ```
-Raw Transactions (private witnesses, never leave the host)
-  → BabyJubJub EdDSA signing (per batch of 50)
-  → Noir circuit: Poseidon commitment verification + aggregation
-  → UltraHonk proof (bb v4 / Barretenberg)
-  → Proof verified locally ✓
-  → Aggregate only → OpenAI
+POST /v1/chat/completions (user prompt)
+  → Intent extraction (intent.rs — regex/keyword, no LLM)
+  → Routing decision (router.rs — schema_config.json sensitivity)
+      ├── FastLane (low sensitivity): DB sum → BabyJubJub attestation → EvidencePack
+      └── ZK SlowLane (critical sensitivity):
+            Raw Transactions (private witnesses, never leave the host)
+              → BabyJubJub EdDSA signing (per batch of 50)
+              → Noir circuit: Poseidon commitment verification + aggregation
+              → UltraHonk proof (bb v4 / Barretenberg)
+              → Proof verified locally ✓
+              → Aggregate only → OpenAI
 ```
 
 ### Source Modules (`src/`)
 
 | File | Role |
 |------|------|
-| `main.rs` | Pipeline orchestrator; CLI arg parsing; routes to proxy / verify / pipeline |
-| `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception |
-| `db.rs` | DB abstraction (SQLite + Supabase); transaction seeding; EdDSA signing |
+| `main.rs` | Pipeline orchestrator; CLI arg parsing; routes to proxy / verify / list / pipeline |
+| `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception; FastLane + ZK dispatch |
+| `intent.rs` | Natural-language → `IntentResult` (table, time range) via regex/keyword matching |
+| `router.rs` | Routing decision: `schema_config.json` sensitivity → `FastLane` or `ZkSlowLane` |
+| `engine_fast.rs` | FastLane: DB SUM → BabyJubJub attestation (no ZK, fully concurrent) |
+| `evidence.rs` | Builds `EvidencePack` for both engine paths (attestation_hash or proof_hash) |
+| `db.rs` | DB abstraction (SQLite + Supabase); transaction seeding; EdDSA signing; `sum_by_category` |
 | `prover.rs` | Subprocess management for `nargo compile`, `nargo execute`, `bb generate` |
 | `verify.rs` | Proof bundle extraction + `bb verify` invocation |
 | `bundle.rs` | ZIP bundle creation for portable proofs |
 | `openai.rs` | OpenAI Chat Completions API client |
-| `config.rs` | Layered config: defaults → `~/.zemtik/config.yaml` → `ZEMTIK_*` env vars → CLI flags |
-| `receipts.rs` | SQLite receipts ledger (CRUD) |
+| `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json` |
+| `receipts.rs` | SQLite receipts ledger (CRUD + v1 migration: `engine_used`, `proof_hash`, `data_exfiltrated`) |
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
-| `types.rs` | Shared types: `Transaction`, `AuditRecord`, `SignatureData`, … |
+| `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |
 
 ### ZK Circuit (`circuit/`)
@@ -114,7 +123,10 @@ GitHub Actions (`release.yml`) cross-compiles for `x86_64-linux`, `aarch64-linux
 
 ## Key constraints and known gaps
 
-- Query is hardcoded (500 txs, client 123, AWS spend, Q1 2024) — no dynamic query support yet.
+- CLI pipeline query is hardcoded (500 txs, client 123, `aws_spend`, Q1 2024). Proxy mode supports natural-language queries via `schema_config.json`-defined tables.
+- `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json` and configure table sensitivity before starting the proxy.
+- FastLane always uses the in-memory seeded SQLite ledger (Supabase FastLane connector deferred to v2).
+- `schema_key_to_category_code` only maps tables present in the demo seed (`aws_spend`, `payroll`, `travel`). Schema keys not in this map cannot use the ZK slow lane.
 - `bb verify` subprocess has no timeout in proxy mode (potential deadlock risk).
 - `--no-verify` hook bypass and force-push to main are never acceptable.
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).
