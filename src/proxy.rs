@@ -457,7 +457,11 @@ async fn handle_zk_slow_lane(
         None
     };
 
-    let target_category = db::schema_key_to_category_code(&intent.table).unwrap_or(db::CAT_AWS);
+    let target_category = db::schema_key_to_category_code(&intent.table)
+        .ok_or_else(|| ProxyError(anyhow::anyhow!(
+            "table '{}' has no circuit category mapping — cannot generate ZK proof",
+            intent.table
+        )))?;
     let params = QueryParams {
         client_id: 123,
         target_category,
@@ -745,6 +749,7 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// RAII guard that removes a per-run work directory on drop (success or error).
@@ -764,7 +769,11 @@ async fn run_zk_pipeline(
     prompt_hash: String,
     intent: crate::types::IntentResult,
 ) -> anyhow::Result<ZkPipelineResult> {
-    let target_category = db::schema_key_to_category_code(&intent.table).unwrap_or(db::CAT_AWS);
+    let target_category = db::schema_key_to_category_code(&intent.table)
+        .ok_or_else(|| anyhow::anyhow!(
+            "table '{}' has no circuit category mapping — cannot generate ZK proof",
+            intent.table
+        ))?;
     let params = QueryParams {
         client_id: 123,
         target_category,

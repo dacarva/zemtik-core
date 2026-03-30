@@ -26,26 +26,29 @@ impl std::fmt::Display for IntentError {
 pub fn extract_intent(prompt: &str, schema: &SchemaConfig) -> Result<IntentResult, IntentError> {
     let lower = prompt.to_lowercase();
 
-    // Build alias map: normalized-alias → table_key
-    let mut matched_table: Option<String> = None;
-    'outer: for (key, tc) in &schema.tables {
-        // Check the table key itself (case-insensitive)
-        if lower.contains(&key.to_lowercase()) {
-            matched_table = Some(key.clone());
-            break 'outer;
-        }
-        // Check all aliases
-        if let Some(ref aliases) = tc.aliases {
-            for alias in aliases {
-                if lower.contains(&alias.to_lowercase()) {
-                    matched_table = Some(key.clone());
-                    break 'outer;
-                }
-            }
+    // Collect all matching table keys to handle multi-match deterministically.
+    // If the prompt matches more than one table, the highest-sensitivity table wins
+    // (critical > low). This ensures routing is always fail-secure, never
+    // non-deterministic across requests due to HashMap iteration order.
+    let mut matches: Vec<(String, &str)> = Vec::new(); // (table_key, sensitivity)
+    for (key, tc) in &schema.tables {
+        let key_lower = key.to_lowercase();
+        let matched = lower.contains(&key_lower) || tc.aliases.as_deref().unwrap_or(&[])
+            .iter()
+            .any(|a| lower.contains(&a.to_lowercase()));
+        if matched {
+            matches.push((key.clone(), tc.sensitivity.as_str()));
         }
     }
 
-    let table = matched_table.ok_or(IntentError::NoTableIdentified)?;
+    // Pick the highest-sensitivity match (critical > low). Sort deterministically
+    // within the same sensitivity by table key so routing is stable.
+    matches.sort_by(|a, b| {
+        let rank = |s: &str| if s == "critical" { 0u8 } else { 1u8 };
+        rank(a.1).cmp(&rank(b.1)).then_with(|| a.0.cmp(&b.0))
+    });
+
+    let table = matches.into_iter().next().map(|(k, _)| k).ok_or(IntentError::NoTableIdentified)?;
 
     let (start_unix, end_unix) = extract_time_range(prompt, schema.fiscal_year_offset_months);
 
