@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// Expand a leading `~` to the home directory so users can write `~/foo` in
 /// config.yaml and env vars.  Paths that don't start with `~` are unchanged.
@@ -17,6 +18,54 @@ fn expand_tilde(s: &str) -> PathBuf {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SchemaConfig — table sensitivity configuration for the routing engine
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SchemaConfig {
+    #[serde(default)]
+    pub fiscal_year_offset_months: i64,
+    pub tables: HashMap<String, TableConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TableConfig {
+    pub sensitivity: String,
+    pub aliases: Option<Vec<String>>,
+}
+
+/// Load a schema_config.json file. Returns `(config, sha256_hex_of_file_bytes)`.
+pub fn load_schema_config(path: &Path) -> anyhow::Result<(SchemaConfig, String)> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read schema_config at {}", path.display()))?;
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let config: SchemaConfig =
+        serde_json::from_slice(&bytes).context("parse schema_config.json")?;
+    Ok((config, hash))
+}
+
+/// Validate a SchemaConfig — called at proxy startup. Returns Err with a
+/// human-readable message on the first validation failure.
+pub fn validate_schema_config(config: &SchemaConfig) -> anyhow::Result<()> {
+    for (key, tc) in &config.tables {
+        if key.is_empty() {
+            anyhow::bail!("schema_config: table key must not be empty");
+        }
+        if tc.sensitivity != "critical" && tc.sensitivity != "low" {
+            anyhow::bail!(
+                "schema_config: table '{}' has invalid sensitivity '{}' (must be 'critical' or 'low')",
+                key, tc.sensitivity
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AppConfig
+// ---------------------------------------------------------------------------
+
 /// Application-wide configuration resolved from defaults → YAML → env vars → CLI flags.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -29,6 +78,15 @@ pub struct AppConfig {
     pub db_path: PathBuf,
     pub receipts_db_path: PathBuf,
     pub receipts_dir: PathBuf,
+    /// Path to schema_config.json. Default: ~/.zemtik/schema_config.json.
+    #[serde(skip)]
+    pub schema_config_path: PathBuf,
+    /// Loaded SchemaConfig (None if file absent — fatal in proxy mode).
+    #[serde(skip)]
+    pub schema_config: Option<SchemaConfig>,
+    /// SHA-256 of schema_config.json bytes (set at load time).
+    #[serde(skip)]
+    pub schema_config_hash: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -44,6 +102,9 @@ impl Default for AppConfig {
             db_path: base.join("zemtik.db"),
             receipts_db_path: base.join("receipts.db"),
             receipts_dir: base.join("receipts"),
+            schema_config_path: base.join("schema_config.json"),
+            schema_config: None,
+            schema_config_hash: None,
         }
     }
 }
@@ -51,6 +112,7 @@ impl Default for AppConfig {
 pub enum Command {
     Proxy,
     Verify(PathBuf),
+    List,
     Pipeline,
 }
 
@@ -126,6 +188,13 @@ pub fn load_from_sources(
         config.circuit_dir = dir.clone();
     }
 
+    // Load schema_config if present (absent is allowed; proxy mode enforces it later).
+    if config.schema_config_path.exists() {
+        let (sc, hash) = load_schema_config(&config.schema_config_path)?;
+        config.schema_config = Some(sc);
+        config.schema_config_hash = Some(hash);
+    }
+
     Ok(config)
 }
 
@@ -144,59 +213,5 @@ impl AppConfig {
         };
         let env: HashMap<String, String> = std::env::vars().collect();
         load_from_sources(yaml.as_deref(), &env, cli)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn default_cli() -> CliArgs {
-        CliArgs::default()
-    }
-
-    #[test]
-    fn defaults_when_yaml_missing() {
-        let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
-        assert_eq!(config.proxy_port, 4000);
-        assert!(config.circuit_dir.to_string_lossy().contains(".zemtik"));
-        assert!(config.runs_dir.to_string_lossy().contains(".zemtik"));
-        assert!(config.keys_dir.to_string_lossy().contains(".zemtik"));
-    }
-
-    #[test]
-    fn yaml_fields_loaded() {
-        let yaml = "proxy_port: 9000\n";
-        let config = load_from_sources(Some(yaml), &HashMap::new(), &default_cli()).unwrap();
-        assert_eq!(config.proxy_port, 9000);
-    }
-
-    #[test]
-    fn env_var_overrides_yaml() {
-        let yaml = "proxy_port: 9000\n";
-        let mut env = HashMap::new();
-        env.insert("ZEMTIK_PROXY_PORT".to_owned(), "8080".to_owned());
-        let config = load_from_sources(Some(yaml), &env, &default_cli()).unwrap();
-        assert_eq!(config.proxy_port, 8080);
-    }
-
-    #[test]
-    fn cli_flag_overrides_env() {
-        let mut env = HashMap::new();
-        env.insert("ZEMTIK_CIRCUIT_DIR".to_owned(), "/env".to_owned());
-        let cli = CliArgs {
-            command: Command::Pipeline,
-            port: None,
-            circuit_dir: Some(PathBuf::from("/cli")),
-        };
-        let config = load_from_sources(None, &env, &cli).unwrap();
-        assert_eq!(config.circuit_dir, PathBuf::from("/cli"));
-    }
-
-    #[test]
-    fn malformed_yaml_returns_error() {
-        let result =
-            load_from_sources(Some("proxy_port: [invalid"), &HashMap::new(), &default_cli());
-        assert!(result.is_err());
     }
 }

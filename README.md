@@ -122,7 +122,7 @@ The first run compiles the Noir circuit (~10s). Subsequent runs skip compilation
 Start the proxy server once. Your application needs no changes—just point it at `localhost:4000`:
 
 ```bash
-cargo run -- --proxy
+cargo run -- proxy
 ```
 
 ```
@@ -131,7 +131,7 @@ cargo run -- --proxy
 ╚══════════════════════════════════════════════════╝
 
 [PROXY] Listening on http://127.0.0.1:4000
-[PROXY] Intercepts POST /v1/chat/completions → ZK pipeline → forwards to OpenAI
+[PROXY] Intercepts POST /v1/chat/completions → intent extraction → FastLane or ZK SlowLane → forwards to OpenAI
 [PROXY] Point your app to http://localhost:4000 instead of api.openai.com
 ```
 
@@ -176,12 +176,19 @@ The payload sent to OpenAI contains exactly three data fields:
 ```
 zemtik-core/
 ├── src/
-│   ├── main.rs        # Pipeline orchestrator + --proxy flag routing
-│   ├── proxy.rs       # Axum proxy server (localhost:4000)
-│   ├── db.rs          # DB backend (SQLite / Supabase) + BabyJubJub KMS
+│   ├── main.rs        # Pipeline orchestrator + CLI subcommand routing
+│   ├── proxy.rs       # Axum proxy server (localhost:4000); FastLane + ZK dispatch
+│   ├── intent.rs      # Natural-language → IntentResult (regex/keyword, no LLM)
+│   ├── router.rs      # Routing decision (schema_config sensitivity → FastLane or ZK)
+│   ├── engine_fast.rs # FastLane: DB sum → BabyJubJub attestation (sub-50ms)
+│   ├── evidence.rs    # EvidencePack builder for both engine paths
+│   ├── db.rs          # DB backend (SQLite / Supabase) + BabyJubJub KMS + sum_by_category
 │   ├── prover.rs      # nargo / bb subprocess pipeline
 │   ├── openai.rs      # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs       # Audit record writer
+│   ├── receipts.rs    # Receipts ledger (CRUD + v1 migration)
+│   ├── keys.rs        # BabyJubJub key generation + persistence
+│   ├── config.rs      # Layered config + SchemaConfig loading
 │   └── types.rs       # Shared types
 ├── circuit/
 │   ├── Nargo.toml     # eddsa = { path = "../vendor/eddsa" }, poseidon v0.2.6
@@ -239,8 +246,9 @@ bb verify -p proof -k vk
 
 ## Known Limitations (POC)
 
-- **Hardcoded query** — The circuit is compiled for 500 transactions, client 123, AWS spend, Q1 2024. Changing query parameters requires recompilation. Production deployments expose parameterized circuits.
-- **Hardcoded private key** — `BANK_SK_SEED = [0x01..0x20]`. In production, this comes from an HSM.
+- **CLI pipeline query is hardcoded** — 500 transactions, client 123, `aws_spend`, Q1 2024. Proxy mode supports natural-language queries against tables defined in `schema_config.json`.
+- **FastLane uses demo data** — FastLane always reads from the in-memory seeded SQLite ledger. Supabase FastLane connector is deferred to v2.
+- **Circuit category mapping** — The ZK slow lane only supports tables with a matching entry in `schema_key_to_category_code` (`aws_spend`, `payroll`, `travel`). New tables require a new circuit variant.
 - **Single query type** — `SUM(amount) WHERE category AND time_range`. COUNT, AVG, and multi-dimensional filters require new circuit variants.
 - **Proving infrastructure** — The current setup uses local CPU proving. For sub-second proofs at scale, GPU/FPGA hardware is required—and it must remain on-prem (remote proving exposes the private witness).
 

@@ -1,0 +1,9 @@
+{
+  "fiscal_year_offset_months": 0,
+  "tables": {
+    "payroll":   { "sensitivity": "critical" },
+    "ma_deals":  { "sensitivity": "critical" },
+    "aws_spend": { "sensitivity": "low", "aliases": ["AWS", "amazon", "cloud spend"] },
+    "travel":    { "sensitivity": "low", "aliases": ["travel", "T&E"] }
+  }
+}

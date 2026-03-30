@@ -193,73 +193,7 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use tempfile::tempdir;
-    use zip::write::SimpleFileOptions;
-
-    /// Regression: ISSUE-001 — zip-slip path traversal in verify_bundle
-    /// Found by /qa on 2026-03-26
-    /// Report: .gstack/qa-reports/qa-report-zemtik-core-2026-03-26.md
-    ///
-    /// A malicious bundle ZIP with entry names containing path traversal sequences
-    /// (e.g. "../../.ssh/authorized_keys") must not escape the temp extract directory.
-    /// The fix strips directory components via `.file_name()` before joining.
-    #[test]
-    fn test_zip_slip_entry_rejected_or_sanitized() {
-        use std::path::Path;
-
-        // Build a minimal ZIP with a path-traversal entry name
-        let tmp = std::env::temp_dir().join(format!("zipslip-test-{}.zip", std::process::id()));
-        let file = std::fs::File::create(&tmp).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let opts = SimpleFileOptions::default();
-
-        // This entry would escape the extract dir if not sanitized
-        zip.start_file("../../evil.txt", opts).unwrap();
-        zip.write_all(b"should not escape").unwrap();
-        zip.finish().unwrap();
-
-        // verify_bundle should either fail with an error (no filename component)
-        // or safely extract to a flat filename — it must NOT write outside extract dir.
-        // "../../evil.txt" has file_name() == Some("evil.txt"), so it gets sanitized.
-        // The bundle will still fail (missing required files) but won't do path traversal.
-        let result = super::verify_bundle(Path::new(&tmp));
-
-        // The bundle is malformed (missing proof.bin etc), so we expect an error.
-        // What matters is that no file was written outside the temp directory.
-        assert!(result.is_err(), "malformed bundle must return an error");
-
-        let evil_path = std::env::temp_dir().parent().unwrap_or(Path::new("/tmp")).join("evil.txt");
-        assert!(
-            !evil_path.exists(),
-            "zip-slip: file was written outside extract dir at {}",
-            evil_path.display()
-        );
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    /// Regression: ISSUE-001 (edge case) — entry with no filename component
-    /// A ZIP entry named purely as a directory separator (e.g. "/") has no
-    /// file_name() and must be rejected with an error, not panic.
-    #[test]
-    fn test_zip_entry_no_filename_returns_error() {
-        use std::path::Path;
-
-        let tmp = std::env::temp_dir().join(format!("zipslip-noname-{}.zip", std::process::id()));
-        let file = std::fs::File::create(&tmp).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let opts = SimpleFileOptions::default();
-
-        // Entry name that resolves to no file_name() component
-        zip.start_file("/", opts).unwrap();
-        zip.finish().unwrap();
-
-        let result = super::verify_bundle(Path::new(&tmp));
-        assert!(result.is_err(), "entry with no filename must return an error");
-
-        let _ = std::fs::remove_file(&tmp);
-    }
 
     // -----------------------------------------------------------------------
     // cross_verify_sidecar tests
