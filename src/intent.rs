@@ -1,5 +1,4 @@
 use regex::Regex;
-use rusqlite::Connection;
 
 use crate::config::SchemaConfig;
 use crate::types::IntentResult;
@@ -157,12 +156,3 @@ fn month_end_unix(year: i32, month: u32) -> i64 {
         .unwrap_or(0)
 }
 
-/// Log an intent rejection to the `intent_rejections` table.
-#[allow(dead_code)]
-pub fn log_rejection(conn: &Connection, prompt: &str, error: &str) {
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = conn.execute(
-        "INSERT INTO intent_rejections (prompt, error, created_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![prompt, error, now],
-    );
-}

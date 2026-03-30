@@ -90,3 +90,15 @@ fn case_insensitive_payroll() {
     let result = extract_intent("PAYROLL Q3 2024", &schema).unwrap();
     assert_eq!(result.table, "payroll");
 }
+
+#[test]
+fn year_only_range_timestamps() {
+    let schema = test_schema();
+    // Year-only path (no Q[1-4] in prompt)
+    let result = extract_intent("AWS spend in 2025", &schema).unwrap();
+    assert_eq!(result.table, "aws_spend");
+    // 2025-01-01 00:00:00 UTC
+    assert_eq!(result.start_unix_secs, 1_735_689_600);
+    // 2025-12-31 23:59:59 UTC
+    assert_eq!(result.end_unix_secs, 1_767_225_599);
+}
