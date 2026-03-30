@@ -315,21 +315,21 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     let list = receipts::list_receipts(&conn).context("list receipts")?;
 
     if list.is_empty() {
-        println!("No receipts found. Run zemtik (pipeline) or zemtik --proxy to generate receipts.");
+        println!("No receipts found. Run zemtik (pipeline) or zemtik proxy to generate receipts.");
         return Ok(());
     }
 
     println!(
-        "{:<38}  {:<20}  {:>12}  {}",
+        "{:<38}  {:<20}  {:<22}  {}",
         "Receipt ID", "Engine", "Status", "Created At"
     );
-    println!("{}", "-".repeat(100));
+    println!("{}", "-".repeat(110));
     for r in &list {
         println!(
-            "{:<38}  {:<20}  {:>12}  {}",
+            "{:<38}  {:<20}  {:<22}  {}",
             r.id,
             r.engine_used,
-            &r.proof_status[..r.proof_status.len().min(12)],
+            r.proof_status,
             r.created_at,
         );
     }
