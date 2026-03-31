@@ -152,10 +152,8 @@
 - **Effort:** S (human) → S (CC+gstack)
 - **Depends on:** feat/routing-engine merged.
 
-### intent.rs: compile regexes once (P3)
-- **What:** `Regex::new(...)` is called inside `extract_intent`, which runs on every proxy request. Move to `std::sync::LazyLock` or `once_cell::sync::Lazy`.
-- **Why:** Found by Claude adversarial review (feat/routing-engine, 2026-03-30). Regex compilation is expensive (~microseconds) and wasteful on the hot path.
-- **Effort:** XS (human) → XS (CC+gstack)
+### ~~intent.rs: compile regexes once~~ ✓ DONE (feat/intent-engine, v0.4.0)
+- `time_parser.rs` uses `std::sync::LazyLock` for all regexes (compiled once at first use). `RegexBackend` uses `str::contains()` — no `Regex::new()` calls in the hot path.
 
 ### run_zk_pipeline: reuse ledger DB instead of re-initializing (P3)
 - **What:** `run_zk_pipeline` calls `db::init_db()` on every ZK request, re-seeding the demo SQLite in-memory DB each time. Share the existing `ledger_db` from `ProxyState`.
