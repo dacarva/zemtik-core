@@ -19,7 +19,7 @@ pub const CAT_COFFEE: u64 = 3;
 /// Returns `None` if the table key is not recognized in the demo dataset.
 /// Used by the ZK slow lane to build QueryParams from extracted intent.
 pub fn schema_key_to_category_code(schema_key: &str) -> Option<u64> {
-    match schema_key {
+    match schema_key.to_ascii_lowercase().as_str() {
         "payroll" => Some(CAT_PAYROLL),
         "aws_spend" => Some(CAT_AWS),
         "travel" => Some(CAT_COFFEE),
