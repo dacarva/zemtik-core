@@ -60,11 +60,16 @@ Zemtik Core is a **Rust + Noir ZK middleware** that enforces zero-knowledge proo
 | Verify | `cargo run -- verify <bundle.zip>` | Offline bundle verification via `bb verify` |
 | List | `cargo run -- list` | List recent receipts from `~/.zemtik/receipts.db` |
 
-### Proxy Data Flow (v0.3+)
+### Proxy Data Flow (v0.4+)
 
 ```
 POST /v1/chat/completions (user prompt)
-  → Intent extraction (intent.rs — regex/keyword, no LLM)
+  → Intent extraction (intent.rs — IntentBackend trait dispatch, no LLM)
+      ├── EmbeddingBackend (default): fastembed BGE-small-en ONNX, cosine similarity
+      │     → DeterministicTimeParser (time_parser.rs) for time range extraction
+      │     → confidence < threshold or low margin → Err(NoTableIdentified) → ZK SlowLane
+      │     → unrecognized time token → Err(TimeRangeAmbiguous) → ZK SlowLane
+      └── RegexBackend (fallback if model unavailable): keyword/.contains() matching
   → Routing decision (router.rs — schema_config.json sensitivity)
       ├── FastLane (low sensitivity): DB sum → BabyJubJub attestation → EvidencePack
       └── ZK SlowLane (critical sensitivity):
@@ -82,7 +87,9 @@ POST /v1/chat/completions (user prompt)
 |------|------|
 | `main.rs` | Pipeline orchestrator; CLI arg parsing; routes to proxy / verify / list / pipeline |
 | `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception; FastLane + ZK dispatch |
-| `intent.rs` | Natural-language → `IntentResult` (table, time range) via regex/keyword matching |
+| `intent.rs` | `IntentBackend` trait + `RegexBackend` (fallback); dispatches to embedding or regex backend |
+| `intent_embed.rs` | `EmbeddingBackend` (fastembed + BGE-small-en ONNX, CPU-only); schema index builder; cosine similarity |
+| `time_parser.rs` | `DeterministicTimeParser` — Q/H/FY/MMM/relative/YTD patterns; unrecognized → `TimeRangeAmbiguous` |
 | `router.rs` | Routing decision: `schema_config.json` sensitivity → `FastLane` or `ZkSlowLane` |
 | `engine_fast.rs` | FastLane: DB SUM → BabyJubJub attestation (no ZK, fully concurrent) |
 | `evidence.rs` | Builds `EvidencePack` for both engine paths (attestation_hash or proof_hash) |
@@ -92,7 +99,7 @@ POST /v1/chat/completions (user prompt)
 | `bundle.rs` | ZIP bundle creation for portable proofs |
 | `openai.rs` | OpenAI Chat Completions API client |
 | `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json` |
-| `receipts.rs` | SQLite receipts ledger (CRUD + v1 migration: `engine_used`, `proof_hash`, `data_exfiltrated`) |
+| `receipts.rs` | SQLite receipts ledger (CRUD + v2 migration: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |
@@ -107,7 +114,7 @@ Layered resolution order (later overrides earlier):
 
 1. Hardcoded defaults (`~/.zemtik/` subdirs: `circuit/`, `runs/`, `keys/`, `receipts/`, `receipts.db`, `zemtik.db`)
 2. YAML file (`~/.zemtik/config.yaml`)
-3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`)
+3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`)
 4. CLI flags (`--port`, `--circuit-dir`)
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end runs.
@@ -119,14 +126,16 @@ Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end
 
 ### Release / CI
 
-GitHub Actions (`release.yml`) cross-compiles for `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin` on version tags (`v*`). Archives include binary + `install.sh` + `config.example.yaml`.
+GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin intent-eval --features eval`) before cross-compiling for `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin` on version tags (`v*`). Archives include binary + `install.sh` + `config.example.yaml`.
 
 ## Key constraints and known gaps
 
 - CLI pipeline query is hardcoded (500 txs, client 123, `aws_spend`, Q1 2024). Proxy mode supports natural-language queries via `schema_config.json`-defined tables.
-- `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json` and configure table sensitivity before starting the proxy.
+- `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json`. Tables must include `description` and `example_prompts` fields for the embedding backend.
 - FastLane always uses the in-memory seeded SQLite ledger (Supabase FastLane connector deferred to v2).
 - `schema_key_to_category_code` only maps tables present in the demo seed (`aws_spend`, `payroll`, `travel`). Schema keys not in this map cannot use the ZK slow lane.
 - `bb verify` subprocess has no timeout in proxy mode (potential deadlock risk).
 - `--no-verify` hook bypass and force-push to main are never acceptable.
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).
+- EmbeddingBackend downloads BGE-small-en model (~130MB) on first proxy start to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip. First start can take 30–120s.
+- `IntentBackend` trait: `index_schema(&mut self, schema)` called once at startup; `match_prompt(&self, prompt, k)` returns sorted `Vec<(table_key, score)>`. Add new backends by implementing this trait.
