@@ -138,7 +138,12 @@ mod embed_impl {
                     );
                 }
                 Err(e) => {
-                    eprintln!("[INTENT] WARN: failed to build embedding index: {}", e);
+                    // Panic at startup — an empty index silently returns 400 for all requests
+                    // with no operator-visible indication that the index is broken.
+                    // Fail fast so the process does not start in a broken state.
+                    panic!("[INTENT] FATAL: failed to build embedding index: {}. \
+                        Check disk space and ONNX runtime. \
+                        Set ZEMTIK_INTENT_BACKEND=regex to bypass the embedding backend.", e);
                 }
             }
         }
@@ -148,8 +153,18 @@ mod embed_impl {
                 return Vec::new();
             }
 
-            // Truncate prompt before embedding
-            let prompt = if prompt.len() > 2000 { &prompt[..2000] } else { prompt };
+            // Truncate at char boundary, not byte boundary (avoids panic on multi-byte UTF-8)
+            let truncated_buf;
+            let prompt = if prompt.len() > 2000 {
+                truncated_buf = prompt
+                    .char_indices()
+                    .nth(2000)
+                    .map(|(i, _)| &prompt[..i])
+                    .unwrap_or(prompt);
+                truncated_buf
+            } else {
+                prompt
+            };
 
             let query_embeddings = match self.embed_texts(&[prompt.to_owned()]) {
                 Ok(e) => e,

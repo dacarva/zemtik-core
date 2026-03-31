@@ -132,9 +132,15 @@ pub fn extract_intent_with_backend(
     backend: &dyn IntentBackend,
     threshold: f32,
 ) -> Result<IntentResult, IntentError> {
-    // Truncate long prompts before embedding
+    // Truncate long prompts before embedding (truncate at char boundary, not byte boundary)
+    let truncated;
     let prompt = if prompt.len() > 2000 {
-        &prompt[..2000]
+        truncated = prompt
+            .char_indices()
+            .nth(2000)
+            .map(|(i, _)| &prompt[..i])
+            .unwrap_or(prompt);
+        truncated
     } else {
         prompt
     };

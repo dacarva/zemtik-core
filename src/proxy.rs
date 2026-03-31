@@ -83,7 +83,7 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     // Build intent backend. Use EmbeddingBackend unless ZEMTIK_INTENT_BACKEND=regex
     // or the feature is disabled. Falls back to RegexBackend on model load failure.
     let intent_backend: Arc<dyn IntentBackend> = {
-        let use_embed = config.intent_backend != "regex";
+        let use_embed = config.intent_backend.to_lowercase() != "regex";
         let backend: Box<dyn IntentBackend> = if use_embed {
             // Validate embed fields before attempting model load
             if let Err(e) = crate::config::validate_schema_config(&schema, true) {
@@ -256,7 +256,7 @@ async fn handle_chat_completions(
 
     match route {
         Route::FastLane => {
-            handle_fast_lane(state, body, api_key, intent_result, total_start).await
+            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, total_start).await
         }
         Route::ZkSlowLane => {
             handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, total_start).await
@@ -269,6 +269,8 @@ async fn handle_fast_lane(
     state: Arc<ProxyState>,
     mut body: Value,
     api_key: String,
+    request_hash: String,
+    prompt_hash: String,
     intent_result: crate::types::IntentResult,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
@@ -347,8 +349,8 @@ async fn handle_fast_lane(
                 proof_status: "FAST_LANE_ATTESTED".to_owned(),
                 circuit_hash: String::new(),
                 bb_version: String::new(),
-                prompt_hash: String::new(),
-                request_hash: String::new(),
+                prompt_hash: prompt_hash.clone(),
+                request_hash: request_hash.clone(),
                 created_at: timestamp.clone(),
                 engine_used: "fast_lane".to_owned(),
                 proof_hash: None,

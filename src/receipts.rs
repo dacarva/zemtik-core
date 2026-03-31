@@ -1,5 +1,6 @@
 use anyhow::Context;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 /// A row in the receipts table — one per successfully generated proof bundle.
 pub struct Receipt {
@@ -126,9 +127,14 @@ pub fn insert_intent_rejection(
     error: &str,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
+    // Store first 100 chars for debuggability + SHA-256 of the full prompt.
+    // Avoids persisting PII or sensitive financial data in plaintext.
+    let prompt_preview = prompt.chars().take(100).collect::<String>();
+    let prompt_hash = hex::encode(Sha256::digest(prompt.as_bytes()));
+    let stored = format!("{}…[sha256:{}]", prompt_preview, &prompt_hash[..16]);
     conn.execute(
         "INSERT INTO intent_rejections (prompt, error, created_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![prompt, error, now],
+        rusqlite::params![stored, error, now],
     )
     .context("insert intent rejection")?;
     Ok(())

@@ -142,9 +142,9 @@ pub fn parse_time_range(
         return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
-    // past N days
+    // past N days (cap at 36500 days / ~100 years to prevent Duration overflow)
     if let Some(cap) = RE_PAST_N_DAYS.captures(prompt) {
-        let n: i64 = cap[1].parse().unwrap_or(1).max(1);
+        let n: i64 = cap[1].parse().unwrap_or(1).max(1).min(36500);
         let end = now.timestamp();
         let start = (now - Duration::days(n)).timestamp();
         return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
@@ -152,14 +152,14 @@ pub fn parse_time_range(
 
     // last quarter
     if RE_LAST_QUARTER.is_match(prompt) {
-        let (start, end) = last_quarter_range(now.year(), now.month());
+        let (start, end) = last_quarter_range(now.year(), now.month(), fiscal_offset_months);
         return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
     // this quarter
     if RE_THIS_QUARTER.is_match(prompt) {
         let q = month_to_quarter(now.month());
-        let (start, end) = quarter_to_unix(q, now.year(), 0);
+        let (start, end) = quarter_to_unix(q, now.year(), fiscal_offset_months);
         return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
@@ -293,14 +293,14 @@ fn prev_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
-fn last_quarter_range(current_year: i32, current_month: u32) -> (i64, i64) {
+fn last_quarter_range(current_year: i32, current_month: u32, fiscal_offset_months: i64) -> (i64, i64) {
     let current_q = month_to_quarter(current_month);
     let (prev_year, prev_q) = if current_q == 1 {
         (current_year - 1, 4u32)
     } else {
         (current_year, current_q - 1)
     };
-    quarter_to_unix(prev_q, prev_year, 0)
+    quarter_to_unix(prev_q, prev_year, fiscal_offset_months)
 }
 
 fn month_name_to_number(name: &str) -> Option<u32> {
