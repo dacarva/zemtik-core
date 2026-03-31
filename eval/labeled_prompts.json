@@ -1,6 +1,6 @@
 [
-  {"prompt": "What was our Q1 2024 AWS spend?", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1704067200, "end": 1711843199}},
-  {"prompt": "Show me cloud costs for Q2 2024", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1711843200, "end": 1719791999}},
+  {"prompt": "What was our Q1 2024 AWS spend?", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1704067200, "end": 1711929599}},
+  {"prompt": "Show me cloud costs for Q2 2024", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1711929600, "end": 1719791999}},
   {"prompt": "How much did we spend on Amazon Web Services in 2025?", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1735689600, "end": 1767225599}},
   {"prompt": "What is our total payroll cost for Q3 2024?", "expected_table": "payroll", "expected_route": "ZkSlowLane", "expected_time": {"start": 1719792000, "end": 1727740799}},
   {"prompt": "Show me salary expenses for 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane", "expected_time": {"start": 1704067200, "end": 1735689599}},
@@ -28,20 +28,20 @@
   {"prompt": "Give me our compensation and benefits costs for FY2025", "expected_table": "payroll", "expected_route": "ZkSlowLane"},
   {"prompt": "Total headcount cost Q1 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane"},
 
-  {"prompt": "Travel reimbursements paid in Q2 2024", "expected_table": "travel", "expected_route": "FastLane", "expected_time": {"start": 1711843200, "end": 1719791999}},
+  {"prompt": "Travel reimbursements paid in Q2 2024", "expected_table": "travel", "expected_route": "FastLane", "expected_time": {"start": 1711929600, "end": 1719791999}},
   {"prompt": "What is our T&E spend this quarter?", "expected_table": "travel", "expected_route": "FastLane"},
   {"prompt": "Show business travel expenditure for the year", "expected_table": "travel", "expected_route": "FastLane"},
   {"prompt": "Employee trip and accommodation costs Q3 2024", "expected_table": "travel", "expected_route": "FastLane"},
   {"prompt": "How much have we spent on flights and hotels YTD?", "expected_table": "travel", "expected_route": "FastLane"},
 
-  {"prompt": "AWS expenditure in March 2024", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1709251200, "end": 1711843199}},
+  {"prompt": "AWS expenditure in March 2024", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1709251200, "end": 1711929599}},
   {"prompt": "How much did we spend on cloud in the first half of 2024?", "expected_table": "aws_spend", "expected_route": "FastLane"},
   {"prompt": "Cloud costs for past 90 days", "expected_table": "aws_spend", "expected_route": "FastLane"},
   {"prompt": "Amazon bills since last month", "expected_table": "aws_spend", "expected_route": "FastLane"},
   {"prompt": "EC2 and S3 costs for 2025", "expected_table": "aws_spend", "expected_route": "FastLane"},
   {"prompt": "Our AWS cost allocation this fiscal year", "expected_table": "aws_spend", "expected_route": "FastLane"},
 
-  {"prompt": "payroll March 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane", "expected_time": {"start": 1709251200, "end": 1711843199}},
+  {"prompt": "payroll March 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane", "expected_time": {"start": 1709251200, "end": 1711929599}},
   {"prompt": "Total HR and benefits costs past 30 days", "expected_table": "payroll", "expected_route": "ZkSlowLane"},
   {"prompt": "Wages disbursed in H2 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane"},
   {"prompt": "Payroll run costs this month", "expected_table": "payroll", "expected_route": "ZkSlowLane"},
@@ -81,7 +81,7 @@
   {"prompt": "per diem and travel reimbursements total", "expected_table": "travel", "expected_route": "FastLane"},
   {"prompt": "expense reports total for this quarter", "expected_table": "travel", "expected_route": "FastLane"},
 
-  {"prompt": "aws Q1 2024", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1704067200, "end": 1711843199}},
+  {"prompt": "aws Q1 2024", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1704067200, "end": 1711929599}},
   {"prompt": "amazon 2025", "expected_table": "aws_spend", "expected_route": "FastLane", "expected_time": {"start": 1735689600, "end": 1767225599}},
   {"prompt": "cloud Q3 2024", "expected_table": "aws_spend", "expected_route": "FastLane"},
   {"prompt": "payroll Q2 2025", "expected_table": "payroll", "expected_route": "ZkSlowLane"},
@@ -117,7 +117,7 @@
   {"prompt": "sales team travel costs H1 2025", "expected_table": "travel", "expected_route": "FastLane"},
   {"prompt": "client entertainment expenses Q3 2024", "expected_table": "travel", "expected_route": "FastLane"},
 
-  {"prompt": "PAYROLL Q1 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane", "expected_time": {"start": 1704067200, "end": 1711843199}},
+  {"prompt": "PAYROLL Q1 2024", "expected_table": "payroll", "expected_route": "ZkSlowLane", "expected_time": {"start": 1704067200, "end": 1711929599}},
   {"prompt": "AWS SPEND 2025", "expected_table": "aws_spend", "expected_route": "FastLane"},
   {"prompt": "TRAVEL EXPENSES Q2 2025", "expected_table": "travel", "expected_route": "FastLane"},
   {"prompt": "aws_spend category report q3 2024", "expected_table": "aws_spend", "expected_route": "FastLane"},

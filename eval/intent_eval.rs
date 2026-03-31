@@ -86,6 +86,8 @@ fn main() -> anyhow::Result<()> {
     let mut time_total = 0usize;
     let mut false_fastlane = 0usize;  // adversarial entries that incorrectly routed to FastLane
     let mut adversarial_total = 0usize;
+    let mut route_correct = 0usize;
+    let mut route_total = 0usize;
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -123,6 +125,21 @@ fn main() -> anyhow::Result<()> {
                 match &result {
                     Ok(r) if r.table == *expected => {
                         table_correct += 1;
+                        // Check route correctness
+                        route_total += 1;
+                        let actual_route = zemtik::router::decide_route(r, &schema);
+                        let actual_route_str = match actual_route {
+                            zemtik::types::Route::FastLane => "FastLane",
+                            zemtik::types::Route::ZkSlowLane => "ZkSlowLane",
+                        };
+                        if actual_route_str == entry.expected_route.as_str() {
+                            route_correct += 1;
+                        } else {
+                            failures.push(format!(
+                                "WRONG-ROUTE: {:?} → {} (expected {})",
+                                entry.prompt, actual_route_str, entry.expected_route
+                            ));
+                        }
                         // Check time range if expected
                         if let Some(ref et) = entry.expected_time {
                             time_total += 1;
@@ -174,6 +191,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         100.0
     };
+    let route_wrong = route_total - route_correct;
 
     println!(
         "  Table accuracy : {}/{} ({:.1}%)  [gate: ≥95%]  {}",
@@ -195,6 +213,12 @@ fn main() -> anyhow::Result<()> {
         time_accuracy,
         if time_accuracy >= 90.0 { "✓ PASS" } else { "✗ FAIL" }
     );
+    println!(
+        "  Route correct  : {}/{}           [gate: 0 wrong] {}",
+        route_correct,
+        route_total,
+        if route_wrong == 0 { "✓ PASS" } else { "✗ FAIL" }
+    );
     println!("═══════════════════════════════════════════════════");
 
     if !failures.is_empty() {
@@ -205,7 +229,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let all_pass = table_accuracy >= 95.0 && false_fastlane == 0 && time_accuracy >= 90.0;
+    let all_pass = table_accuracy >= 95.0 && false_fastlane == 0 && time_accuracy >= 90.0 && route_wrong == 0;
 
     if all_pass {
         println!();
