@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     println!("Using schema from: {}", schema_file.display());
 
     // Resolve intent backend
-    let backend_env = std::env::var("ZEMTIK_INTENT_BACKEND").unwrap_or_default();
+    let backend_env = std::env::var("ZEMTIK_INTENT_BACKEND").unwrap_or_default().to_lowercase();
     let use_embed = backend_env != "regex";
     let threshold: f32 = std::env::var("ZEMTIK_INTENT_THRESHOLD")
         .ok()
