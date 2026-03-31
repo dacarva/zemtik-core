@@ -29,7 +29,7 @@ mod embed_impl {
     use std::path::Path;
 
     use anyhow::Context;
-    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    use fastembed::{EmbeddingModel, InitOptionsWithLength, TextEmbedding};
 
     use crate::config::SchemaConfig;
     use crate::intent::IntentBackend;
@@ -41,7 +41,7 @@ mod embed_impl {
     }
 
     pub struct EmbeddingBackend {
-        model: TextEmbedding,
+        model: std::sync::Mutex<TextEmbedding>,
         /// All (table_key, embedding) pairs — multiple per table (key + aliases + desc + examples)
         index: Vec<IndexEntry>,
     }
@@ -55,17 +55,19 @@ mod embed_impl {
             std::fs::create_dir_all(models_dir)
                 .context("create models directory")?;
 
-            let options = InitOptions::new(EmbeddingModel::BGESmallENV15)
+            let options = InitOptionsWithLength::new(EmbeddingModel::BGESmallENV15)
                 .with_cache_dir(models_dir.to_path_buf())
-                .with_show_download_message(true);
+                .with_show_download_progress(true);
 
             let model = TextEmbedding::try_new(options).context("init fastembed BGE-small-en")?;
 
-            Ok(EmbeddingBackend { model, index: Vec::new() })
+            Ok(EmbeddingBackend { model: std::sync::Mutex::new(model), index: Vec::new() })
         }
 
         fn embed_texts(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
             self.model
+                .lock()
+                .map_err(|e| anyhow::anyhow!("model mutex poisoned: {}", e))?
                 .embed(texts.to_vec(), None)
                 .context("embed texts")
         }
@@ -197,7 +199,7 @@ pub fn try_new_embedding_backend(
     models_dir: &Path,
 ) -> Option<Box<dyn IntentBackend>> {
     match EmbeddingBackend::new(models_dir) {
-        Ok(mut backend) => Some(Box::new(backend) as Box<dyn IntentBackend>),
+        Ok(backend) => Some(Box::new(backend) as Box<dyn IntentBackend>),
         Err(e) => {
             eprintln!(
                 "[INTENT] WARN: embedding model unavailable — falling back to regex intent extraction. \
