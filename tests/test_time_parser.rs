@@ -14,7 +14,7 @@ use zemtik::time_parser::parse_time_range;
 // 2024-07-01 00:00:00 = 1_719_792_000
 // 2024-12-31 23:59:59 = 1_735_689_599
 // 2024-03-01 00:00:00 = 1_709_251_200
-// 2024-03-31 23:59:59 = 1_711_843_199
+// 2024-03-31 23:59:59 = 1_711_929_599
 
 #[test]
 fn quarter_no_offset() {
@@ -87,14 +87,14 @@ fn month_name_long() {
     let tr = parse_time_range("March 2024 AWS spend", 0).unwrap();
     // 2024-03-01 → 2024-03-31
     assert_eq!(tr.start_unix_secs, 1_709_251_200);
-    assert_eq!(tr.end_unix_secs, 1_711_843_199);
+    assert_eq!(tr.end_unix_secs, 1_711_929_599);
 }
 
 #[test]
 fn month_name_abbrev() {
     let tr = parse_time_range("Mar 2024 travel expenses", 0).unwrap();
     assert_eq!(tr.start_unix_secs, 1_709_251_200);
-    assert_eq!(tr.end_unix_secs, 1_711_843_199);
+    assert_eq!(tr.end_unix_secs, 1_711_929_599);
 }
 
 #[test]
