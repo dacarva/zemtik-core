@@ -94,6 +94,45 @@
 
 ---
 
+## feat/intent-engine TODOs (added 2026-03-30, plan-ceo-review)
+
+### Multi-turn context extraction for intent (P2, post-feat/intent-engine)
+- **What:** Extend `proxy.rs:166` to concatenate the last N user messages before passing to `extract_intent`, not just the last message. Also handle structured content arrays (`[{"type":"text","text":"..."}]`) which currently yield an empty prompt string.
+- **Why:** An analyst typing 'Q1 2024' as a follow-up to 'AWS spend' gets `NoTableIdentified` today — intent is split across turns. Flagged by Codex outside voice during CEO review. Structured content gap also flagged by Codex outside voice during feat/intent-engine eng review (2026-03-30) — many OpenAI SDK clients send structured content, making routing accuracy claims hollow for those clients.
+- **Pros:** Improves routing accuracy for conversational use and for SDK clients that use structured message content. Stays local. No new dependencies.
+- **Cons:** May over-weight stale context from earlier turns. Needs a window size parameter.
+- **Context:** Current `proxy.rs:166` only extracts the last user message content if it's a plain string. Multi-turn context and structured message parts are dropped.
+- **Effort:** S (human: ~2h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged.
+
+### ONNX model integrity check at load time (P2, before second client)
+- **What:** Compute SHA-256 of the downloaded BGE-small-en model file and store alongside it. Verify checksum on subsequent loads before ONNX runtime init.
+- **Why:** The model binary downloads from the fastembed hub without integrity verification. For a ZK middleware marketing 'cryptographic safety,' a supply-chain attack on the ML model is a trust inconsistency. Severity: low for SF demo, medium for any enterprise with a security review.
+- **Pros:** Closes a supply-chain gap. `sha2` already in `Cargo.toml`. Simple to implement.
+- **Cons:** ~50ms startup overhead for 130MB file check. Checksum must be published alongside model updates.
+- **Effort:** S (human: ~2h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged (provides the model download flow to extend).
+
+### Schema hot-reload via SIGHUP (P3, post-v1)
+- **What:** On SIGHUP, rebuild the embedding index from `schema_config.json` without proxy restart. Use Arc-swap pattern to atomically replace the `Arc<dyn IntentBackend>` in `ProxyState`.
+- **Why:** Right now schema changes require a proxy restart. Operational friction for enterprise environments where table sensitivity changes frequently.
+- **Pros:** Zero-downtime schema updates. Pairs well with external secret rotation flows.
+- **Cons:** Requires careful coordination with `pipeline_lock` (ZK requests must not see a partially rebuilt index). Arc-swap is the clean pattern but adds complexity.
+- **Context:** The design doc explicitly deferred this. Confirmed deferred in CEO review (2026-03-30). Revisit when second client onboards.
+- **Effort:** M (human: ~3 days / CC: ~30min)
+- **Depends on:** feat/intent-engine merged.
+
+### Default time range is wall-clock dependent (P3, post-v1)
+- **What:** Prompts with no time expression (e.g. "what is our total AWS spend?") default to the current calendar year. Add a `default_time_range` config option (e.g., `"full_history"`, `"current_year"`, or an explicit range) so behavior is deterministic across deployments.
+- **Why:** Receipts generated from identical prompts in January vs December cover different data periods. For a system producing cryptographic receipts, this creates a reproducibility gap — two receipts with the same prompt but different timestamps silently represent different data. Surfaced by Codex outside voice during feat/intent-engine eng review (2026-03-30).
+- **Pros:** Makes receipt interpretation unambiguous. Needed for audit trails. Simple config addition.
+- **Cons:** Changing the default would be a breaking behavior change for existing users. Only add as an opt-in initially.
+- **Context:** Existing behavior (default to current year) is inherited from the initial intent.rs. Not urgent for SF demo but becomes relevant when compliance teams review receipts.
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged (provides DeterministicTimeParser where this config would be applied).
+
+---
+
 ## feat/routing-engine TODOs (added 2026-03-30, plan-eng-review)
 
 ### ~~Evaluate evidence.rs vs. bundle.rs overlap~~ ✓ DONE (feat/routing-engine, 2026-03-30)

@@ -1,9 +1,51 @@
 {
   "fiscal_year_offset_months": 0,
   "tables": {
-    "payroll":   { "sensitivity": "critical" },
-    "ma_deals":  { "sensitivity": "critical" },
-    "aws_spend": { "sensitivity": "low", "aliases": ["AWS", "amazon", "cloud spend"] },
-    "travel":    { "sensitivity": "low", "aliases": ["travel", "T&E"] }
+    "aws_spend": {
+      "sensitivity": "low",
+      "aliases": ["AWS", "amazon", "cloud spend"],
+      "description": "AWS cloud infrastructure costs by service and region.",
+      "example_prompts": [
+        "What was our total AWS spend last quarter?",
+        "Show me cloud costs for Q1 2024",
+        "How much did we spend on Amazon Web Services this year?",
+        "What is our AWS bill for H1 2025?",
+        "Give me a breakdown of our cloud infrastructure spend"
+      ]
+    },
+    "payroll": {
+      "sensitivity": "critical",
+      "description": "Employee salary, wages, and compensation data.",
+      "example_prompts": [
+        "What was our total payroll cost last quarter?",
+        "Show me salary expenses for 2024",
+        "How much did we spend on employee compensation in Q2 2025?",
+        "What are our total wages and benefits for this year?",
+        "Give me a payroll summary for the fiscal year"
+      ]
+    },
+    "travel": {
+      "sensitivity": "low",
+      "aliases": ["travel", "T&E"],
+      "description": "Employee travel and expense reimbursements.",
+      "example_prompts": [
+        "What was our travel and expense spend last quarter?",
+        "Show me T&E costs for 2024",
+        "How much did employees spend on travel in Q3 2025?",
+        "What are our total travel reimbursements for this year?",
+        "Give me a breakdown of travel expenses by quarter"
+      ]
+    },
+    "ma_deals": {
+      "sensitivity": "critical",
+      "description": "Mergers and acquisitions deal valuations and transaction data.",
+      "example_prompts": [
+        "What was the total value of M&A deals last quarter?",
+        "Show me acquisition costs for 2024",
+        "How much did we spend on mergers and acquisitions in Q1 2025?",
+        "What is the total deal value for our M&A activity this year?",
+        "Give me a summary of merger transaction costs"
+      ]
+    }
   }
 }

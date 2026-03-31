@@ -202,6 +202,8 @@ pub struct IntentResult {
     pub category_name: String,
     pub start_unix_secs: i64,
     pub end_unix_secs: i64,
+    /// Cosine similarity score from embedding match (1.0 for regex backend).
+    pub confidence: f32,
 }
 
 /// Routing decision: fast BabyJubJub attestation vs. full ZK proof.
@@ -251,4 +253,6 @@ pub struct EvidencePack {
     pub aggregate: i64,
     pub row_count: usize,
     pub receipt_id: String,
+    /// Intent matching confidence score (None for legacy/CLI pipeline rows).
+    pub zemtik_confidence: Option<f32>,
 }

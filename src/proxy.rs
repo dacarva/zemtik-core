@@ -15,11 +15,12 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
+use crate::intent::IntentBackend;
 use crate::types::{
     AuditRecord, EngineResult, OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route,
     SignatureData, TokenUsage,
 };
-use crate::{audit, bundle, db, engine_fast, evidence, intent, keys, prover, receipts, router};
+use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com";
 
@@ -37,6 +38,8 @@ struct ProxyState {
     signing_key_bytes: Vec<u8>,
     /// SHA-256 of schema_config.json bytes (empty string when schema absent).
     schema_config_hash: String,
+    /// Intent matching backend — static after startup, no lock needed.
+    intent_backend: Arc<dyn IntentBackend>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -68,13 +71,51 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     }
 
     // Validate sensitivity values
-    crate::config::validate_schema_config(config.schema_config.as_ref().unwrap())
+    crate::config::validate_schema_config(config.schema_config.as_ref().unwrap(), false)
         .context("validate schema_config")?;
 
     // Fail fast: verify circuit directory has all required files before accepting requests.
     prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
 
     let schema_config_hash = config.schema_config_hash.clone().unwrap_or_default();
+    let schema = config.schema_config.clone().unwrap();
+
+    // Build intent backend. Use EmbeddingBackend unless ZEMTIK_INTENT_BACKEND=regex
+    // or the feature is disabled. Falls back to RegexBackend on model load failure.
+    let intent_backend: Arc<dyn IntentBackend> = {
+        let use_embed = config.intent_backend != "regex";
+        let backend: Box<dyn IntentBackend> = if use_embed {
+            // Validate embed fields before attempting model load
+            if let Err(e) = crate::config::validate_schema_config(&schema, true) {
+                eprintln!(
+                    "[INTENT] WARN: schema missing embed fields ({}). Falling back to regex backend.",
+                    e
+                );
+                let mut b = Box::new(intent::RegexBackend::new());
+                b.index_schema(&schema);
+                b as Box<dyn IntentBackend>
+            } else {
+                match intent_embed::try_new_embedding_backend(&config.models_dir) {
+                    Some(mut b) => {
+                        b.index_schema(&schema);
+                        b
+                    }
+                    None => {
+                        // Fallback already logged by try_new_embedding_backend
+                        let mut b = Box::new(intent::RegexBackend::new());
+                        b.index_schema(&schema);
+                        b as Box<dyn IntentBackend>
+                    }
+                }
+            }
+        } else {
+            println!("[INTENT] Using regex intent backend (ZEMTIK_INTENT_BACKEND=regex)");
+            let mut b = Box::new(intent::RegexBackend::new());
+            b.index_schema(&schema);
+            b as Box<dyn IntentBackend>
+        };
+        Arc::from(backend)
+    };
 
     let config = Arc::new(config);
 
@@ -97,6 +138,7 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         config: Arc::clone(&config),
         signing_key_bytes,
         schema_config_hash,
+        intent_backend,
     });
 
     let app = Router::new()
@@ -182,7 +224,12 @@ async fn handle_chat_completions(
         ProxyError(anyhow::anyhow!("schema_config not loaded"))
     })?;
 
-    let intent_result = match intent::extract_intent(&prompt, schema) {
+    let intent_result = match intent::extract_intent_with_backend(
+        &prompt,
+        schema,
+        state.intent_backend.as_ref(),
+        state.config.intent_confidence_threshold,
+    ) {
         Ok(r) => r,
         Err(e) => {
             // Log rejection and return 400
@@ -258,6 +305,7 @@ async fn handle_fast_lane(
             let ev = evidence::build_evidence_pack(
                 &receipt_id, "fast_lane", 0, 0, None, None,
                 "", &schema_config_hash, &timestamp,
+                Some(intent_result.confidence),
             );
             let payload = serde_json::json!({
                 "category": category_name,
@@ -285,6 +333,7 @@ async fn handle_fast_lane(
         &fl.key_id,
         &schema_config_hash,
         &timestamp,
+        Some(intent_result.confidence),
     );
 
     // Insert receipt
@@ -304,6 +353,7 @@ async fn handle_fast_lane(
                 engine_used: "fast_lane".to_owned(),
                 proof_hash: None,
                 data_exfiltrated: 0,
+                intent_confidence: Some(intent_result.confidence),
             },
         );
     }
@@ -444,6 +494,7 @@ async fn handle_zk_slow_lane(
                 engine_used: "zk_slow_lane".to_owned(),
                 proof_hash: zk.proof_hex.clone(),
                 data_exfiltrated: 0,
+                intent_confidence: Some(intent.confidence),
             },
         ) {
             Ok(()) => Some(br),

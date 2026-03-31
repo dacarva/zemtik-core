@@ -29,10 +29,16 @@ pub struct SchemaConfig {
     pub tables: HashMap<String, TableConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct TableConfig {
     pub sensitivity: String,
     pub aliases: Option<Vec<String>>,
+    /// One-sentence description of what this table contains (used for embedding index).
+    #[serde(default)]
+    pub description: String,
+    /// Example natural-language prompts that should match this table.
+    #[serde(default)]
+    pub example_prompts: Vec<String>,
 }
 
 /// Load a schema_config.json file. Returns `(config, sha256_hex_of_file_bytes)`.
@@ -47,7 +53,11 @@ pub fn load_schema_config(path: &Path) -> anyhow::Result<(SchemaConfig, String)>
 
 /// Validate a SchemaConfig — called at proxy startup. Returns Err with a
 /// human-readable message on the first validation failure.
-pub fn validate_schema_config(config: &SchemaConfig) -> anyhow::Result<()> {
+///
+/// When `require_embed_fields` is true, also validates that each table has a
+/// non-empty `description` and at least one `example_prompts` entry (required
+/// for the embedding index).
+pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool) -> anyhow::Result<()> {
     for (key, tc) in &config.tables {
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
@@ -57,6 +67,20 @@ pub fn validate_schema_config(config: &SchemaConfig) -> anyhow::Result<()> {
                 "schema_config: table '{}' has invalid sensitivity '{}' (must be 'critical' or 'low')",
                 key, tc.sensitivity
             );
+        }
+        if require_embed_fields {
+            if tc.description.is_empty() {
+                anyhow::bail!(
+                    "schema_config: table '{}': description is required for embedding backend",
+                    key
+                );
+            }
+            if tc.example_prompts.is_empty() {
+                anyhow::bail!(
+                    "schema_config: table '{}': example_prompts must be non-empty for embedding backend",
+                    key
+                );
+            }
         }
     }
     Ok(())
@@ -78,6 +102,12 @@ pub struct AppConfig {
     pub db_path: PathBuf,
     pub receipts_db_path: PathBuf,
     pub receipts_dir: PathBuf,
+    /// Directory for cached ONNX embedding models. Default: ~/.zemtik/models.
+    pub models_dir: PathBuf,
+    /// Cosine similarity threshold below which intent is rejected. Default: 0.65.
+    pub intent_confidence_threshold: f32,
+    /// Intent backend to use: "embed" (default) or "regex" (forced regex fallback).
+    pub intent_backend: String,
     /// Path to schema_config.json. Default: ~/.zemtik/schema_config.json.
     #[serde(skip)]
     pub schema_config_path: PathBuf,
@@ -102,6 +132,9 @@ impl Default for AppConfig {
             db_path: base.join("zemtik.db"),
             receipts_db_path: base.join("receipts.db"),
             receipts_dir: base.join("receipts"),
+            models_dir: base.join("models"),
+            intent_confidence_threshold: 0.65,
+            intent_backend: "embed".to_owned(),
             schema_config_path: base.join("schema_config.json"),
             schema_config: None,
             schema_config_hash: None,
@@ -175,6 +208,15 @@ pub fn load_from_sources(
     }
     if let Some(v) = env.get("ZEMTIK_RECEIPTS_DIR") {
         config.receipts_dir = expand_tilde(v);
+    }
+    if let Some(v) = env.get("ZEMTIK_MODELS_DIR") {
+        config.models_dir = expand_tilde(v);
+    }
+    if let Some(v) = env.get("ZEMTIK_INTENT_THRESHOLD") {
+        config.intent_confidence_threshold = v.parse().context("parse ZEMTIK_INTENT_THRESHOLD")?;
+    }
+    if let Some(v) = env.get("ZEMTIK_INTENT_BACKEND") {
+        config.intent_backend = v.clone();
     }
     if let Some(v) = env.get("OPENAI_API_KEY") {
         config.openai_api_key = Some(v.clone());
