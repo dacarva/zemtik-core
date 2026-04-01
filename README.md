@@ -176,20 +176,23 @@ The payload sent to OpenAI contains exactly three data fields:
 ```
 zemtik-core/
 ├── src/
-│   ├── main.rs        # Pipeline orchestrator + CLI subcommand routing
-│   ├── proxy.rs       # Axum proxy server (localhost:4000); FastLane + ZK dispatch
-│   ├── intent.rs      # Natural-language → IntentResult (regex/keyword, no LLM)
-│   ├── router.rs      # Routing decision (schema_config sensitivity → FastLane or ZK)
-│   ├── engine_fast.rs # FastLane: DB sum → BabyJubJub attestation (sub-50ms)
-│   ├── evidence.rs    # EvidencePack builder for both engine paths
-│   ├── db.rs          # DB backend (SQLite / Supabase) + BabyJubJub KMS + sum_by_category
-│   ├── prover.rs      # nargo / bb subprocess pipeline
-│   ├── openai.rs      # OpenAI Chat Completions client (CLI mode)
-│   ├── audit.rs       # Audit record writer
-│   ├── receipts.rs    # Receipts ledger (CRUD + v1 migration)
-│   ├── keys.rs        # BabyJubJub key generation + persistence
-│   ├── config.rs      # Layered config + SchemaConfig loading
-│   └── types.rs       # Shared types
+│   ├── main.rs           # Pipeline orchestrator + CLI subcommand routing
+│   ├── proxy.rs          # Axum proxy server (localhost:4000); FastLane + ZK dispatch
+│   ├── intent.rs         # IntentBackend trait dispatch (EmbeddingBackend or RegexBackend)
+│   ├── intent_embed.rs   # EmbeddingBackend: fastembed BGE-small-en ONNX, cosine similarity
+│   ├── time_parser.rs    # DeterministicTimeParser: Q/H/FY/month/relative/YTD → Unix range
+│   ├── router.rs         # Routing decision (schema_config sensitivity → FastLane or ZK)
+│   ├── engine_fast.rs    # FastLane: DB sum → BabyJubJub attestation (sub-50ms)
+│   ├── evidence.rs       # EvidencePack builder for both engine paths
+│   ├── db.rs             # DB backend (SQLite / Supabase) + BabyJubJub KMS + sum_by_category
+│   ├── prover.rs         # nargo / bb subprocess pipeline
+│   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
+│   ├── audit.rs          # Audit record writer
+│   ├── receipts.rs       # Receipts ledger (CRUD + v2 migration: engine_used, intent_confidence)
+│   ├── keys.rs           # BabyJubJub key generation + persistence
+│   ├── config.rs         # Layered config + SchemaConfig loading
+│   ├── lib.rs            # Library crate root (for eval harness and integration tests)
+│   └── types.rs          # Shared types
 ├── circuit/
 │   ├── Nargo.toml     # eddsa = { path = "../vendor/eddsa" }, poseidon v0.2.6
 │   └── src/
@@ -197,9 +200,17 @@ zemtik-core/
 ├── vendor/eddsa/      # Vendored EdDSA library (noir-lang/eddsa, -59% gates)
 ├── supabase/
 │   └── migrations/    # SQL schema for Supabase backend
+├── eval/
+│   ├── intent_eval.rs   # Intent eval harness (235 labeled prompts, CI gate)
+│   └── labeled_prompts.json
 ├── docs/
-│   ├── ARCHITECTURE.md  # Full component breakdown and data flow
-│   └── SCALING.md       # Recursive proofs, production path, why remote proving breaks ZK
+│   ├── ARCHITECTURE.md     # Full component breakdown and data flow
+│   ├── CONFIGURATION.md    # All config fields, env vars, schema_config.json format
+│   ├── GETTING_STARTED.md  # End-to-end setup guide
+│   ├── HOW_TO_ADD_TABLE.md # Add a new table to the schema (step-by-step)
+│   ├── INTENT_ENGINE.md    # How EmbeddingBackend + DeterministicTimeParser work
+│   ├── SCALING.md          # Recursive proofs, production path, why remote proving breaks ZK
+│   └── SUPPORTED_QUERIES.md # v1 query contract: supported patterns, error reference
 └── .env.example
 ```
 
@@ -274,8 +285,13 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md) — Full component breakdown, data flow, cryptographic security properties (soundness, zero-knowledge, completeness)
-- [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving architecturally breaks the privacy guarantee; production path for 5,000+ transactions
+- [Architecture](docs/ARCHITECTURE.md) — Full component breakdown, data flow, cryptographic security properties
+- [Intent Engine](docs/INTENT_ENGINE.md) — How embedding-based routing and the time parser work
+- [Supported Queries](docs/SUPPORTED_QUERIES.md) — v1 query contract: time expressions, table matching, error reference
+- [Configuration](docs/CONFIGURATION.md) — All config fields, env vars, schema_config.json format
+- [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide
+- [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
+- [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
 
 ---
 

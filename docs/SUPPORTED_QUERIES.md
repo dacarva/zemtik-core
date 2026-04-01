@@ -18,10 +18,11 @@ The `DeterministicTimeParser` recognizes the following patterns anywhere in the 
 | `MMM YYYY` | "March 2024 expenses" | Mar 1–31 2024 |
 | `YYYY` | "payroll 2023" | Jan 1–Dec 31 2023 |
 | `YTD` / `year to date` | "YTD vendor invoices" | Jan 1 current year → today |
-| `this quarter` | "this quarter AWS" | Current quarter start → today |
-| `last quarter` | "last quarter spend" | Previous full quarter |
-| `this month` | "this month payroll" | Current calendar month start → today |
-| `last month` | "last month payroll" | Previous full calendar month |
+| `this quarter` | "this quarter AWS" | Current quarter start → end |
+| `last quarter` / `prior quarter` | "last quarter spend" | Previous full quarter |
+| `this month` | "this month payroll" | Current calendar month start → end |
+| `last month` / `prior month` | "last month payroll" | Previous full calendar month |
+| `last year` / `prior year` | "last year AWS spend" | Full prior calendar year |
 | `past N days` | "past 90 days travel" | Rolling N-day window ending now |
 
 ### Fiscal year offset
@@ -101,7 +102,10 @@ Time expressions that do not match any recognized pattern cause `TimeRangeAmbigu
 | "last quarter" | Yes |
 | "before the acquisition" | No — `TimeRangeAmbiguous` → ZK SlowLane |
 | "previously" | No — `TimeRangeAmbiguous` → ZK SlowLane |
-| "last year" | No — `TimeRangeAmbiguous` → ZK SlowLane (use `2024` instead) |
+| "last year" | **Yes** — resolves to prior calendar year |
+| "prior year" | **Yes** — resolves to prior calendar year |
+| "prior quarter" | **Yes** — resolves to previous full quarter |
+| "prior month" | **Yes** — resolves to previous full calendar month |
 | "current year" | No — `TimeRangeAmbiguous` → ZK SlowLane (use `YTD` instead) |
 | "in the old fiscal year" | No — `TimeRangeAmbiguous` → ZK SlowLane |
 
