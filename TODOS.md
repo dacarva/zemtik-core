@@ -160,6 +160,34 @@
 - **Why:** Found by Claude adversarial review (feat/routing-engine, 2026-03-30). Wastes CPU on every ZK slow-lane request; creates correctness risk if `pipeline_lock` is ever bypassed with concurrent ZK requests.
 - **Effort:** S (human) → S (CC+gstack)
 
+### run_fast_lane blocks async executor while holding ledger_db lock (P2)
+- **What:** `engine_fast::run_fast_lane` is called synchronously in the async Axum handler while holding the `ledger_db` Tokio Mutex. Wrap it in `tokio::task::spawn_blocking`, mirroring the fix applied to ONNX inference in `af98abe`.
+- **Why:** Blocking a Tokio worker thread while holding a mutex delays all other in-flight async tasks on that thread. Under load, a slow FastLane DB query blocks new requests from being accepted. Found by Claude adversarial review (feat/intent-engine, 2026-04-01).
+- **How to apply:** Same pattern as the ONNX spawn_blocking wrapper in `proxy.rs` — move the `run_fast_lane` call into `spawn_blocking`, pass Arc clones of required state.
+- **Effort:** S (human: ~30min / CC: ~5min)
+- **Depends on:** feat/intent-engine merged.
+
+### RE_BARE_YEAR captures non-year numbers (P3)
+- **What:** `time_parser.rs` bare year regex `\b(20\d{2})\b` matches any 4-digit number starting with `20`, including "2000 employees" (→ year 2000) or "budget was $2099" (→ year 2099). A prompt like "we have 2000 employees, show me payroll" returns a year-2000 time range instead of the current-year default.
+- **Why:** Found by Claude adversarial review (feat/intent-engine, 2026-04-01). Operators won't notice because no error is raised — routing silently uses the wrong historical range, producing ZK proofs for incorrect time windows.
+- **How to apply:** Restrict the regex to plausible year range (e.g., `20[1-3][0-9]` to cover 2010–2039), or require the year to appear adjacent to a time-context word. Document the constraint clearly.
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged.
+
+### Add test for "May 2024" month name parsing (P3)
+- **What:** `RE_MONTH_NAME` lists short-form abbreviations (`Jan|Feb|Mar|Apr|Jun|Jul|...`) but omits `May` from the short-form list — `May` is only matched via the full-name branch. Add an explicit test to confirm `parse_time_range("May 2024 payroll", 0)` resolves correctly.
+- **Why:** Every other month has an unambiguous 3-letter abbreviation tested. "May" is both its own full name and abbreviation, making it easy to miss in the alternation. Found by Claude adversarial review (feat/intent-engine, 2026-04-01).
+- **How to apply:** Add `fn may_2024()` test to `tests/test_time_parser.rs` asserting `start = 1714521600`, `end = 1717199999`.
+- **Effort:** XS (human: ~5min / CC: ~1min)
+- **Depends on:** feat/intent-engine merged.
+
+### Exact table key substring bypasses embedding threshold (P3, INVESTIGATE)
+- **What:** In `extract_intent_with_backend`, rule 2 (substring gate) gives confidence `1.0` and skips all embedding + margin checks when exactly one table key or alias appears verbatim in the prompt. A user who knows any table key (e.g., `aws_spend`) can craft prompts that always route to FastLane regardless of what the embedding would score.
+- **Why:** Found by Claude adversarial review (feat/intent-engine, 2026-04-01). Whether this is a bug or intentional depends on whether table keys are considered public. For an internal enterprise tool they typically are, so the risk is low. Worth reviewing before external clients onboard.
+- **How to apply:** Decide: should exact-key substring matches still require embedding score ≥ threshold to confirm? Or document that table keys are public and the bypass is acceptable.
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged.
+
 ### intent.rs v2: multi-table query support (P3, post-v1)
 - **What:** Extend intent.rs to extract multiple table names from a single query and apply the cross-sensitivity OR rule across all extracted tables.
 - **Why:** v1 extracts only the first table match. A query like "What was Q1 payroll vs AWS spend?" would only process the first table found. The cross-sensitivity OR rule (if ANY table is critical → ZK SlowLane) is architecturally correct but unreachable in v1 for multi-table queries. v1 behavior: extract first table, add a note in the response: "Note: only processed [table] — multi-table queries not yet supported."
