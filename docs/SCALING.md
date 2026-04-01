@@ -85,7 +85,9 @@ Each leaf circuit fits within the local CRS (50 transactions is the current limi
 
 The `#[fold]` attribute (available from Noir 1.0.0-beta.19) compiles a function into a separate ACIR
 program. `bb prove -s client_ivc --input_type compiletime_stack` folds all leaf proofs incrementally
-into a single final proof. This is the implemented approach in `circuit/src/main.nr`:
+into a single final proof. This is the **planned production approach** in `circuit/src/main.nr`.
+
+> **Current status:** `bb prove -s client_ivc` is blocked by an incompatibility between `eddsa v0.1.3` and Barretenberg v3+/v4+ (see blocker section below). `nargo execute` verifies all circuit constraints successfully. The circuit structure already implements `#[fold]`-compatible batching — the blocker is only in the final proof generation step.
 
 ```
 [BatchInput_0..9]
