@@ -17,8 +17,8 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::intent::IntentBackend;
 use crate::types::{
-    AuditRecord, EngineResult, OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route,
-    SignatureData, TokenUsage,
+    AuditRecord, EngineResult, EvidencePack, IntentResult, OpenAiRequestLog, OpenAiResponseLog,
+    QueryParams, Route, SignatureData, TokenUsage,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
@@ -318,7 +318,18 @@ async fn handle_fast_lane(
                 "note": "No rows matched the query criteria.",
                 "evidence": ev
             });
-            return Ok(build_fast_lane_response(&mut body, payload, &state, &api_key, &receipt_id).await?);
+            return Ok(
+                build_fast_lane_response(
+                    &mut body,
+                    payload,
+                    &state,
+                    &api_key,
+                    &receipt_id,
+                    &intent_result,
+                    &ev,
+                )
+                .await?,
+            );
         }
     };
 
@@ -377,7 +388,35 @@ async fn handle_fast_lane(
         "evidence": ev
     });
 
-    build_fast_lane_response(&mut body, payload, &state, &api_key, &receipt_id).await
+    build_fast_lane_response(
+        &mut body,
+        payload,
+        &state,
+        &api_key,
+        &receipt_id,
+        &intent_result,
+        &ev,
+    )
+    .await
+}
+
+/// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
+fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<Value, serde_json::Error> {
+    let mut v = serde_json::to_value(ev)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("engine".to_string(), Value::String(ev.engine_used.clone()));
+        obj.insert(
+            "intent".to_string(),
+            serde_json::json!({
+                "table": intent.table,
+                "category_name": intent.category_name,
+                "start_unix_secs": intent.start_unix_secs,
+                "end_unix_secs": intent.end_unix_secs,
+                "confidence": intent.confidence,
+            }),
+        );
+    }
+    Ok(v)
 }
 
 /// Replace last user message with FastLane payload and forward to OpenAI.
@@ -387,6 +426,8 @@ async fn build_fast_lane_response(
     state: &Arc<ProxyState>,
     api_key: &str,
     receipt_id: &str,
+    intent: &IntentResult,
+    ev: &EvidencePack,
 ) -> Result<Response, ProxyError> {
     let message = format!(
         "Here is a cryptographically attested financial summary:\n\n{}",
@@ -417,11 +458,16 @@ async fn build_fast_lane_response(
         .map_err(ProxyError)?;
 
     let resp_status = openai_resp.status();
-    let resp_body: Value = openai_resp
+    let mut resp_body: Value = openai_resp
         .json()
         .await
         .context("parse OpenAI response")
         .map_err(ProxyError)?;
+
+    let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError(anyhow::Error::new(e)))?;
+    if let Some(obj) = resp_body.as_object_mut() {
+        obj.insert("evidence".to_string(), envelope);
+    }
 
     let mut response = (
         StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
@@ -570,11 +616,34 @@ async fn handle_zk_slow_lane(
         .map_err(ProxyError)?;
 
     let resp_status = openai_resp.status();
-    let resp_body: Value = openai_resp
+    let mut resp_body: Value = openai_resp
         .json()
         .await
         .context("parse OpenAI response")
         .map_err(ProxyError)?;
+
+    let receipt_id_ev = committed_bundle
+        .map(|b| b.bundle_id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let timestamp_ev = Utc::now().to_rfc3339();
+    let key_material = format!("{}{}", zk.first_sig.pub_key_x, zk.first_sig.pub_key_y);
+    let key_id_zk = hex::encode(Sha256::digest(key_material.as_bytes()));
+    let ev_zk = evidence::build_evidence_pack(
+        &receipt_id_ev,
+        "zk_slow_lane",
+        zk.aggregate as i64,
+        zk.txns_len,
+        zk.proof_hex.clone(),
+        None,
+        &key_id_zk,
+        &state.schema_config_hash,
+        &timestamp_ev,
+        Some(intent.confidence),
+    );
+    let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError(anyhow::Error::new(e)))?;
+    if let Some(obj) = resp_body.as_object_mut() {
+        obj.insert("evidence".to_string(), envelope);
+    }
 
     let elapsed = total_start.elapsed();
 

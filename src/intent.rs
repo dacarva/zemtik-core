@@ -113,6 +113,30 @@ impl IntentBackend for RegexBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic substring gate (disambiguates embedding ties)
+// ---------------------------------------------------------------------------
+
+/// Tables whose schema key or any alias appears as a case-insensitive substring
+/// of `prompt_lower` (same rules as `RegexBackend`).
+fn tables_matching_substrings(prompt_lower: &str, schema: &SchemaConfig) -> Vec<String> {
+    let mut matches = Vec::new();
+    for (key, tc) in &schema.tables {
+        let key_lower = key.to_lowercase();
+        let matched = prompt_lower.contains(&key_lower)
+            || tc
+                .aliases
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|a| prompt_lower.contains(&a.to_lowercase()));
+        if matched {
+            matches.push(key.clone());
+        }
+    }
+    matches
+}
+
+// ---------------------------------------------------------------------------
 // Core extraction logic
 // ---------------------------------------------------------------------------
 
@@ -120,12 +144,14 @@ impl IntentBackend for RegexBackend {
 ///
 /// Rules:
 /// 1. Truncate prompt to 2000 chars before matching.
-/// 2. Call `backend.match_prompt(prompt, 3)`.
-/// 3. If results are empty or `scores[0] < threshold` → `Err(NoTableIdentified)`.
-/// 4. If at least 2 results and `scores[0] - scores[1] < 0.10` → `Err(NoTableIdentified)`
+/// 2. If **exactly one** table's key or alias appears as a substring of the prompt (same rules as
+///    `RegexBackend`), use that table with confidence `1.0` and skip embedding/margin checks.
+/// 3. Else call `backend.match_prompt(prompt, 3)`.
+/// 4. If results are empty or `scores[0] < threshold` → `Err(NoTableIdentified)`.
+/// 5. If at least 2 results and `scores[0] - scores[1] < 0.10` → `Err(NoTableIdentified)`
 ///    (ambiguous — not confident enough to route).
-/// 5. Parse time range via `time_parser::parse_time_range`; ambiguous time → `Err(TimeRangeAmbiguous)`.
-/// 6. Return `Ok(IntentResult)` with the top-1 table and confidence score.
+/// 6. Parse time range via `time_parser::parse_time_range`; ambiguous time → `Err(TimeRangeAmbiguous)`.
+/// 7. Return `Ok(IntentResult)` with the top-1 table and confidence score.
 pub fn extract_intent_with_backend(
     prompt: &str,
     schema: &SchemaConfig,
@@ -144,6 +170,24 @@ pub fn extract_intent_with_backend(
     } else {
         prompt
     };
+
+    let prompt_lower = prompt.to_lowercase();
+    let substring_hits = tables_matching_substrings(&prompt_lower, schema);
+
+    // If exactly one table is named by key or alias in the prompt, trust that over
+    // embedding cosine ties (e.g. "T&E expenses" vs payroll + travel both scoring high).
+    if substring_hits.len() == 1 {
+        let table = substring_hits[0].clone();
+        let time_range = parse_time_range(prompt, schema.fiscal_year_offset_months)
+            .map_err(IntentError::from)?;
+        return Ok(IntentResult {
+            category_name: table.clone(),
+            table,
+            start_unix_secs: time_range.start_unix_secs,
+            end_unix_secs: time_range.end_unix_secs,
+            confidence: 1.0,
+        });
+    }
 
     let matches = backend.match_prompt(prompt, 3);
 

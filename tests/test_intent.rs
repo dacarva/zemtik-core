@@ -148,7 +148,8 @@ fn ambiguous_time_returns_error() {
 fn low_score_returns_no_table() {
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.40)]);
-    let result = extract_intent_with_backend("AWS spend", &schema, &backend, 0.65);
+    // No schema key/alias substring so the mock score gate is exercised (not short-circuit).
+    let result = extract_intent_with_backend("Q1 2026 infra costs", &schema, &backend, 0.65);
     assert!(matches!(result, Err(IntentError::NoTableIdentified)));
 }
 
@@ -157,7 +158,7 @@ fn narrow_margin_returns_no_table() {
     // Scores 0.68 and 0.67 — margin = 0.01 < 0.10, should reject
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.68), ("payroll", 0.67)]);
-    let result = extract_intent_with_backend("Q1 2026 spend", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("Q1 2026 spend analysis", &schema, &backend, 0.65);
     assert!(
         matches!(result, Err(IntentError::NoTableIdentified)),
         "narrow margin 0.01 should be rejected"
@@ -169,8 +170,9 @@ fn sufficient_margin_succeeds() {
     // Scores 0.70 and 0.55 — margin = 0.15 >= 0.10 — should succeed
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.70), ("payroll", 0.55)]);
+    // Prompt must not substring-match any table key/alias (else short-circuit uses confidence 1.0).
     let result =
-        extract_intent_with_backend("Q1 2026 AWS spend", &schema, &backend, 0.65).unwrap();
+        extract_intent_with_backend("Q1 2026 infra costs", &schema, &backend, 0.65).unwrap();
     assert_eq!(result.table, "aws_spend");
     assert!((result.confidence - 0.70).abs() < 0.001);
 }
@@ -191,6 +193,49 @@ fn exact_margin_passes() {
     let backend = MockBackend::new(vec![("aws_spend", 0.80), ("payroll", 0.70)]);
     let result = extract_intent_with_backend("AWS spend 2025", &schema, &backend, 0.65);
     assert!(result.is_ok(), "margin exactly 0.10 should pass");
+}
+
+#[test]
+fn te_alias_bypasses_embedding_margin_rejection() {
+    let mut tables = HashMap::new();
+    tables.insert(
+        "aws_spend".to_owned(),
+        TableConfig {
+            sensitivity: "low".to_owned(),
+            aliases: Some(vec!["AWS".to_owned()]),
+            ..Default::default()
+        },
+    );
+    tables.insert(
+        "payroll".to_owned(),
+        TableConfig {
+            sensitivity: "critical".to_owned(),
+            ..Default::default()
+        },
+    );
+    tables.insert(
+        "travel".to_owned(),
+        TableConfig {
+            sensitivity: "low".to_owned(),
+            aliases: Some(vec!["travel".to_owned(), "T&E".to_owned()]),
+            ..Default::default()
+        },
+    );
+    let schema = SchemaConfig {
+        fiscal_year_offset_months: 0,
+        tables,
+    };
+    // Embedding would reject on margin; "t&e" uniquely hits travel via alias.
+    let backend = MockBackend::new(vec![("payroll", 0.72), ("travel", 0.71)]);
+    let result = extract_intent_with_backend(
+        "Show me T&E expenses for H1 2024",
+        &schema,
+        &backend,
+        0.65,
+    )
+    .unwrap();
+    assert_eq!(result.table, "travel");
+    assert_eq!(result.confidence, 1.0);
 }
 
 #[test]

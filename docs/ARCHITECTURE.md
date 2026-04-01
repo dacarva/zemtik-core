@@ -1,8 +1,10 @@
 # Zemtik Architecture
 
-**Document type:** Explanation + Reference
-**Audience:** Bank CISOs, enterprise security architects, and technical evaluators
-**Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems
+**Document type:** Explanation + Reference  
+**Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
+**Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
+
+**Scope note:** This document is aligned with **v0.4.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0.
 
 ---
 
@@ -10,9 +12,9 @@
 
 Financial institutions accumulate petabytes of transaction data that could generate competitive intelligence through AI analysis. The obstacle is contractual, regulatory, and fiduciary: raw ledger data cannot leave the enterprise perimeter. Sending individual transactions to a third-party LLM violates data residency rules, client confidentiality agreements, and in many jurisdictions, financial privacy law.
 
-Existing workarounds — on-premises LLMs, data anonymization, synthetic data — involve substantial infrastructure cost, accuracy loss, or both.
+Existing workarounds (on-premises LLMs, data anonymization, synthetic data) involve substantial infrastructure cost, accuracy loss, or both.
 
-Zemtik takes a different approach: **compute the answer locally, prove the computation was honest, and send only the proven answer to the LLM.**
+Zemtik takes a different approach: **compute the answer locally, prove the computation was honest (or attest it on a lighter path), and send only the aggregate and provenance metadata to the LLM.**
 
 ---
 
@@ -20,13 +22,15 @@ Zemtik takes a different approach: **compute the answer locally, prove the compu
 
 > **Zero raw transaction rows are transmitted to OpenAI at any point in the pipeline.**
 
-The payload sent to the LLM is a JSON object containing only three fields: the aggregate metric, the query parameters that produced it, and a provenance tag indicating the result was ZK-verified.
+What reaches the model is a deliberately small JSON summary: at minimum the aggregate metric, the category or table label, and a provenance tag (`ZEMTIK_VALID_ZK_PROOF` on the ZK path, `ZEMTIK_FAST_LANE_ATTESTATION` on FastLane). The proxy **merges a top-level `evidence` object** into the Chat Completions JSON returned to the client (serialized `EvidencePack` plus `engine` and `intent` summaries for tooling). The substituted user message to OpenAI still carries the same aggregate payload as before. None of these structures contain row-level ledger fields.
 
-The mathematical mechanism that makes this trustworthy is described below.
+The mathematical mechanism for the **ZK slow lane** is described below. The **FastLane** path uses the same BabyJubJub EdDSA signing machinery over commitments, but skips full UltraHonk proof generation; it is gated to non-critical tables by policy in `schema_config.json`.
 
 ---
 
-## Architecture Overview
+## Architecture Overview (ZK Slow Lane)
+
+The diagram below is the trust boundary for **critical** queries: batches of signed transactions stay inside the perimeter until reduced to a single verified sum.
 
 ```
 Bank Perimeter
@@ -46,11 +50,11 @@ Bank Perimeter
 │  │  1. Verify EdDSA signature over transaction hash      │   │
 │  │     assert(eddsa_verify(bank_pub_key, sig, hash))     │   │
 │  │                                                       │   │
-│  │  2. Aggregate: SUM(amount) WHERE category=AWS         │   │
-│  │     AND timestamp IN [Q1_start, Q1_end]               │   │
+│  │  2. Aggregate: SUM(amount) WHERE category matches     │   │
+│  │     AND timestamp IN [start, end]                     │   │
 │  │                                                       │   │
-│  │  Private witness: 50 transaction rows, signature      │   │
-│  │  Public output: verified_aggregate (u64)              │   │
+│  │  Private witness: 10 batches × 50 rows, EdDSA/batch   │   │
+│  │  Public output: verified aggregate (Field)            │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                             │                               │
 │                             │ $158,100  (one number)        │
@@ -59,30 +63,113 @@ Bank Perimeter
                               ▼
                    ┌─────────────────────┐
                    │  OpenAI API         │
-                   │  gpt-5.4-nano       │
+                   │  (Chat Completions) │
                    │                     │
-                   │  Payload received:  │
-                   │  { category: "AWS", │
-                   │    spend: 158100,   │
-                   │    provenance:      │
-                   │    "ZEMTIK_ZK" }    │
+                   │  Payload (example): │
+                   │  { category,        │
+                   │    total_spend_usd, │
+                   │    data_provenance }│
                    └─────────────────────┘
 ```
 
 ---
 
+## Operational Modes
+
+| Mode | Command | Role |
+|------|---------|------|
+| CLI pipeline | `cargo run` (default) | One-shot demo: seed 500 txs → batch sign → `nargo execute` → optional UltraHonk proof → OpenAI |
+| Proxy | `cargo run -- proxy` | Axum server (default `:4000`): intercepts `POST /v1/chat/completions`, runs intent → router → FastLane or ZK slow lane |
+| Verify | `cargo run -- verify <bundle.zip>` | Offline `bb verify` on a portable proof bundle |
+| List | `cargo run -- list` | Prints recent rows from `~/.zemtik/receipts.db` (includes `intent_confidence` where present) |
+
+External toolchain on PATH: **Noir** `nargo` (1.0.0-beta.19), **Barretenberg** `bb` (v4.x / UltraHonk; project docs use `v4.0.0-nightly`).
+
+---
+
+## Proxy Data Flow (v0.3+)
+
+Natural-language prompts are interpreted **without calling an LLM** for routing. v0.4.0 adds an embedding-based matcher; v0.3.0 regex logic remains available as fallback.
+
+```
+POST /v1/chat/completions (user prompt)
+  → Intent extraction (intent.rs: IntentBackend trait, no LLM)
+      ├── EmbeddingBackend (default): fastembed + BGE-small-en ONNX, cosine similarity
+      │     over schema index (table keys, aliases, descriptions, example_prompts)
+      │     → DeterministicTimeParser (time_parser.rs) for time range
+      │     → low confidence / ambiguous time → secure fallback toward ZK SlowLane
+      └── RegexBackend (ZEMTIK_INTENT_BACKEND=regex or embed init failure):
+            keyword / substring matching against schema
+  → Routing (router.rs: sensitivity from schema_config.json)
+      ├── FastLane: in-memory SQLite sum → BabyJubJub attestation → EvidencePack → OpenAI
+      └── ZK SlowLane (critical tables or unknown table): full batch ZK pipeline → OpenAI
+```
+
+**Configuration:** `schema_config.json` lives at `~/.zemtik/schema_config.json` in normal deployments; `schema_config.example.json` is the template. Embedding mode expects each table to include `description` and `example_prompts`; missing fields warn and fall back to `RegexBackend`.
+
+**Environment (intent):** `ZEMTIK_INTENT_BACKEND` (`embed` | `regex`, case-insensitive), `ZEMTIK_INTENT_THRESHOLD` (default cosine threshold 0.65).
+
+---
+
+## Source Module Map (`src/`)
+
+| Module | Responsibility |
+|--------|------------------|
+| `main.rs` | CLI routing: pipeline, `proxy`, `verify`, `list` |
+| `proxy.rs` | HTTP proxy, FastLane / ZK dispatch, receipt headers |
+| `intent.rs` | `IntentBackend` trait, `RegexBackend`, dispatch to embed backend |
+| `intent_embed.rs` | `EmbeddingBackend`, schema index, cosine match |
+| `time_parser.rs` | `DeterministicTimeParser` (quarters, FY, months, relative, YTD, etc.) |
+| `router.rs` | `FastLane` vs `ZkSlowLane` from table sensitivity |
+| `engine_fast.rs` | FastLane SUM + attestation |
+| `evidence.rs` | `EvidencePack` for both engines |
+| `db.rs` | SQLite / Supabase, seeding, signing, `sum_by_category`, category codes for circuit |
+| `prover.rs` | `nargo` / `bb` subprocess pipeline |
+| `verify.rs` / `bundle.rs` | Bundle ZIP + offline verification |
+| `openai.rs` | Chat Completions client |
+| `config.rs` | Layered config + schema load |
+| `receipts.rs` | SQLite receipts (v2: `intent_confidence`) |
+| `keys.rs` | BabyJubJub key at `~/.zemtik/keys/bank_sk` (0600) |
+| `types.rs` | `IntentResult`, `Route`, `EngineResult`, `EvidencePack`, … |
+| `audit.rs` | JSON audit records under `audit/` |
+
+Layered config order: defaults → `~/.zemtik/config.yaml` → env (`ZEMTIK_*`, `OPENAI_API_KEY`, `DB_BACKEND`, …) → CLI flags (`--port`, `--circuit-dir`).
+
+---
+
 ## Component Deep-Dive
 
-### 1. The Bank Ledger (`src/db.rs`)
+### 1. Configuration and schema (`config.rs`)
 
-The database backend is selected by the `DB_BACKEND` environment variable:
+Runtime paths and API keys are merged from the layers above. Proxy mode **requires** a valid `schema_config.json` so tables have sensitivity, aliases, and fiscal-year settings. The embedding backend additionally indexes human-readable `description` and `example_prompts` per table.
 
-- **`sqlite`** (default) — An in-memory SQLite database, re-created on each run. Useful for offline development and CI.
-- **`supabase`** — A persistent Supabase (PostgreSQL) database, accessed via PostgREST for data operations and direct Postgres for DDL. Useful for demos where the audience needs to verify the data isn't forged.
+### 2. Intent and time (`intent.rs`, `intent_embed.rs`, `time_parser.rs`)
 
-In production, this component would be a read-only adapter to the bank's actual database system.
+- **Embedding path:** Builds a fixed schema index at startup, embeds the user prompt, returns the best-matching table key with a **confidence** score (`IntentResult.confidence`). Evaluated against `eval/labeled_prompts.json` via `cargo run --bin intent-eval --features eval` (release CI gate; see CHANGELOG for accuracy thresholds).
+- **Regex path:** Deterministic keyword-style matching, no ONNX.
+- **Time:** Parsed from the same prompt string; unrecognized time phrases yield `TimeRangeAmbiguous` and conservative routing.
 
-**Schema (identical across both backends):**
+Confidence flows into `EvidencePack.zemtik_confidence` and the `receipts` table (`intent_confidence`).
+
+### 3. Routing (`router.rs`)
+
+Each table declares sensitivity (e.g. `critical` vs `low`). **Critical** (and unknown tables, fail-secure) use the ZK slow lane. **Non-critical** tables use FastLane.
+
+### 4. FastLane (`engine_fast.rs`)
+
+Computes `SUM(amount)` for the resolved category and time window against the **demo in-memory SQLite ledger** (same seed data as the CLI demo). Produces a BabyJubJub attestation over the result; **no UltraHonk proof**. Fully concurrent; does not hold the global ZK `pipeline_lock`.
+
+### 5. The Bank Ledger (`src/db.rs`)
+
+`DB_BACKEND` selects storage:
+
+- **`sqlite`** (default): in-memory SQLite for development, FastLane, and CLI demo.
+- **`supabase`**: PostgreSQL via PostgREST + direct Postgres for DDL.
+
+Production expectation: a read-only adapter to the bank’s real ledger.
+
+**Schema (both backends):**
+
 ```sql
 CREATE TABLE transactions (
     id        BIGINT PRIMARY KEY,
@@ -93,243 +180,159 @@ CREATE TABLE transactions (
 );
 ```
 
-The POC seeds 500 transactions (10 batches × 50) for `client_id = 123` distributed across Q1 2024. Both backends use the same `generate_seed_transactions()` function to guarantee identical data and therefore identical ZK proofs.
+The POC seeds **500** transactions (10 batches × 50) for `client_id = 123` across Q1 2024. Both backends share `generate_seed_transactions()` so hashes and proofs stay reproducible.
 
-### 2. The Bank KMS Mock (`src/db.rs` — `sign_transactions`)
+### 6. The Bank KMS Mock (`src/db.rs`, batch signing)
 
-Before any data leaves the database layer (even internally), the full transaction payload is cryptographically signed. This signature is what allows the circuit to assert data integrity.
+Before use in the circuit, transaction batches are signed with **BabyJubJub EdDSA** and **Poseidon** commitments (same construction as the original POC). The commitment tree is documented in the Noir section below.
 
-**Signature scheme:** BabyJubJub EdDSA with Poseidon hash
+### 7. The ZK Circuit (`circuit/src/main.nr`)
 
-BabyJubJub is a twisted Edwards elliptic curve defined over the BN254 scalar field. It was chosen because its arithmetic is native to Noir's constraint system, making in-circuit signature verification dramatically cheaper than secp256k1 ECDSA.
+Noir 1.0.0-beta.19. One ACIR program processes **`BATCH_COUNT` = 10** batches of **`TX_COUNT` = 50** transactions (500 rows total). Each batch has its own Poseidon commitment and EdDSA signature (`BatchInput`).
 
-**What is signed:** Not the raw bytes, but a structured Poseidon hash commitment to the transaction array. The commitment is a 4-level Merkle-like tree:
+**Public inputs:** `target_category`, `start_time`, `end_time`, `bank_pub_key_x`, `bank_pub_key_y`.  
+**Private inputs:** `batches: [BatchInput; 10]` (rows + `sig_s`, `sig_r8_x`, `sig_r8_y` per batch).  
+**Return value (public):** single `Field`, the sum of per-batch aggregates.
 
-```
-L1: Poseidon_3([amount_i, category_i, timestamp_i])  -- one hash per transaction
-    ↓ (50 hashes grouped into ten 5-element sets)
-L2: Poseidon_5([L1[0..4]])  ...  Poseidon_5([L1[45..49]])   -- 10 hashes
-    ↓ (10 hashes grouped into two 5-element sets)
-L3: Poseidon_5([L2[0..4]])  ...  Poseidon_5([L2[5..9]])      -- 2 hashes
-    ↓
-L4: Poseidon_2([L3[0], L3[1]])                               -- 1 commitment (msg_hash)
-```
+Per batch: reconstruct 4-level Poseidon tree → `eddsa_verify::<PoseidonHasher>` → branchless masked sum over the 50 rows.
 
-The bank signs `msg_hash`. All Poseidon nodes use the circomlib-compatible BN254 permutation with arity ≤ 5, which is identical in both the Rust signing code (`poseidon-rs 0.0.8`) and the Noir circuit (`poseidon::poseidon::bn254::hash_N`). This cross-language hash compatibility was empirically verified during development.
+### 8. The Noir Pipeline (`src/prover.rs`)
 
-### 3. The ZK Circuit (`circuit/src/main.nr`)
+| Command | Purpose |
+|---------|---------|
+| `nargo compile` | ACIR bytecode |
+| `nargo execute` | Witness + full constraint satisfaction |
+| `bb prove` (UltraHonk) | ZK proof |
+| `bb verify` | Verifies proof + VK |
 
-Written in Noir 1.0.0-beta.19. The circuit is the core mathematical guarantee of the system.
+`nargo execute` alone is a complete soundness check for the constraints; proof generation may be skipped or fail on CRS limits while execute still succeeds.
 
-**Public inputs** (visible to anyone holding the proof):
-| Name | Type | Description |
-|------|------|-------------|
-| `target_category` | `u64` | Category code being queried |
-| `start_time` | `u64` | Query time range start (UNIX) |
-| `end_time` | `u64` | Query time range end (UNIX) |
-| `bank_pub_key_x` | `Field` | BabyJubJub public key x-coordinate |
-| `bank_pub_key_y` | `Field` | BabyJubJub public key y-coordinate |
+### 9. Receipts, Bundles, and Verify (`receipts.rs`, `bundle.rs`, `verify.rs`)
 
-**Private inputs** (hidden from the verifier — this is the privacy guarantee):
-| Name | Type | Description |
-|------|------|-------------|
-| `transactions` | `[Transaction; 50]` | The raw ledger rows |
-| `sig_s` | `Field` | EdDSA signature scalar |
-| `sig_r8_x` | `Field` | EdDSA signature R8 point x |
-| `sig_r8_y` | `Field` | EdDSA signature R8 point y |
+ZK slow lane writes portable ZIP bundles under `~/.zemtik/receipts/` and rows in `receipts.db` (engine used, proof hash, prompt/request hashes, `intent_confidence` in v2). **`cargo run -- verify`** replays `bb verify` on a bundle. The HTTP proxy also exposes a receipt viewer route for bundle ids (see `proxy.rs`).
 
-**Public output:**
-The verified aggregate sum — a single `Field` element.
+### 10. The OpenAI Client (`src/openai.rs` and proxy injection)
 
-**Circuit logic (three steps):**
+**CLI pipeline** sends a JSON payload including `period_start` / `period_end` and `data_provenance: "ZEMTIK_VALID_ZK_PROOF"` (see `openai.rs`).
 
-**Step 1 — Reconstruct the commitment.** The circuit re-hashes the private transaction array using the same 4-level Poseidon tree. This reconstructed `msg_hash` must match what the bank signed.
+**Proxy FastLane** replaces the last user message with a summary that includes an **`evidence`** object: engine name, `attestation_hash`, `schema_config_hash`, aggregate, `row_count`, `receipt_id`, `zemtik_confidence`, and `data_exfiltrated: 0`.
 
-**Step 2 — Verify the EdDSA signature.** The circuit calls `eddsa_verify::<PoseidonHasher>()` from the `noir-lang/eddsa` library. This asserts that the signature was produced by the holder of the private key corresponding to `bank_pub_key`. If the assertion fails, no valid witness exists and no proof can be generated — a dishonest prover cannot forge a valid proof.
+**Proxy ZK slow lane** injects the same compact summary into the last user message for the model, and adds the same top-level **`evidence`** object on the HTTP response as FastLane (ZK `proof_hash`, `engine_used`, `intent`, etc.). Receipt metadata still captures `proof_hash` and confidence server-side.
 
-```noir
-assert(eddsa_verify::<PoseidonHasher>(
-    bank_pub_key_x, bank_pub_key_y,
-    sig_s, sig_r8_x, sig_r8_y,
-    msg_hash,
-));
-```
-
-**Step 3 — Aggregate with branchless masking.** The circuit sums transaction amounts using conditional `if/else` expressions that the Noir compiler lowers to arithmetic selects. Both branches are always evaluated (ACIR flattens control flow), which means no timing information leaks about which transactions matched the predicate.
-
-```noir
-total += if matches_query { transactions[i].amount as Field } else { 0 };
-```
-
-### 4. The Noir Pipeline (`src/prover.rs`)
-
-The Rust orchestrator drives the Noir toolchain via subprocess:
-
-| Command | Purpose | Output |
-|---------|---------|--------|
-| `nargo compile` | Compiles `main.nr` to ACIR bytecode | `target/zemtik_circuit.json` (3.1 MB) |
-| `nargo execute` | Solves the circuit with private witness, verifies all constraints | `target/zemtik_circuit.gz` + circuit return value printed to stdout |
-| `bb prove -s ultra_honk` | Generates a UltraHonk ZK proof | `proofs/proof` |
-| `bb write_vk` + `bb verify` | Generates verification key, verifies proof | exit code 0 = valid |
-
-`nargo execute` is itself a complete constraint check: if the EdDSA signature is invalid, if the witness is inconsistent, or if any assertion fails, the command exits with a non-zero code and no witness is produced. The subsequent OpenAI call is only reached after this verification.
-
-### 5. The OpenAI Client (`src/openai.rs`)
-
-Sends the following JSON payload — and nothing else — to the OpenAI Chat Completions API:
-
-```json
-{
-  "category": "AWS Infrastructure",
-  "total_spend_usd": 158100,
-  "period_start": "2024-01-01",
-  "period_end": "2024-03-31",
-  "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
-  "raw_data_transmitted": false
-}
-```
-
-**What is NOT in this payload:**
-- Individual transaction amounts
-- Transaction timestamps
-- Client identifiers
-- Any row-level data whatsoever
-
-The system prompt instructs the model to act as a bank advisor receiving cryptographically verified data, explicitly prohibiting it from requesting raw transaction data.
+In all cases, individual transaction amounts, timestamps, and client identifiers stay out of the outbound LLM payload.
 
 ---
 
-## Data Flow: Step-by-Step
+## Data Flow: CLI Pipeline (Default `cargo run`)
 
 ```
-1. cargo run
-   └── dotenvy::dotenv() loads .env (OPENAI_API_KEY, DB_BACKEND, etc.)
+1. `AppConfig::load()` (config layers + paths)
 
-2. db::init_db()
-   ├── [sqlite]    Creates in-memory SQLite, seeds 500 transactions for client 123
-   └── [supabase]  Ensures table exists (DDL via Postgres), auto-seeds if empty (via PostgREST)
+2. `db::init_db()` → `query_transactions(client 123)` → 500 rows, 10 batches of 50
 
-3. db::query_transactions(&backend, 123)
-   └── Returns Vec<Transaction> [500 rows, ORDER BY id ASC]
+3. `keys::load_or_generate_key()`
 
-4. db::sign_transactions(&txns)
-   └── Computes 4-level Poseidon commitment (msg_hash)
-   └── Signs msg_hash with fixed BabyJubJub private key
-   └── Returns SignatureData { pub_key_x, pub_key_y, sig_s, sig_r8_x, sig_r8_y }
-       (all as BN254 decimal strings)
+4. `db::sign_transaction_batches()` (BabyJubJub EdDSA per batch)
 
-5. prover::generate_prover_toml(&txns, &sig, &params)
-   └── Writes circuit/Prover.toml with all inputs serialized
+5. `prover::generate_batched_prover_toml()`
 
-6. prover::compile_circuit()       [skipped if already compiled]
-   └── $ nargo compile
-   └── Produces circuit/target/zemtik_circuit.json
+6. `prover::compile_circuit()` (cached)
 
-7. prover::execute_circuit()
-   └── $ nargo execute
-   └── Noir runtime verifies:
-       a. EdDSA signature valid (BabyJubJub + Poseidon)
-       b. Aggregation correct for given query params
-   └── Parses "Circuit output: 0x..." -> u64 aggregate
-   └── Returns: 158100
+7. `prover::execute_circuit()` (constraint check + aggregate)
 
-8. prover::generate_proof()        [may skip if CRS insufficient]
-   └── $ bb prove -s ultra_honk ...
+8. `prover::generate_proof()` + `prover::verify_proof()` (UltraHonk, CRS-dependent)
 
-9. openai::query_openai(158100, "AWS Infrastructure", ...)
-   └── Constructs ZK payload (no raw rows)
-   └── POST to https://api.openai.com/v1/chat/completions
-   └── Returns AI advisory text
+9. `bundle::generate_bundle()` + `receipts::insert_receipt()` when fully verifiable
 
-10. Print results
+10. `openai::query_openai(...)` (aggregate-only payload)
+
+11. `audit::write_audit_record(...)`
 ```
+
+Proxy mode replaces steps 2–10 with: **parse Chat Completions body → intent → router →** either FastLane handler or the same ZK pipeline as above keyed off extracted `IntentResult` (category + time range).
 
 ---
 
 ## Cryptographic Security Properties
 
-### Soundness
-A dishonest prover who attempts to submit fabricated transaction data or an inflated aggregate cannot produce a valid witness. The EdDSA assertion in Step 2 of the circuit ensures that the commitment to the transaction array must match a value signed by the bank's private key. Without the bank's private key, no valid signature can be produced for a modified dataset.
+### Soundness (ZK path)
 
-### Zero-Knowledge
-The ZK proof reveals nothing about the private inputs beyond what is logically implied by the public inputs and output. An observer who holds the proof and public inputs learns only: "the holder of the bank private key signed a payload, and the AWS spend derived from that payload in Q1 2024 was $158,100."
+A dishonest prover cannot forge a valid proof for a wrong aggregate without breaking the signature assumption on the Poseidon commitment: the witness must match a bank-signed message hash.
+
+### Zero-knowledge
+
+The proof reveals nothing about private rows beyond what public inputs and the aggregate imply.
 
 ### Completeness
-Any honest prover with valid transaction data and the correct bank signature can always produce a valid witness and proof.
+
+Honest prover with valid signed data matching public inputs can produce a witness; proof generation additionally requires a sufficient CRS / `bb` environment.
+
+### FastLane caveat
+
+FastLane provides cryptographic attestation over the aggregate path, not a succinct ZK proof. Policy (`schema_config.json`) decides which queries are acceptable on that path.
 
 ---
 
 ## Technology Stack
 
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| ZK circuit language | Noir | 1.0.0-beta.19 |
-| Proof system backend | Barretenberg (UltraHonk) | v0.82.2 |
-| EdDSA circuit library | noir-lang/eddsa | v0.1.3 |
-| Poseidon circuit library | noir-lang/poseidon | v0.1.1 |
-| Orchestrator language | Rust | 1.93.1 |
-| Database | rusqlite (SQLite) or Supabase (PostgREST + direct Postgres for DDL) | 0.32 / — |
-| BabyJubJub signing | babyjubjub-rs | 0.0.11 |
-| Poseidon hashing (Rust) | poseidon-rs | 0.0.8 |
-| HTTP client | reqwest | 0.12 |
-| AI inference | OpenAI gpt-5.4-nano | Chat Completions API |
+| Component | Technology | Notes |
+|-----------|------------|--------|
+| ZK circuit | Noir | 1.0.0-beta.19 |
+| Proof system | Barretenberg UltraHonk | `bb` v4.x (nightly in CI / README) |
+| EdDSA (Noir) | noir-lang/eddsa | vendored constraints |
+| Orchestrator | Rust | edition 2021 |
+| DB | rusqlite / Supabase | `DB_BACKEND` |
+| Signing | babyjubjub-rs, poseidon-rs | BN254-aligned |
+| HTTP | axum, reqwest | Proxy + OpenAI |
+| Intent (embed) | fastembed 5, BGE-small-en ONNX | Optional feature `embed`; `regex-only` build skips |
+| Eval | `intent-eval` binary | Feature `eval`; labeled prompts in `eval/labeled_prompts.json` |
 
 ---
 
-## Known Limitations of This POC
+## Known Limitations
 
-### 1. CRS Size for ZK Proof Generation
-The circuit (EdDSA + 50-transaction Poseidon tree) exceeds the local Grumpkin CRS of 65,537 points cached by Barretenberg. In production, deploy with a pre-downloaded SRS or use a proof server (e.g., Aztec Network's proving infrastructure). The `nargo execute` step — which fully verifies all circuit constraints — completes successfully and is sufficient for local validation.
+1. **CRS / proof generation:** The full 500-transaction circuit (10 signed batches) is large; local SRS may be insufficient for `bb prove`. `nargo execute` still validates all constraints. Production should pin SRS or use a proving service.
 
-### 2. Deterministic Private Key
-The bank's private key is hardcoded as `[0x01..0x20]` for demo reproducibility. In production, integrate with an HSM or a secrets manager.
+2. **Deterministic demo key:** Bank key is generated or loaded from disk for demos; production should use an HSM or KMS.
 
-### 3. Fixed Transaction Count
-The circuit is compiled with `TX_COUNT = 50` as a compile-time constant. Changing this requires recompilation. Production deployments would expose multiple compiled circuits for different batch sizes, or use a recursive proof that handles variable-length inputs.
+3. **Fixed batch geometry:** `TX_COUNT` and `BATCH_COUNT` are compile-time constants (currently 50 × 10 = 500 rows). Changing capacity requires recompiling the circuit and regenerating artifacts.
 
-### 4. Single Query Type
-The current circuit supports sum aggregation with category and time-range predicates. Extending to COUNT, AVG, or multi-dimensional filters requires new circuit variants.
+4. **Query expressiveness:** Circuit is SUM with category + time window; other aggregates need new circuits.
+
+5. **Public inputs sidecar:** Human-readable metadata in bundles is not separately committed inside the circuit (documented in verifier UX); rely on `bb verify` for proof / VK / binary public inputs.
+
+6. **`bb verify` timeout:** Proxy does not bound `bb verify` wall time; a hung verifier can block the ZK pipeline (`pipeline_lock`).
+
+7. **Category code map:** `schema_key_to_category_code` only includes tables present in the demo circuit encoding; unknown keys cannot run the ZK slow lane until mapped.
+
+8. **FastLane data source:** FastLane uses the in-memory seeded SQLite ledger, not Supabase (see `CHANGELOG` / `CLAUDE.md`).
+
+9. **Embedding model:** First proxy start may download ~130MB ONNX to `~/.zemtik/models/`; air-gapped deploys can set `ZEMTIK_INTENT_BACKEND=regex`.
 
 ---
 
 ## Running the POC
 
 ```bash
-# Prerequisites: nargo 1.0.0-beta.19, bb v0.82.2, Rust 1.70+
-# Copy the example env and set OPENAI_API_KEY (never commit .env)
+# Prerequisites: nargo 1.0.0-beta.19, bb v4 (UltraHonk), Rust stable
 cp .env.example .env
-# Edit .env and add your key from https://platform.openai.com/api-keys
+# Set OPENAI_API_KEY in .env or ~/.zemtik/config.yaml
 
-# Build and run (first run compiles the Noir circuit, ~10s)
+cargo build --release
+
+# Default: full CLI ZK pipeline (500 txs, Q1 2024, aws_spend category)
 cargo run
 
-# Subsequent runs skip compilation (~2.5s total)
-cargo run
+# OpenAI-compatible proxy (needs ~/.zemtik/schema_config.json)
+cargo run -- proxy
+
+# Offline bundle check
+cargo run -- verify path/to/bundle.zip
+
+# Receipt ledger
+cargo run -- list
 ```
 
-**Expected output:**
-```
-[DB]   Initializing in-memory SQLite ledger... OK (50 transactions for client 123)
-[KMS]  Signing 50-row payload with BabyJubJub EdDSA... OK
-[NOIR] Writing Prover.toml... OK
-[NOIR] Circuit already compiled, skipping nargo compile
-[NOIR] Executing circuit (signature verification + aggregation)...
-[NOIR] Circuit executed in 0.39s
-[NOIR] Verified aggregate AWS Infrastructure spend = $158100
-[NOIR] Attempting UltraHonk proof generation...
-[NOIR] Circuit constraints verified by nargo execute (EdDSA + aggregation).
-[AI]   Querying gpt-5.4-nano with ZK-verified payload...
+**Typical CLI output shape:** `[DB]` ledger init, `[KMS]` batch signing, `[NOIR]` compile/execute, optional `[NOIR] Generating UltraHonk proof (bb v4, CRS auto-download)...`, `[AI]` with aggregate-only payload and `Raw rows sent to OpenAI: 0`.
 
-══════════════════════════════════════════════════════
-  ZEMTIK RESULT (total time: 2.37s)
-══════════════════════════════════════════════════════
-  Category : AWS Infrastructure
-  Period   : Q1 2024
-  Aggregate: $158100
-  ZK Proof : VERIFIED (nargo execute - all constraints including EdDSA satisfied)
-  Raw rows sent to OpenAI: 0
-
-  AI Advisory (gpt-5.4-nano):
-  Your AWS Infrastructure spend of $158,100 for Q1 2024 is now verified...
-══════════════════════════════════════════════════════
-```
+For supported natural-language patterns in proxy mode, see `docs/SUPPORTED_QUERIES.md`.
