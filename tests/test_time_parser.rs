@@ -130,9 +130,22 @@ fn soon_is_ambiguous() {
 }
 
 #[test]
-fn last_year_is_ambiguous() {
+fn last_year_resolves_to_prior_year() {
     let result = parse_time_range("what was our AWS spend last year", 0);
-    assert!(result.is_err(), "\"last year\" should be ambiguous");
+    assert!(result.is_ok(), "\"last year\" should resolve to prior calendar year");
+    let tr = result.unwrap();
+    assert!(tr.end_unix_secs > tr.start_unix_secs);
+    // prior year ends before current year starts
+    let now = chrono::Utc::now().timestamp();
+    assert!(tr.end_unix_secs < now, "prior year end should be in the past");
+}
+
+#[test]
+fn prior_year_resolves_to_prior_year() {
+    let result = parse_time_range("salary expenses prior year", 0);
+    assert!(result.is_ok(), "\"prior year\" should resolve to prior calendar year");
+    let tr = result.unwrap();
+    assert!(tr.end_unix_secs > tr.start_unix_secs);
 }
 
 #[test]
@@ -140,6 +153,22 @@ fn last_quarter_succeeds() {
     // "last quarter" is a supported pattern — should not be ambiguous
     let result = parse_time_range("AWS spend last quarter", 0);
     assert!(result.is_ok(), "\"last quarter\" should be supported");
+    let tr = result.unwrap();
+    assert!(tr.end_unix_secs > tr.start_unix_secs);
+}
+
+#[test]
+fn prior_quarter_succeeds() {
+    let result = parse_time_range("payroll vs prior quarter", 0);
+    assert!(result.is_ok(), "\"prior quarter\" should resolve like last quarter");
+    let tr = result.unwrap();
+    assert!(tr.end_unix_secs > tr.start_unix_secs);
+}
+
+#[test]
+fn prior_month_succeeds() {
+    let result = parse_time_range("travel expenses prior month", 0);
+    assert!(result.is_ok(), "\"prior month\" should resolve like last month");
     let tr = result.unwrap();
     assert!(tr.end_unix_secs > tr.start_unix_secs);
 }

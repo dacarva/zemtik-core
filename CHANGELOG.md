@@ -32,6 +32,8 @@ All notable changes to this project will be documented in this file.
 - Fiscal year offset now applied to `last quarter` and `this quarter` expressions (previously ignored).
 - `past N days` capped at 36500 days to prevent `chrono::Duration` overflow.
 - Embedding index build failure now panics at startup (previously silently returned 400 for all requests).
+- Time parser now recognizes `last year` / `prior year` → prior calendar year; `prior quarter` / `prior month` as aliases for `last quarter` / `last month`. Previously these triggered `TimeRangeAmbiguous` and routed all matching prompts to ZK SlowLane unnecessarily.
+- `schema_config.example.json` example prompts expanded to cover indirect vocabulary (HR costs, headcount, wages, cloud billing, expense reports, etc.). Eval accuracy: 72.9% → 98.8% (168/170 labeled prompts).
 
 ## [0.3.0] - 2026-03-30
 

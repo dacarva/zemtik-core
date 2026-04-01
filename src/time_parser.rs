@@ -10,9 +10,13 @@
 /// | `MMM YYYY`        | March 2024      | Month name + year                        |
 /// | `past N days`     | past 30 days    | now − N days → now                       |
 /// | `last quarter`    | last quarter    | Previous calendar quarter from today     |
+/// | `prior quarter`   | prior quarter   | Alias for last quarter                   |
 /// | `this quarter`    | this quarter    | Current calendar quarter                 |
 /// | `last month`      | last month      | Previous calendar month                  |
+/// | `prior month`     | prior month     | Alias for last month                     |
 /// | `this month`      | this month      | Current calendar month                   |
+/// | `last year`       | last year       | Full prior calendar year                 |
+/// | `prior year`      | prior year      | Alias for last year                      |
 /// | `YTD`/`year to date`| YTD           | Jan 1 of current year → now             |
 /// | `YYYY` (bare year)| 2024            | Full year, fiscal offset applied         |
 /// | (no time token)   | —               | Default to current calendar year; no err |
@@ -70,16 +74,19 @@ static RE_PAST_N_DAYS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bpast\s+(\d+)\s+days?\b").unwrap());
 
 static RE_LAST_QUARTER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\blast\s+quarter\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\b(last|prior)\s+quarter\b").unwrap());
 
 static RE_THIS_QUARTER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bthis\s+quarter\b").unwrap());
 
 static RE_LAST_MONTH: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\blast\s+month\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\b(last|prior)\s+month\b").unwrap());
 
 static RE_THIS_MONTH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bthis\s+month\b").unwrap());
+
+static RE_LAST_YEAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(last|prior)\s+year\b").unwrap());
 
 static RE_YTD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(ytd|year[- ]to[- ]date)\b").unwrap());
@@ -90,7 +97,7 @@ static RE_BARE_YEAR: LazyLock<Regex> =
 /// Patterns that signal a time expression without being a supported format.
 /// When any of these match but no supported pattern did, we return TimeAmbiguousError.
 static RE_AMBIGUOUS_TIME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|last\s+year|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier|prior\s+(year|quarter|month))\b").unwrap()
+    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier)\b").unwrap()
 });
 
 // ---------------------------------------------------------------------------
@@ -175,6 +182,12 @@ pub fn parse_time_range(
     if RE_THIS_MONTH.is_match(prompt) {
         let start = month_start_unix(now.year(), now.month());
         let end = month_end_unix(now.year(), now.month());
+        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // last year / prior year → full prior calendar year
+    if RE_LAST_YEAR.is_match(prompt) {
+        let (start, end) = year_to_unix(now.year() - 1, fiscal_offset_months);
         return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
@@ -263,8 +276,8 @@ pub(crate) fn offset_month(year: i32, month: i64, offset_months: i64) -> (i32, i
 pub(crate) fn month_start_unix(year: i32, month: u32) -> i64 {
     Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
         .single()
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0)
+        .unwrap_or_else(|| panic!("month_start_unix: invalid date year={} month={}", year, month))
+        .timestamp()
 }
 
 /// Unix timestamp of the last second of a given month (UTC).
@@ -272,8 +285,8 @@ pub(crate) fn month_end_unix(year: i32, month: u32) -> i64 {
     let (next_year, next_month) = if month == 12 { (year + 1, 1u32) } else { (year, month + 1) };
     Utc.with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
         .single()
-        .map(|dt| dt.timestamp() - 1)
-        .unwrap_or(0)
+        .unwrap_or_else(|| panic!("month_end_unix: invalid date year={} month={}", next_year, next_month))
+        .timestamp() - 1
 }
 
 fn month_to_quarter(month: u32) -> u32 {
