@@ -34,6 +34,7 @@ fn sample_receipt(id: &str) -> Receipt {
         engine_used: "zk_slow_lane".to_owned(),
         proof_hash: Some("deadbeef".to_owned()),
         data_exfiltrated: 0,
+        intent_confidence: None,
     }
 }
 
@@ -87,7 +88,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
 }
 
 #[test]
@@ -97,7 +98,25 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn test_intent_confidence_stored_and_retrieved() {
+    let conn = open_in_memory().unwrap();
+    let mut r = sample_receipt("conf-uuid");
+    r.intent_confidence = Some(0.87);
+    insert_receipt(&conn, &r).unwrap();
+
+    let found = get_receipt(&conn, "conf-uuid").unwrap().unwrap();
+    assert!(
+        found.intent_confidence.is_some(),
+        "intent_confidence should be stored"
+    );
+    assert!(
+        (found.intent_confidence.unwrap() - 0.87).abs() < 0.001,
+        "intent_confidence value mismatch"
+    );
 }
 
 #[test]

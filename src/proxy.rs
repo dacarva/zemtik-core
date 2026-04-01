@@ -15,11 +15,12 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
+use crate::intent::IntentBackend;
 use crate::types::{
-    AuditRecord, EngineResult, OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route,
-    SignatureData, TokenUsage,
+    AuditRecord, EngineResult, EvidencePack, IntentResult, OpenAiRequestLog, OpenAiResponseLog,
+    QueryParams, Route, SignatureData, TokenUsage,
 };
-use crate::{audit, bundle, db, engine_fast, evidence, intent, keys, prover, receipts, router};
+use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com";
 
@@ -37,6 +38,8 @@ struct ProxyState {
     signing_key_bytes: Vec<u8>,
     /// SHA-256 of schema_config.json bytes (empty string when schema absent).
     schema_config_hash: String,
+    /// Intent matching backend — static after startup, no lock needed.
+    intent_backend: Arc<dyn IntentBackend>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -68,13 +71,51 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     }
 
     // Validate sensitivity values
-    crate::config::validate_schema_config(config.schema_config.as_ref().unwrap())
+    crate::config::validate_schema_config(config.schema_config.as_ref().unwrap(), false)
         .context("validate schema_config")?;
 
     // Fail fast: verify circuit directory has all required files before accepting requests.
     prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
 
     let schema_config_hash = config.schema_config_hash.clone().unwrap_or_default();
+    let schema = config.schema_config.clone().unwrap();
+
+    // Build intent backend. Use EmbeddingBackend unless ZEMTIK_INTENT_BACKEND=regex
+    // or the feature is disabled. Falls back to RegexBackend on model load failure.
+    let intent_backend: Arc<dyn IntentBackend> = {
+        let use_embed = config.intent_backend.to_lowercase() != "regex";
+        let backend: Box<dyn IntentBackend> = if use_embed {
+            // Validate embed fields before attempting model load
+            if let Err(e) = crate::config::validate_schema_config(&schema, true) {
+                eprintln!(
+                    "[INTENT] WARN: schema missing embed fields ({}). Falling back to regex backend.",
+                    e
+                );
+                let mut b = Box::new(intent::RegexBackend::new());
+                b.index_schema(&schema);
+                b as Box<dyn IntentBackend>
+            } else {
+                match intent_embed::try_new_embedding_backend(&config.models_dir) {
+                    Some(mut b) => {
+                        b.index_schema(&schema);
+                        b
+                    }
+                    None => {
+                        // Fallback already logged by try_new_embedding_backend
+                        let mut b = Box::new(intent::RegexBackend::new());
+                        b.index_schema(&schema);
+                        b as Box<dyn IntentBackend>
+                    }
+                }
+            }
+        } else {
+            println!("[INTENT] Using regex intent backend (ZEMTIK_INTENT_BACKEND=regex)");
+            let mut b = Box::new(intent::RegexBackend::new());
+            b.index_schema(&schema);
+            b as Box<dyn IntentBackend>
+        };
+        Arc::from(backend)
+    };
 
     let config = Arc::new(config);
 
@@ -97,13 +138,26 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         config: Arc::clone(&config),
         signing_key_bytes,
         schema_config_hash,
+        intent_backend,
     });
 
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/verify/{id}", get(handle_verify))
         .route("/{*path}", any(handle_passthrough))
-        .layer(CorsLayer::permissive())
+        // Restrict CORS to localhost origins — CorsLayer::permissive() sets
+        // Access-Control-Allow-Origin: * which enables cross-origin data exfiltration
+        // from any browser page on the developer workstation. This proxy binds to
+        // 127.0.0.1 so restrict to same-host origins only.
+        .layer(
+            CorsLayer::new()
+                .allow_origin([
+                    axum::http::HeaderValue::from_static("http://localhost:4000"),
+                    axum::http::HeaderValue::from_static("http://127.0.0.1:4000"),
+                ])
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
         .with_state(state);
 
     let addr = format!("127.0.0.1:{}", config.proxy_port);
@@ -182,12 +236,29 @@ async fn handle_chat_completions(
         ProxyError(anyhow::anyhow!("schema_config not loaded"))
     })?;
 
-    let intent_result = match intent::extract_intent(&prompt, schema) {
+    // Run intent extraction in a blocking thread — the embedding backend holds a
+    // std::sync::Mutex<TextEmbedding> and ONNX inference can take tens to hundreds of ms.
+    // Running this on the Tokio worker thread would starve other async tasks under load.
+    let intent_result_raw = {
+        let backend = Arc::clone(&state.intent_backend);
+        let prompt_clone = prompt.clone();
+        let schema_clone = schema.clone();
+        let threshold = state.config.intent_confidence_threshold;
+        tokio::task::spawn_blocking(move || {
+            intent::extract_intent_with_backend(&prompt_clone, &schema_clone, backend.as_ref(), threshold)
+        })
+        .await
+        .map_err(|e| ProxyError(anyhow::anyhow!("intent backend thread panicked: {}", e)))?
+    };
+
+    let intent_result = match intent_result_raw {
         Ok(r) => r,
         Err(e) => {
             // Log rejection and return 400
             let db_guard = state.receipts_db.lock().await;
-            let _ = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string());
+            if let Err(db_err) = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string()) {
+                eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
+            }
             drop(db_guard);
             println!("[ROUTE] Intent rejection: {}", e);
             return Ok((
@@ -209,7 +280,7 @@ async fn handle_chat_completions(
 
     match route {
         Route::FastLane => {
-            handle_fast_lane(state, body, api_key, intent_result, total_start).await
+            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, total_start).await
         }
         Route::ZkSlowLane => {
             handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, total_start).await
@@ -222,6 +293,8 @@ async fn handle_fast_lane(
     state: Arc<ProxyState>,
     mut body: Value,
     api_key: String,
+    request_hash: String,
+    prompt_hash: String,
     intent_result: crate::types::IntentResult,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
@@ -258,6 +331,7 @@ async fn handle_fast_lane(
             let ev = evidence::build_evidence_pack(
                 &receipt_id, "fast_lane", 0, 0, None, None,
                 "", &schema_config_hash, &timestamp,
+                Some(intent_result.confidence),
             );
             let payload = serde_json::json!({
                 "category": category_name,
@@ -268,7 +342,18 @@ async fn handle_fast_lane(
                 "note": "No rows matched the query criteria.",
                 "evidence": ev
             });
-            return Ok(build_fast_lane_response(&mut body, payload, &state, &api_key, &receipt_id).await?);
+            return Ok(
+                build_fast_lane_response(
+                    &mut body,
+                    payload,
+                    &state,
+                    &api_key,
+                    &receipt_id,
+                    &intent_result,
+                    &ev,
+                )
+                .await?,
+            );
         }
     };
 
@@ -285,6 +370,7 @@ async fn handle_fast_lane(
         &fl.key_id,
         &schema_config_hash,
         &timestamp,
+        Some(intent_result.confidence),
     );
 
     // Insert receipt
@@ -298,12 +384,13 @@ async fn handle_fast_lane(
                 proof_status: "FAST_LANE_ATTESTED".to_owned(),
                 circuit_hash: String::new(),
                 bb_version: String::new(),
-                prompt_hash: String::new(),
-                request_hash: String::new(),
+                prompt_hash: prompt_hash.clone(),
+                request_hash: request_hash.clone(),
                 created_at: timestamp.clone(),
                 engine_used: "fast_lane".to_owned(),
                 proof_hash: None,
                 data_exfiltrated: 0,
+                intent_confidence: Some(intent_result.confidence),
             },
         );
     }
@@ -312,7 +399,7 @@ async fn handle_fast_lane(
         "[FAST] aggregate={} row_count={} attestation={} ({:.2}ms)",
         fl.aggregate,
         fl.row_count,
-        &fl.attestation_hash[..8],
+        &fl.attestation_hash[..fl.attestation_hash.len().min(8)],
         total_start.elapsed().as_secs_f64() * 1000.0,
     );
 
@@ -325,7 +412,35 @@ async fn handle_fast_lane(
         "evidence": ev
     });
 
-    build_fast_lane_response(&mut body, payload, &state, &api_key, &receipt_id).await
+    build_fast_lane_response(
+        &mut body,
+        payload,
+        &state,
+        &api_key,
+        &receipt_id,
+        &intent_result,
+        &ev,
+    )
+    .await
+}
+
+/// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
+fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<Value, serde_json::Error> {
+    let mut v = serde_json::to_value(ev)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("engine".to_string(), Value::String(ev.engine_used.clone()));
+        obj.insert(
+            "intent".to_string(),
+            serde_json::json!({
+                "table": intent.table,
+                "category_name": intent.category_name,
+                "start_unix_secs": intent.start_unix_secs,
+                "end_unix_secs": intent.end_unix_secs,
+                "confidence": intent.confidence,
+            }),
+        );
+    }
+    Ok(v)
 }
 
 /// Replace last user message with FastLane payload and forward to OpenAI.
@@ -335,6 +450,8 @@ async fn build_fast_lane_response(
     state: &Arc<ProxyState>,
     api_key: &str,
     receipt_id: &str,
+    intent: &IntentResult,
+    ev: &EvidencePack,
 ) -> Result<Response, ProxyError> {
     let message = format!(
         "Here is a cryptographically attested financial summary:\n\n{}",
@@ -365,11 +482,16 @@ async fn build_fast_lane_response(
         .map_err(ProxyError)?;
 
     let resp_status = openai_resp.status();
-    let resp_body: Value = openai_resp
+    let mut resp_body: Value = openai_resp
         .json()
         .await
         .context("parse OpenAI response")
         .map_err(ProxyError)?;
+
+    let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError(anyhow::Error::new(e)))?;
+    if let Some(obj) = resp_body.as_object_mut() {
+        obj.insert("evidence".to_string(), envelope);
+    }
 
     let mut response = (
         StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
@@ -444,6 +566,7 @@ async fn handle_zk_slow_lane(
                 engine_used: "zk_slow_lane".to_owned(),
                 proof_hash: zk.proof_hex.clone(),
                 data_exfiltrated: 0,
+                intent_confidence: Some(intent.confidence),
             },
         ) {
             Ok(()) => Some(br),
@@ -517,11 +640,34 @@ async fn handle_zk_slow_lane(
         .map_err(ProxyError)?;
 
     let resp_status = openai_resp.status();
-    let resp_body: Value = openai_resp
+    let mut resp_body: Value = openai_resp
         .json()
         .await
         .context("parse OpenAI response")
         .map_err(ProxyError)?;
+
+    let receipt_id_ev = committed_bundle
+        .map(|b| b.bundle_id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let timestamp_ev = Utc::now().to_rfc3339();
+    let key_material = format!("{}{}", zk.first_sig.pub_key_x, zk.first_sig.pub_key_y);
+    let key_id_zk = hex::encode(Sha256::digest(key_material.as_bytes()));
+    let ev_zk = evidence::build_evidence_pack(
+        &receipt_id_ev,
+        "zk_slow_lane",
+        zk.aggregate as i64,
+        zk.txns_len,
+        zk.proof_hex.clone(),
+        None,
+        &key_id_zk,
+        &state.schema_config_hash,
+        &timestamp_ev,
+        Some(intent.confidence),
+    );
+    let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError(anyhow::Error::new(e)))?;
+    if let Some(obj) = resp_body.as_object_mut() {
+        obj.insert("evidence".to_string(), envelope);
+    }
 
     let elapsed = total_start.elapsed();
 

@@ -94,6 +94,45 @@
 
 ---
 
+## feat/intent-engine TODOs (added 2026-03-30, plan-ceo-review)
+
+### Multi-turn context extraction for intent (P2, post-feat/intent-engine)
+- **What:** Extend `proxy.rs:166` to concatenate the last N user messages before passing to `extract_intent`, not just the last message. Also handle structured content arrays (`[{"type":"text","text":"..."}]`) which currently yield an empty prompt string.
+- **Why:** An analyst typing 'Q1 2024' as a follow-up to 'AWS spend' gets `NoTableIdentified` today — intent is split across turns. Flagged by Codex outside voice during CEO review. Structured content gap also flagged by Codex outside voice during feat/intent-engine eng review (2026-03-30) — many OpenAI SDK clients send structured content, making routing accuracy claims hollow for those clients.
+- **Pros:** Improves routing accuracy for conversational use and for SDK clients that use structured message content. Stays local. No new dependencies.
+- **Cons:** May over-weight stale context from earlier turns. Needs a window size parameter.
+- **Context:** Current `proxy.rs:166` only extracts the last user message content if it's a plain string. Multi-turn context and structured message parts are dropped.
+- **Effort:** S (human: ~2h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged.
+
+### ONNX model integrity check at load time (P2, before second client)
+- **What:** Compute SHA-256 of the downloaded BGE-small-en model file and store alongside it. Verify checksum on subsequent loads before ONNX runtime init.
+- **Why:** The model binary downloads from the fastembed hub without integrity verification. For a ZK middleware marketing 'cryptographic safety,' a supply-chain attack on the ML model is a trust inconsistency. Severity: low for SF demo, medium for any enterprise with a security review.
+- **Pros:** Closes a supply-chain gap. `sha2` already in `Cargo.toml`. Simple to implement.
+- **Cons:** ~50ms startup overhead for 130MB file check. Checksum must be published alongside model updates.
+- **Effort:** S (human: ~2h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged (provides the model download flow to extend).
+
+### Schema hot-reload via SIGHUP (P3, post-v1)
+- **What:** On SIGHUP, rebuild the embedding index from `schema_config.json` without proxy restart. Use Arc-swap pattern to atomically replace the `Arc<dyn IntentBackend>` in `ProxyState`.
+- **Why:** Right now schema changes require a proxy restart. Operational friction for enterprise environments where table sensitivity changes frequently.
+- **Pros:** Zero-downtime schema updates. Pairs well with external secret rotation flows.
+- **Cons:** Requires careful coordination with `pipeline_lock` (ZK requests must not see a partially rebuilt index). Arc-swap is the clean pattern but adds complexity.
+- **Context:** The design doc explicitly deferred this. Confirmed deferred in CEO review (2026-03-30). Revisit when second client onboards.
+- **Effort:** M (human: ~3 days / CC: ~30min)
+- **Depends on:** feat/intent-engine merged.
+
+### Default time range is wall-clock dependent (P3, post-v1)
+- **What:** Prompts with no time expression (e.g. "what is our total AWS spend?") default to the current calendar year. Add a `default_time_range` config option (e.g., `"full_history"`, `"current_year"`, or an explicit range) so behavior is deterministic across deployments.
+- **Why:** Receipts generated from identical prompts in January vs December cover different data periods. For a system producing cryptographic receipts, this creates a reproducibility gap — two receipts with the same prompt but different timestamps silently represent different data. Surfaced by Codex outside voice during feat/intent-engine eng review (2026-03-30).
+- **Pros:** Makes receipt interpretation unambiguous. Needed for audit trails. Simple config addition.
+- **Cons:** Changing the default would be a breaking behavior change for existing users. Only add as an opt-in initially.
+- **Context:** Existing behavior (default to current year) is inherited from the initial intent.rs. Not urgent for SF demo but becomes relevant when compliance teams review receipts.
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged (provides DeterministicTimeParser where this config would be applied).
+
+---
+
 ## feat/routing-engine TODOs (added 2026-03-30, plan-eng-review)
 
 ### ~~Evaluate evidence.rs vs. bundle.rs overlap~~ ✓ DONE (feat/routing-engine, 2026-03-30)
@@ -113,15 +152,41 @@
 - **Effort:** S (human) → S (CC+gstack)
 - **Depends on:** feat/routing-engine merged.
 
-### intent.rs: compile regexes once (P3)
-- **What:** `Regex::new(...)` is called inside `extract_intent`, which runs on every proxy request. Move to `std::sync::LazyLock` or `once_cell::sync::Lazy`.
-- **Why:** Found by Claude adversarial review (feat/routing-engine, 2026-03-30). Regex compilation is expensive (~microseconds) and wasteful on the hot path.
-- **Effort:** XS (human) → XS (CC+gstack)
+### ~~intent.rs: compile regexes once~~ ✓ DONE (feat/intent-engine, v0.4.0)
+- `time_parser.rs` uses `std::sync::LazyLock` for all regexes (compiled once at first use). `RegexBackend` uses `str::contains()` — no `Regex::new()` calls in the hot path.
 
 ### run_zk_pipeline: reuse ledger DB instead of re-initializing (P3)
 - **What:** `run_zk_pipeline` calls `db::init_db()` on every ZK request, re-seeding the demo SQLite in-memory DB each time. Share the existing `ledger_db` from `ProxyState`.
 - **Why:** Found by Claude adversarial review (feat/routing-engine, 2026-03-30). Wastes CPU on every ZK slow-lane request; creates correctness risk if `pipeline_lock` is ever bypassed with concurrent ZK requests.
 - **Effort:** S (human) → S (CC+gstack)
+
+### run_fast_lane blocks async executor while holding ledger_db lock (P2)
+- **What:** `engine_fast::run_fast_lane` is called synchronously in the async Axum handler while holding the `ledger_db` Tokio Mutex. Wrap it in `tokio::task::spawn_blocking`, mirroring the fix applied to ONNX inference in `af98abe`.
+- **Why:** Blocking a Tokio worker thread while holding a mutex delays all other in-flight async tasks on that thread. Under load, a slow FastLane DB query blocks new requests from being accepted. Found by Claude adversarial review (feat/intent-engine, 2026-04-01).
+- **How to apply:** Same pattern as the ONNX spawn_blocking wrapper in `proxy.rs` — move the `run_fast_lane` call into `spawn_blocking`, pass Arc clones of required state.
+- **Effort:** S (human: ~30min / CC: ~5min)
+- **Depends on:** feat/intent-engine merged.
+
+### RE_BARE_YEAR captures non-year numbers (P3)
+- **What:** `time_parser.rs` bare year regex `\b(20\d{2})\b` matches any 4-digit number starting with `20`, including "2000 employees" (→ year 2000) or "budget was $2099" (→ year 2099). A prompt like "we have 2000 employees, show me payroll" returns a year-2000 time range instead of the current-year default.
+- **Why:** Found by Claude adversarial review (feat/intent-engine, 2026-04-01). Operators won't notice because no error is raised — routing silently uses the wrong historical range, producing ZK proofs for incorrect time windows.
+- **How to apply:** Restrict the regex to plausible year range (e.g., `20[1-3][0-9]` to cover 2010–2039), or require the year to appear adjacent to a time-context word. Document the constraint clearly.
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged.
+
+### Add test for "May 2024" month name parsing (P3)
+- **What:** `RE_MONTH_NAME` lists short-form abbreviations (`Jan|Feb|Mar|Apr|Jun|Jul|...`) but omits `May` from the short-form list — `May` is only matched via the full-name branch. Add an explicit test to confirm `parse_time_range("May 2024 payroll", 0)` resolves correctly.
+- **Why:** Every other month has an unambiguous 3-letter abbreviation tested. "May" is both its own full name and abbreviation, making it easy to miss in the alternation. Found by Claude adversarial review (feat/intent-engine, 2026-04-01).
+- **How to apply:** Add `fn may_2024()` test to `tests/test_time_parser.rs` asserting `start = 1714521600`, `end = 1717199999`.
+- **Effort:** XS (human: ~5min / CC: ~1min)
+- **Depends on:** feat/intent-engine merged.
+
+### Exact table key substring bypasses embedding threshold (P3, INVESTIGATE)
+- **What:** In `extract_intent_with_backend`, rule 2 (substring gate) gives confidence `1.0` and skips all embedding + margin checks when exactly one table key or alias appears verbatim in the prompt. A user who knows any table key (e.g., `aws_spend`) can craft prompts that always route to FastLane regardless of what the embedding would score.
+- **Why:** Found by Claude adversarial review (feat/intent-engine, 2026-04-01). Whether this is a bug or intentional depends on whether table keys are considered public. For an internal enterprise tool they typically are, so the risk is low. Worth reviewing before external clients onboard.
+- **How to apply:** Decide: should exact-key substring matches still require embedding score ≥ threshold to confirm? Or document that table keys are public and the bypass is acceptable.
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Depends on:** feat/intent-engine merged.
 
 ### intent.rs v2: multi-table query support (P3, post-v1)
 - **What:** Extend intent.rs to extract multiple table names from a single query and apply the cross-sensitivity OR rule across all extracted tables.

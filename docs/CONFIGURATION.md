@@ -1,0 +1,247 @@
+# Configuration Reference
+
+**Document type:** Reference
+**Audience:** Developers and operators deploying Zemtik
+**Goal:** Complete, authoritative list of every configuration option, its type, default, and effect
+
+---
+
+## Configuration layers
+
+Zemtik resolves configuration in this order, with later sources overriding earlier ones:
+
+1. Hardcoded defaults (paths under `~/.zemtik/`)
+2. YAML file (`~/.zemtik/config.yaml`)
+3. Environment variables (`ZEMTIK_*` prefix and others below)
+4. CLI flags (`--port`, `--circuit-dir`)
+
+You can mix layers freely. Most deployments use only `.env` + `schema_config.json`.
+
+---
+
+## Environment variables
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key. Required for the CLI pipeline and proxy's forward-to-OpenAI step. |
+
+### Database
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `DB_BACKEND` | `sqlite` | `sqlite`, `supabase` | Selects the transaction storage backend. |
+| `SUPABASE_URL` | — | `https://your-project.supabase.co` | Required when `DB_BACKEND=supabase`. |
+| `SUPABASE_SERVICE_KEY` | — | Supabase service-role JWT | Required when `DB_BACKEND=supabase`. |
+| `DATABASE_URL` | — | PostgreSQL connection string | Required for DDL (table creation) via direct Postgres when `DB_BACKEND=supabase`. |
+| `SUPABASE_AUTO_CREATE_TABLE` | `1` | `0`, `1` | When `1`, creates the `transactions` table via direct Postgres on startup if it doesn't exist. Set to `0` if the table already exists. |
+| `SUPABASE_AUTO_SEED` | `1` | `0`, `1` | When `1`, inserts the 500 demo transactions on startup. Set to `0` on subsequent runs or in production. |
+
+### Intent engine
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_INTENT_BACKEND` | `embed` | `embed`, `regex` | Intent extraction backend. `embed` uses BGE-small-en ONNX for semantic matching. `regex` uses keyword substring matching. Case-insensitive. |
+| `ZEMTIK_INTENT_THRESHOLD` | `0.65` | `0.0`–`1.0` | Cosine similarity threshold for the embedding backend. Prompts below this confidence score are routed to ZK SlowLane. |
+
+### Runtime paths
+
+Zemtik uses `~/.zemtik/` as its state directory. These variables override individual subdirectories:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ZEMTIK_CIRCUIT_DIR` | `~/.zemtik/circuit/` | Directory containing the compiled Noir circuit artifacts. |
+| `ZEMTIK_RUNS_DIR` | `~/.zemtik/runs/` | Working directory for nargo/bb subprocess artifacts. |
+| `ZEMTIK_KEYS_DIR` | `~/.zemtik/keys/` | Directory for the BabyJubJub private key (`bank_sk`). |
+| `ZEMTIK_RECEIPTS_DIR` | `~/.zemtik/receipts/` | Directory for proof bundle ZIP files. |
+| `ZEMTIK_DB_PATH` | `~/.zemtik/zemtik.db` | Path to the SQLite transaction database (used by SQLite backend). |
+| `ZEMTIK_RECEIPTS_DB_PATH` | `~/.zemtik/receipts.db` | Path to the SQLite receipts ledger. |
+
+---
+
+## CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--port <PORT>` | Port for proxy mode. Default: `4000`. |
+| `--circuit-dir <PATH>` | Override `ZEMTIK_CIRCUIT_DIR` for this run. |
+
+---
+
+## `~/.zemtik/config.yaml`
+
+An optional YAML file for values you don't want to set as environment variables. All keys mirror the environment variable names in lowercase with underscores.
+
+```yaml
+openai_api_key: sk-...
+db_backend: sqlite
+zemtik_intent_backend: embed
+zemtik_intent_threshold: 0.65
+```
+
+---
+
+## `schema_config.json`
+
+Required for proxy mode. Zemtik loads this file from `~/.zemtik/schema_config.json`.
+
+### Top-level fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fiscal_year_offset_months` | integer | Shifts quarter boundaries by N months. `0` = calendar quarters. `9` = fiscal year starting October. |
+| `tables` | object | Map from table key (string) to `TableConfig`. |
+
+### `TableConfig` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sensitivity` | string | Yes | `"low"` routes to FastLane. `"critical"` routes to ZK SlowLane. Any other value is treated as `"critical"`. |
+| `aliases` | string[] | No | Alternative names the intent engine uses to match this table. Case-insensitive substring matching. |
+| `description` | string | Required for `embed` backend | Human-readable description of the table. Used to build the embedding index at startup. |
+| `example_prompts` | string[] | Required for `embed` backend | Representative queries for this table. Used to build the embedding index at startup. More examples = better matching accuracy. |
+
+### Annotated example
+
+```json
+{
+  "fiscal_year_offset_months": 0,
+  "tables": {
+    "aws_spend": {
+      "sensitivity": "low",
+      "aliases": ["AWS", "amazon", "cloud spend"],
+      "description": "AWS cloud infrastructure costs by service and region.",
+      "example_prompts": [
+        "What was our total AWS spend last quarter?",
+        "Show me cloud costs for Q1 2024",
+        "How much did we spend on Amazon Web Services this year?",
+        "What is our AWS bill for H1 2025?"
+      ]
+    },
+    "payroll": {
+      "sensitivity": "critical",
+      "description": "Employee salary, wages, and compensation data.",
+      "example_prompts": [
+        "What was our total payroll cost last quarter?",
+        "Show me salary expenses for 2024",
+        "How much did we spend on employee compensation in Q2 2025?",
+        "What are our total wages and benefits for this year?"
+      ]
+    }
+  }
+}
+```
+
+### Fiscal year offset
+
+`fiscal_year_offset_months` shifts when quarters start. A value of `9` means the fiscal year starts in October:
+
+| Calendar month | Fiscal quarter (offset=9) |
+|----------------|--------------------------|
+| Oct–Dec 2024 | Q1 FY2025 |
+| Jan–Mar 2025 | Q2 FY2025 |
+| Apr–Jun 2025 | Q3 FY2025 |
+| Jul–Sep 2025 | Q4 FY2025 |
+
+The effective calendar shift is `(12 - offset_months) % 12` months backward. For `offset = 9`, this is `(12 - 9) % 12 = 3` months back, so fiscal Q1 (Jan–Mar) becomes Oct–Dec of the prior year. Year-wrap is handled automatically.
+
+---
+
+## Routing rules
+
+The routing decision is made per-request based on the intent result and `schema_config.json`:
+
+| Condition | Route |
+|-----------|-------|
+| `sensitivity = "low"` | FastLane |
+| `sensitivity = "critical"` | ZK SlowLane |
+| Table not found in `schema_config.json` | ZK SlowLane (fail-secure) |
+| Intent extraction fails (`NoTableIdentified`) | HTTP 400 |
+| Time range ambiguous (`TimeRangeAmbiguous`) | ZK SlowLane |
+| Confidence below `ZEMTIK_INTENT_THRESHOLD` | HTTP 400 (same as `NoTableIdentified`) |
+
+---
+
+## `EvidencePack` — response fields
+
+Every proxy response includes an `evidence` object at the top level of the Chat Completions JSON:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `engine` | string | `"FastLane"` or `"ZkSlowLane"` |
+| `attestation_hash` | string | Hex-encoded BabyJubJub attestation (FastLane only) |
+| `proof_hash` | string | SHA-256 of the UltraHonk proof (ZK SlowLane only) |
+| `schema_config_hash` | string | SHA-256 of the `schema_config.json` used for this request |
+| `aggregate` | number | The verified aggregate value sent to the LLM |
+| `row_count` | number | Number of transactions processed |
+| `receipt_id` | string | UUID of the receipt row in `receipts.db` |
+| `zemtik_confidence` | float or null | Intent extraction confidence score (0.0–1.0). `null` when the regex backend was used (confidence not applicable). |
+| `data_exfiltrated` | integer | Always `0`. Explicit machine-readable assertion. |
+| `timestamp` | string | ISO 8601 timestamp of the request |
+
+---
+
+## Receipts database schema
+
+Receipts are stored in `~/.zemtik/receipts.db` (SQLite). The table undergoes automatic migrations on startup.
+
+```sql
+CREATE TABLE receipts (
+    id               TEXT PRIMARY KEY,       -- UUID v4
+    request_hash     TEXT NOT NULL,          -- SHA-256 of the raw request body
+    prompt_hash      TEXT NOT NULL,          -- SHA-256 of the extracted user prompt
+    engine_used      TEXT NOT NULL,          -- "FastLane" or "ZkSlowLane"
+    proof_hash       TEXT,                   -- NULL for FastLane
+    attestation_hash TEXT,                   -- NULL for ZkSlowLane
+    data_exfiltrated INTEGER NOT NULL DEFAULT 0,
+    intent_confidence REAL,                  -- NULL for regex backend
+    created_at       TEXT NOT NULL           -- ISO 8601
+);
+```
+
+List recent receipts:
+
+```bash
+cargo run -- list
+```
+
+---
+
+## Embedding model
+
+The embedding backend downloads BGE-small-en at first startup:
+
+| Item | Detail |
+|------|--------|
+| Model | `BAAI/bge-small-en-v1.5` |
+| Format | ONNX (CPU-only) |
+| Size | ~130MB |
+| Download location | `~/.zemtik/models/` |
+| Runtime | fastembed v5 |
+
+To skip the download in air-gapped or constrained environments:
+
+```bash
+ZEMTIK_INTENT_BACKEND=regex cargo run -- proxy
+```
+
+The regex backend uses keyword and substring matching against table keys and aliases. It is less accurate but requires no model download.
+
+---
+
+## Directory layout
+
+```
+~/.zemtik/
+├── config.yaml           # Optional YAML config overrides
+├── schema_config.json    # Table definitions (required for proxy)
+├── zemtik.db             # SQLite transaction database (sqlite backend)
+├── receipts.db           # Receipts ledger
+├── keys/
+│   └── bank_sk           # BabyJubJub private key (mode 0600)
+├── circuit/              # Compiled Noir artifacts (Prover.toml, bytecode)
+├── runs/                 # nargo/bb subprocess working files
+├── receipts/             # Proof bundle ZIP files
+└── models/               # ONNX model cache (embed backend)
+```

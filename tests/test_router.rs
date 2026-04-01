@@ -11,6 +11,7 @@ fn test_schema() -> SchemaConfig {
         TableConfig {
             sensitivity: "low".to_owned(),
             aliases: Some(vec!["AWS".to_owned()]),
+            ..Default::default()
         },
     );
     tables.insert(
@@ -18,6 +19,7 @@ fn test_schema() -> SchemaConfig {
         TableConfig {
             sensitivity: "critical".to_owned(),
             aliases: None,
+            ..Default::default()
         },
     );
     SchemaConfig {
@@ -32,6 +34,7 @@ fn intent(table: &str) -> IntentResult {
         category_name: table.to_owned(),
         start_unix_secs: 0,
         end_unix_secs: 0,
+        confidence: 1.0,
     }
 }
 

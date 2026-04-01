@@ -15,6 +15,7 @@ pub fn build_evidence_pack(
     key_id: &str,
     schema_config_hash: &str,
     timestamp: &str,
+    zemtik_confidence: Option<f32>,
 ) -> EvidencePack {
     EvidencePack {
         engine_used: engine_used.to_owned(),
@@ -28,5 +29,6 @@ pub fn build_evidence_pack(
         aggregate,
         row_count,
         receipt_id: receipt_id.to_owned(),
+        zemtik_confidence,
     }
 }

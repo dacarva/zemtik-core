@@ -1,5 +1,6 @@
 use anyhow::Context;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 /// A row in the receipts table — one per successfully generated proof bundle.
 pub struct Receipt {
@@ -17,6 +18,8 @@ pub struct Receipt {
     pub proof_hash: Option<String>,
     /// 0 — no raw data ever transmitted
     pub data_exfiltrated: i64,
+    /// Intent matching confidence score; None for legacy rows (pre-v2).
+    pub intent_confidence: Option<f32>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -53,30 +56,39 @@ pub fn open_receipts_db(db_path: &std::path::Path) -> anyhow::Result<Connection>
 /// Apply schema migrations guarded by PRAGMA user_version.
 /// Version 0 → 1: adds engine_used, proof_hash, data_exfiltrated columns
 ///                 and creates intent_rejections table.
+/// Version 1 → 2: adds intent_confidence column.
 pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .context("read user_version")?;
 
-    if version >= 1 {
-        return Ok(());
+    if version < 1 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN engine_used TEXT DEFAULT 'zk_slow_lane_legacy';
+             ALTER TABLE receipts ADD COLUMN proof_hash TEXT;
+             ALTER TABLE receipts ADD COLUMN data_exfiltrated INTEGER DEFAULT 0;
+             CREATE TABLE IF NOT EXISTS intent_rejections (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 prompt     TEXT NOT NULL,
+                 error      TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             PRAGMA user_version = 1;
+             COMMIT;",
+        )
+        .context("apply migration v1")?;
     }
 
-    conn.execute_batch(
-        "BEGIN;
-         ALTER TABLE receipts ADD COLUMN engine_used TEXT DEFAULT 'zk_slow_lane_legacy';
-         ALTER TABLE receipts ADD COLUMN proof_hash TEXT;
-         ALTER TABLE receipts ADD COLUMN data_exfiltrated INTEGER DEFAULT 0;
-         CREATE TABLE IF NOT EXISTS intent_rejections (
-             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-             prompt     TEXT NOT NULL,
-             error      TEXT NOT NULL,
-             created_at TEXT NOT NULL
-         );
-         PRAGMA user_version = 1;
-         COMMIT;",
-    )
-    .context("apply migration v1")?;
+    if version < 2 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN intent_confidence REAL DEFAULT NULL;
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )
+        .context("apply migration v2")?;
+    }
 
     Ok(())
 }
@@ -86,8 +98,9 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO receipts
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
-             prompt_hash, request_hash, created_at, engine_used, proof_hash, data_exfiltrated)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             prompt_hash, request_hash, created_at, engine_used, proof_hash,
+             data_exfiltrated, intent_confidence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -100,6 +113,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.engine_used,
             r.proof_hash,
             r.data_exfiltrated,
+            r.intent_confidence,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -113,9 +127,14 @@ pub fn insert_intent_rejection(
     error: &str,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
+    // Store first 100 chars for debuggability + SHA-256 of the full prompt.
+    // Avoids persisting PII or sensitive financial data in plaintext.
+    let prompt_preview = prompt.chars().take(100).collect::<String>();
+    let prompt_hash = hex::encode(Sha256::digest(prompt.as_bytes()));
+    let stored = format!("{}…[sha256:{}]", prompt_preview, &prompt_hash[..16]);
     conn.execute(
         "INSERT INTO intent_rejections (prompt, error, created_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![prompt, error, now],
+        rusqlite::params![stored, error, now],
     )
     .context("insert intent rejection")?;
     Ok(())
@@ -129,7 +148,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     prompt_hash, request_hash, created_at,
                     COALESCE(engine_used, 'zk_slow_lane_legacy'),
                     proof_hash,
-                    COALESCE(data_exfiltrated, 0)
+                    COALESCE(data_exfiltrated, 0),
+                    intent_confidence
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -148,6 +168,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 engine_used: row.get(8)?,
                 proof_hash: row.get(9)?,
                 data_exfiltrated: row.get(10)?,
+                intent_confidence: row.get(11)?,
             })
         })
         .context("query receipts")?;
@@ -164,7 +185,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     prompt_hash, request_hash, created_at,
                     COALESCE(engine_used, 'zk_slow_lane_legacy'),
                     proof_hash,
-                    COALESCE(data_exfiltrated, 0)
+                    COALESCE(data_exfiltrated, 0),
+                    intent_confidence
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -183,6 +205,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 engine_used: row.get(8)?,
                 proof_hash: row.get(9)?,
                 data_exfiltrated: row.get(10)?,
+                intent_confidence: row.get(11)?,
             })
         })
         .context("query receipt")?;

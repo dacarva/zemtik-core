@@ -221,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
                         engine_used: "zk_slow_lane".to_owned(),
                         proof_hash: proof_hex.clone(),
                         data_exfiltrated: 0,
+                        intent_confidence: None,  // CLI pipeline has no intent extraction
                     },
                 )?;
                 Some(br)
@@ -320,16 +321,21 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<38}  {:<20}  {:<22}  {}",
-        "Receipt ID", "Engine", "Status", "Created At"
+        "{:<38}  {:<20}  {:<22}  {:<8}  {}",
+        "Receipt ID", "Engine", "Status", "Conf", "Created At"
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", "-".repeat(120));
     for r in &list {
+        let conf = match r.intent_confidence {
+            Some(c) => format!("{:.2}", c),
+            None => "-".to_owned(),
+        };
         println!(
-            "{:<38}  {:<20}  {:<22}  {}",
+            "{:<38}  {:<20}  {:<22}  {:<8}  {}",
             r.id,
             r.engine_used,
             r.proof_status,
+            conf,
             r.created_at,
         );
     }

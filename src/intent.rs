@@ -1,12 +1,14 @@
-use regex::Regex;
-
 use crate::config::SchemaConfig;
+use crate::time_parser::{parse_time_range, TimeAmbiguousError};
 use crate::types::IntentResult;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum IntentError {
     NoTableIdentified,
-    #[allow(dead_code)]
     TimeRangeAmbiguous,
 }
 
@@ -19,143 +21,208 @@ impl std::fmt::Display for IntentError {
     }
 }
 
-/// Extract intent from a user prompt using the provided SchemaConfig.
-///
-/// Returns an `IntentResult` on success, or an `IntentError` if no table
-/// could be identified.
-pub fn extract_intent(prompt: &str, schema: &SchemaConfig) -> Result<IntentResult, IntentError> {
-    let lower = prompt.to_lowercase();
+impl From<TimeAmbiguousError> for IntentError {
+    fn from(_: TimeAmbiguousError) -> Self {
+        IntentError::TimeRangeAmbiguous
+    }
+}
 
-    // Collect all matching table keys to handle multi-match deterministically.
-    // If the prompt matches more than one table, the highest-sensitivity table wins
-    // (critical > low). This ensures routing is always fail-secure, never
-    // non-deterministic across requests due to HashMap iteration order.
-    let mut matches: Vec<(String, &str)> = Vec::new(); // (table_key, sensitivity)
+// ---------------------------------------------------------------------------
+// IntentBackend trait
+// ---------------------------------------------------------------------------
+
+/// Trait for pluggable intent matching backends.
+///
+/// Two implementations ship in this crate:
+/// - `RegexBackend`: wraps the original `.contains()` keyword matching (fast, no model).
+/// - `EmbeddingBackend` (feature `embed`): cosine similarity over BGE-small-en embeddings.
+pub trait IntentBackend: Send + Sync {
+    /// Index the schema. Called once at proxy startup.
+    fn index_schema(&mut self, schema: &SchemaConfig);
+
+    /// Find the top-k matching table keys with similarity scores, sorted descending.
+    /// Returns an empty vec if no tables have been indexed.
+    fn match_prompt(&self, prompt: &str, k: usize) -> Vec<(String, f32)>;
+}
+
+// ---------------------------------------------------------------------------
+// RegexBackend — wraps the original keyword/.contains() matching
+// ---------------------------------------------------------------------------
+
+/// Intent backend using case-insensitive substring/alias matching.
+///
+/// Returns at most one result per call at score 1.0, so the margin check in
+/// `extract_intent_with_backend` is never triggered (backward-compatible behavior).
+pub struct RegexBackend {
+    schema: Option<SchemaConfig>,
+}
+
+impl RegexBackend {
+    pub fn new() -> Self {
+        RegexBackend { schema: None }
+    }
+}
+
+impl Default for RegexBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IntentBackend for RegexBackend {
+    fn index_schema(&mut self, schema: &SchemaConfig) {
+        self.schema = Some(schema.clone());
+    }
+
+    fn match_prompt(&self, prompt: &str, _k: usize) -> Vec<(String, f32)> {
+        let schema = match &self.schema {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let lower = prompt.to_lowercase();
+
+        // Collect all matching table keys
+        let mut matches: Vec<(String, &str)> = Vec::new();
+        for (key, tc) in &schema.tables {
+            let key_lower = key.to_lowercase();
+            let matched = lower.contains(&key_lower)
+                || tc
+                    .aliases
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|a| lower.contains(&a.to_lowercase()));
+            if matched {
+                matches.push((key.clone(), tc.sensitivity.as_str()));
+            }
+        }
+
+        // Deterministic sort: critical first, then alphabetical
+        matches.sort_by(|a, b| {
+            let rank = |s: &str| if s == "critical" { 0u8 } else { 1u8 };
+            rank(a.1).cmp(&rank(b.1)).then_with(|| a.0.cmp(&b.0))
+        });
+
+        // Return only the top-1 match at score 1.0 (avoids margin-check ambiguity)
+        matches
+            .into_iter()
+            .take(1)
+            .map(|(key, _)| (key, 1.0_f32))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic substring gate (disambiguates embedding ties)
+// ---------------------------------------------------------------------------
+
+/// Tables whose schema key or any alias appears as a case-insensitive substring
+/// of `prompt_lower` (same rules as `RegexBackend`).
+fn tables_matching_substrings(prompt_lower: &str, schema: &SchemaConfig) -> Vec<String> {
+    let mut matches = Vec::new();
     for (key, tc) in &schema.tables {
         let key_lower = key.to_lowercase();
-        let matched = lower.contains(&key_lower) || tc.aliases.as_deref().unwrap_or(&[])
-            .iter()
-            .any(|a| lower.contains(&a.to_lowercase()));
+        let matched = prompt_lower.contains(&key_lower)
+            || tc
+                .aliases
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|a| prompt_lower.contains(&a.to_lowercase()));
         if matched {
-            matches.push((key.clone(), tc.sensitivity.as_str()));
+            matches.push(key.clone());
+        }
+    }
+    matches
+}
+
+// ---------------------------------------------------------------------------
+// Core extraction logic
+// ---------------------------------------------------------------------------
+
+/// Extract intent using the provided backend and confidence threshold.
+///
+/// Rules:
+/// 1. Truncate prompt to 2000 chars before matching.
+/// 2. If **exactly one** table's key or alias appears as a substring of the prompt (same rules as
+///    `RegexBackend`), use that table with confidence `1.0` and skip embedding/margin checks.
+/// 3. Else call `backend.match_prompt(prompt, 3)`.
+/// 4. If results are empty or `scores[0] < threshold` → `Err(NoTableIdentified)`.
+/// 5. If at least 2 results and `scores[0] - scores[1] < 0.10` → `Err(NoTableIdentified)`
+///    (ambiguous — not confident enough to route).
+/// 6. Parse time range via `time_parser::parse_time_range`; ambiguous time → `Err(TimeRangeAmbiguous)`.
+/// 7. Return `Ok(IntentResult)` with the top-1 table and confidence score.
+pub fn extract_intent_with_backend(
+    prompt: &str,
+    schema: &SchemaConfig,
+    backend: &dyn IntentBackend,
+    threshold: f32,
+) -> Result<IntentResult, IntentError> {
+    // Truncate long prompts before embedding (truncate at char boundary, not byte boundary)
+    let truncated;
+    let prompt = if prompt.len() > 2000 {
+        truncated = prompt
+            .char_indices()
+            .nth(2000)
+            .map(|(i, _)| &prompt[..i])
+            .unwrap_or(prompt);
+        truncated
+    } else {
+        prompt
+    };
+
+    let prompt_lower = prompt.to_lowercase();
+    let substring_hits = tables_matching_substrings(&prompt_lower, schema);
+
+    // If exactly one table is named by key or alias in the prompt, trust that over
+    // embedding cosine ties (e.g. "T&E expenses" vs payroll + travel both scoring high).
+    if substring_hits.len() == 1 {
+        let table = substring_hits[0].clone();
+        let time_range = parse_time_range(prompt, schema.fiscal_year_offset_months)
+            .map_err(IntentError::from)?;
+        return Ok(IntentResult {
+            category_name: table.clone(),
+            table,
+            start_unix_secs: time_range.start_unix_secs,
+            end_unix_secs: time_range.end_unix_secs,
+            confidence: 1.0,
+        });
+    }
+
+    let matches = backend.match_prompt(prompt, 3);
+
+    // Check top-1 score against threshold
+    let (table, confidence) = match matches.first() {
+        Some((t, s)) if *s >= threshold => (t.clone(), *s),
+        _ => return Err(IntentError::NoTableIdentified),
+    };
+
+    // Margin check: if top-1 and top-2 are too close, reject as ambiguous
+    if matches.len() >= 2 {
+        let margin = confidence - matches[1].1;
+        if margin < 0.10 {
+            return Err(IntentError::NoTableIdentified);
         }
     }
 
-    // Pick the highest-sensitivity match (critical > low). Sort deterministically
-    // within the same sensitivity by table key so routing is stable.
-    matches.sort_by(|a, b| {
-        let rank = |s: &str| if s == "critical" { 0u8 } else { 1u8 };
-        rank(a.1).cmp(&rank(b.1)).then_with(|| a.0.cmp(&b.0))
-    });
-
-    let table = matches.into_iter().next().map(|(k, _)| k).ok_or(IntentError::NoTableIdentified)?;
-
-    let (start_unix, end_unix) = extract_time_range(prompt, schema.fiscal_year_offset_months);
+    // Parse time range (uses LazyLock regexes — no per-call compile)
+    let time_range =
+        parse_time_range(prompt, schema.fiscal_year_offset_months).map_err(IntentError::from)?;
 
     Ok(IntentResult {
         category_name: table.clone(),
         table,
-        start_unix_secs: start_unix,
-        end_unix_secs: end_unix,
+        start_unix_secs: time_range.start_unix_secs,
+        end_unix_secs: time_range.end_unix_secs,
+        confidence,
     })
 }
 
-/// Extract a UNIX timestamp range from a prompt.
+/// Backward-compatible shim using `RegexBackend` with no threshold (matches any table).
 ///
-/// Priority:
-/// 1. `Q[1-4] YYYY` → calendar quarter boundaries, offset by fiscal months
-/// 2. `YYYY` (4-digit year) → Jan 1 – Dec 31, offset by fiscal months
-/// 3. Default: current calendar year
-fn extract_time_range(prompt: &str, fiscal_offset_months: i64) -> (i64, i64) {
-    // Try quarter match first
-    let re_quarter = Regex::new(r"[Qq]([1-4])\s+(20\d{2})").expect("valid regex");
-    if let Some(cap) = re_quarter.captures(prompt) {
-        let quarter: u32 = cap[1].parse().expect("digit");
-        let year: i32 = cap[2].parse().expect("4-digit year");
-        return quarter_to_unix(quarter, year, fiscal_offset_months);
-    }
-
-    // Try plain year match
-    let re_year = Regex::new(r"\b(20\d{2})\b").expect("valid regex");
-    if let Some(cap) = re_year.captures(prompt) {
-        let year: i32 = cap[1].parse().expect("4-digit year");
-        return year_to_unix(year, fiscal_offset_months);
-    }
-
-    // Default: current calendar year
-    let now = chrono::Utc::now();
-    year_to_unix(now.format("%Y").to_string().parse().unwrap_or(2026), 0)
+/// Call sites outside proxy mode (CLI pipeline, tests) continue to work unchanged.
+pub fn extract_intent(prompt: &str, schema: &SchemaConfig) -> Result<IntentResult, IntentError> {
+    let mut backend = RegexBackend::new();
+    backend.index_schema(schema);
+    extract_intent_with_backend(prompt, schema, &backend, 0.0)
 }
-
-/// Calendar quarter → Unix second range, applying `fiscal_offset_months`.
-///
-/// Offset is subtracted from calendar boundaries:
-///   `fiscal_start = calendar_start - offset_months`
-///
-/// Example: Q1 2026 with offset=9 → Oct 1 2025 – Dec 31 2025
-fn quarter_to_unix(quarter: u32, year: i32, offset_months: i64) -> (i64, i64) {
-    // Calendar quarter start months (1-indexed)
-    let (cal_start_month, cal_end_month) = match quarter {
-        1 => (1u32, 3u32),
-        2 => (4, 6),
-        3 => (7, 9),
-        4 => (10, 12),
-        _ => unreachable!(),
-    };
-
-    let (start_year, start_month) = offset_month(year, cal_start_month as i64, offset_months);
-    let (end_year, end_month) = offset_month(year, cal_end_month as i64, offset_months);
-
-    let start = month_start_unix(start_year, start_month as u32);
-    let end = month_end_unix(end_year, end_month as u32);
-    (start, end)
-}
-
-/// Full year → Unix second range (Jan 1 – Dec 31), applying fiscal offset.
-fn year_to_unix(year: i32, offset_months: i64) -> (i64, i64) {
-    let (start_year, start_month) = offset_month(year, 1, offset_months);
-    let (end_year, end_month) = offset_month(year, 12, offset_months);
-    let start = month_start_unix(start_year, start_month as u32);
-    let end = month_end_unix(end_year, end_month as u32);
-    (start, end)
-}
-
-/// Subtract `offset_months` from (year, month), with year-wrap handling.
-fn offset_month(year: i32, month: i64, offset_months: i64) -> (i32, i64) {
-    let mut m = month - offset_months;
-    let mut y = year;
-    while m < 1 {
-        m += 12;
-        y -= 1;
-    }
-    while m > 12 {
-        m -= 12;
-        y += 1;
-    }
-    (y, m)
-}
-
-/// Unix timestamp of the first second of a given month (UTC).
-fn month_start_unix(year: i32, month: u32) -> i64 {
-    use chrono::{TimeZone, Utc};
-    Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
-        .single()
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0)
-}
-
-/// Unix timestamp of the last second of a given month (UTC).
-fn month_end_unix(year: i32, month: u32) -> i64 {
-    use chrono::{TimeZone, Utc};
-    // Last day: first day of next month minus 1 second
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1u32)
-    } else {
-        (year, month + 1)
-    };
-    Utc.with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
-        .single()
-        .map(|dt| dt.timestamp() - 1)
-        .unwrap_or(0)
-}
-

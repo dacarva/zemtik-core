@@ -25,3 +25,5 @@ audit/
 *.log
 debug/
 .gstack/
+zemtik-course/
+skills-lock.json
