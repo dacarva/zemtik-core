@@ -168,7 +168,10 @@ mod embed_impl {
 
             let query_embeddings = match self.embed_texts(&[prompt.to_owned()]) {
                 Ok(e) => e,
-                Err(_) => return Vec::new(),
+                Err(e) => {
+                    eprintln!("[WARN] EmbeddingBackend: embed_texts failed for query: {}", e);
+                    return Vec::new();
+                }
             };
             let query = &query_embeddings[0];
 

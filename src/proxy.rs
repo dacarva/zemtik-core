@@ -145,7 +145,19 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/verify/{id}", get(handle_verify))
         .route("/{*path}", any(handle_passthrough))
-        .layer(CorsLayer::permissive())
+        // Restrict CORS to localhost origins — CorsLayer::permissive() sets
+        // Access-Control-Allow-Origin: * which enables cross-origin data exfiltration
+        // from any browser page on the developer workstation. This proxy binds to
+        // 127.0.0.1 so restrict to same-host origins only.
+        .layer(
+            CorsLayer::new()
+                .allow_origin([
+                    axum::http::HeaderValue::from_static("http://localhost:4000"),
+                    axum::http::HeaderValue::from_static("http://127.0.0.1:4000"),
+                ])
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
         .with_state(state);
 
     let addr = format!("127.0.0.1:{}", config.proxy_port);
@@ -224,17 +236,29 @@ async fn handle_chat_completions(
         ProxyError(anyhow::anyhow!("schema_config not loaded"))
     })?;
 
-    let intent_result = match intent::extract_intent_with_backend(
-        &prompt,
-        schema,
-        state.intent_backend.as_ref(),
-        state.config.intent_confidence_threshold,
-    ) {
+    // Run intent extraction in a blocking thread — the embedding backend holds a
+    // std::sync::Mutex<TextEmbedding> and ONNX inference can take tens to hundreds of ms.
+    // Running this on the Tokio worker thread would starve other async tasks under load.
+    let intent_result_raw = {
+        let backend = Arc::clone(&state.intent_backend);
+        let prompt_clone = prompt.clone();
+        let schema_clone = schema.clone();
+        let threshold = state.config.intent_confidence_threshold;
+        tokio::task::spawn_blocking(move || {
+            intent::extract_intent_with_backend(&prompt_clone, &schema_clone, backend.as_ref(), threshold)
+        })
+        .await
+        .map_err(|e| ProxyError(anyhow::anyhow!("intent backend thread panicked: {}", e)))?
+    };
+
+    let intent_result = match intent_result_raw {
         Ok(r) => r,
         Err(e) => {
             // Log rejection and return 400
             let db_guard = state.receipts_db.lock().await;
-            let _ = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string());
+            if let Err(db_err) = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string()) {
+                eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
+            }
             drop(db_guard);
             println!("[ROUTE] Intent rejection: {}", e);
             return Ok((
@@ -375,7 +399,7 @@ async fn handle_fast_lane(
         "[FAST] aggregate={} row_count={} attestation={} ({:.2}ms)",
         fl.aggregate,
         fl.row_count,
-        &fl.attestation_hash[..8],
+        &fl.attestation_hash[..fl.attestation_hash.len().min(8)],
         total_start.elapsed().as_secs_f64() * 1000.0,
     );
 

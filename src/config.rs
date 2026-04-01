@@ -58,6 +58,11 @@ pub fn load_schema_config(path: &Path) -> anyhow::Result<(SchemaConfig, String)>
 /// non-empty `description` and at least one `example_prompts` entry (required
 /// for the embedding index).
 pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (0..=11).contains(&config.fiscal_year_offset_months),
+        "schema_config: fiscal_year_offset_months must be 0–11, got {}",
+        config.fiscal_year_offset_months
+    );
     for (key, tc) in &config.tables {
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
@@ -213,7 +218,13 @@ pub fn load_from_sources(
         config.models_dir = expand_tilde(v);
     }
     if let Some(v) = env.get("ZEMTIK_INTENT_THRESHOLD") {
-        config.intent_confidence_threshold = v.parse().context("parse ZEMTIK_INTENT_THRESHOLD")?;
+        let t: f32 = v.parse().context("parse ZEMTIK_INTENT_THRESHOLD")?;
+        anyhow::ensure!(
+            (0.01..=1.0).contains(&t),
+            "ZEMTIK_INTENT_THRESHOLD must be in [0.01, 1.0], got {}",
+            t
+        );
+        config.intent_confidence_threshold = t;
     }
     if let Some(v) = env.get("ZEMTIK_INTENT_BACKEND") {
         config.intent_backend = v.clone();
