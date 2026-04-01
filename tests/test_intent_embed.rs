@@ -67,7 +67,7 @@ fn mock_backend_index_schema_called() {
 fn mock_backend_high_confidence_routes_fast_lane() {
     let schema = test_schema();
     let backend = MockBackend::with_results(vec![("aws_spend", 0.90), ("payroll", 0.40)]);
-    let result = extract_intent_with_backend("Q1 2026 cloud spend", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("Q1 2026 infrastructure costs", &schema, &backend, 0.65);
     assert!(result.is_ok());
     let r = result.unwrap();
     assert_eq!(r.table, "aws_spend");
@@ -86,7 +86,7 @@ fn mock_backend_below_threshold_rejected() {
 fn mock_backend_empty_results_rejected() {
     let schema = test_schema();
     let backend = MockBackend::with_results(vec![]);
-    let result = extract_intent_with_backend("AWS spend 2025", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("infrastructure expenses 2025", &schema, &backend, 0.65);
     assert!(result.is_err());
 }
 

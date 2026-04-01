@@ -90,7 +90,7 @@ static RE_BARE_YEAR: LazyLock<Regex> =
 /// Patterns that signal a time expression without being a supported format.
 /// When any of these match but no supported pattern did, we return TimeAmbiguousError.
 static RE_AMBIGUOUS_TIME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(recently|soon|lately|recent|last\s+year|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier|prior\s+(year|quarter|month))\b").unwrap()
+    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|last\s+year|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier|prior\s+(year|quarter|month))\b").unwrap()
 });
 
 // ---------------------------------------------------------------------------
