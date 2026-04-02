@@ -133,7 +133,7 @@ GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin inten
 - CLI pipeline query is hardcoded (500 txs, client 123, `aws_spend`, Q1 2024). Proxy mode supports natural-language queries via `schema_config.json`-defined tables.
 - `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json`. Tables must include `description` and `example_prompts` fields for the embedding backend.
 - FastLane always uses the in-memory seeded SQLite ledger (Supabase FastLane connector deferred to v2).
-- `schema_key_to_category_code` only maps tables present in the demo seed (`aws_spend`, `payroll`, `travel`). Schema keys not in this map cannot use the ZK slow lane.
+- The ZK slow lane supports any table key via Poseidon BN254 hashing (Sprint 2). No code change needed — just add the table to `schema_config.json` with `"sensitivity": "critical"`.
 - `bb verify` subprocess has no timeout in proxy mode (potential deadlock risk).
 - `--no-verify` hook bypass and force-push to main are never acceptable.
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).

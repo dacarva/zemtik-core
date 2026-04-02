@@ -303,7 +303,7 @@ FastLane provides cryptographic attestation over the aggregate path, not a succi
 
 6. **`bb verify` timeout:** Proxy does not bound `bb verify` wall time; a hung verifier can block the ZK pipeline (`pipeline_lock`).
 
-7. **Category code map:** `schema_key_to_category_code` only includes tables present in the demo circuit encoding; unknown keys cannot run the ZK slow lane until mapped.
+7. **Universal category hash (Sprint 2):** The circuit uses a Poseidon BN254 hash of the table key string instead of a hardcoded integer code. Any table defined in `schema_config.json` can run the ZK slow lane without a code change. The hash is computed by `poseidon_of_string()` in `db.rs` and verified cross-language against Noir `bn254::hash_3`.
 
 8. **FastLane data source:** FastLane uses the in-memory seeded SQLite ledger, not Supabase (see `CHANGELOG` / `CLAUDE.md`).
 

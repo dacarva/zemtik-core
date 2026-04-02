@@ -16,9 +16,7 @@
 
 ## Step 1 — Choose a table key and sensitivity
 
-Pick a short, lowercase, underscore-separated key. This key must match how Zemtik identifies the data in its internal circuit mapping.
-
-> **Important:** The ZK SlowLane only supports tables with a corresponding entry in `schema_key_to_category_code` inside `src/db.rs`. Currently mapped tables are: `aws_spend`, `payroll`, `travel`. For any other key, ZK SlowLane will return an error. If you need ZK support for a new table, contact the Zemtik team or see the architecture docs for adding a circuit category code.
+Pick a short, lowercase, underscore-separated key. This becomes the category identifier — the circuit uses a Poseidon BN254 hash of this string, so any key works without a code change.
 
 Choose sensitivity based on your data classification policy:
 
@@ -58,7 +56,7 @@ Open `~/.zemtik/schema_config.json` and add an entry under `"tables"`:
 
 ### Field guidance
 
-**`sensitivity`** — **Important:** The ZK SlowLane only works for tables with a matching entry in the circuit's category code map (`aws_spend`, `payroll`, `travel`). Setting `"critical"` for any other table will result in HTTP 500 on every request to that table, because the ZK circuit has no category code for it. For any new table that is not in the circuit map, use `"low"` (FastLane) until circuit support is added. See Step 1 above for details.
+**`sensitivity`** — Use `"critical"` for any table that needs ZK proof. Since Sprint 2, the circuit hashes the table key string with Poseidon BN254, so any key you define here works with ZK SlowLane — no circuit change needed. Use `"low"` for tables where a fast attestation is sufficient.
 
 **`aliases`** — Add the terms users will actually type. Include abbreviations and synonyms. The intent engine matches these case-insensitively as substrings.
 
@@ -148,7 +146,12 @@ The intent engine could not match any table. Check that:
 
 ### ZK SlowLane returns an error for my new table
 
-The ZK circuit currently supports three category codes: `aws_spend` (2), `payroll` (1), `travel` (3). Tables not in this map cannot use the ZK slow lane. Route the table to FastLane (`"sensitivity": "low"`) or file an issue requesting a new category code.
+Check that:
+- The table key in `schema_config.json` is lowercase and underscore-separated (e.g. `vendor_invoices`, not `Vendor Invoices`).
+- The proxy was restarted after editing `schema_config.json`.
+- The `sensitivity` field is set to `"critical"`.
+
+The circuit computes a Poseidon BN254 hash of the table key string at proof time, so any key you define works without a code change.
 
 ### The regex backend doesn't match my table
 
