@@ -580,7 +580,7 @@ async fn handle_zk_slow_lane(
     let target_category_hash = db::poseidon_of_string(&intent.table)
         .map(|fr| db::fr_to_decimal(&fr))
         .map_err(|e| ProxyError(anyhow::anyhow!(
-            "table '{}' not recognized in schema_config — cannot generate ZK proof: {}",
+            "cannot hash table key '{}' (key must be ≤93 bytes after lowercasing): {}",
             intent.table, e
         )))?;
     let params = QueryParams {
@@ -914,7 +914,7 @@ async fn run_zk_pipeline(
     let target_category_hash = db::poseidon_of_string(&intent.table)
         .map(|fr| db::fr_to_decimal(&fr))
         .map_err(|e| anyhow::anyhow!(
-            "table '{}' not recognized in schema_config — cannot generate ZK proof: {}",
+            "cannot hash table key '{}' (key must be ≤93 bytes after lowercasing): {}",
             intent.table, e
         ))?;
     let params = QueryParams {
