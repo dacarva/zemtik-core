@@ -23,6 +23,12 @@ pub const CAT_COFFEE: u64 = 3;
 /// Max input length after canonicalization: 93 bytes (3 × 31).
 pub fn poseidon_of_string(s: &str) -> anyhow::Result<Fr> {
     let s = s.trim().to_ascii_lowercase();
+    anyhow::ensure!(!s.is_empty(), "poseidon_of_string: empty string is not a valid table key");
+    anyhow::ensure!(
+        s.is_ascii(),
+        "poseidon_of_string: key '{}' contains non-ASCII bytes — table keys must be ASCII",
+        s
+    );
     anyhow::ensure!(
         s.len() <= 93,
         "poseidon_of_string: input '{}' is {} bytes (max 93)",

@@ -204,6 +204,18 @@
 - `anyhow::ensure!(s.len() <= 93, ...)` added at top of `poseidon_of_string` in `db.rs`.
 - `oversized_input_returns_error` and `max_length_input_succeeds` tests added in `tests/test_poseidon_compat.rs`.
 
+### ~~poseidon_of_string: empty string and non-ASCII keys not guarded~~ ✓ DONE (worktree-ethereal-twirling-finch, 2026-04-02)
+- Added `ensure!(!s.is_empty(), ...)` and `ensure!(s.is_ascii(), ...)` to `poseidon_of_string` in `db.rs`.
+- Tests `empty_string_returns_error` and `non_ascii_input_returns_error` added in `tests/test_poseidon_compat.rs`.
+
+### Supabase `category_name` column: existing tables not migrated (P2)
+- **What:** Sprint 2 adds `category_name` to the Supabase SELECT query (`query_supabase`). Any Supabase `transactions` table created before Sprint 2 lacks the column — every ZK request on Supabase backend will fail with a PostgREST column-not-found error until the column is added.
+- **Why:** Found by adversarial review (2026-04-02). `ensure_supabase_table()` creates the table with `category_name` if it doesn't exist, but never ALTERs an existing table to add the column.
+- **How to apply:** Add a Supabase migration (`supabase/migrations/YYYYMMDDHHMMSS_add_category_name.sql`) that runs `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS category_name TEXT DEFAULT ''`. Also add a note to `GETTING_STARTED.md` / `CONFIGURATION.md` about re-running migrations after Sprint 2 upgrade.
+- **Effort:** XS (human: ~30min / CC: ~10min)
+- **Priority:** P2 — blocks any Supabase user who upgrades from Sprint 1
+- **Depends on:** worktree-ethereal-twirling-finch (Sprint 2) merged.
+
 ### category_name DB / schema_config mismatch produces silent ZK undercount (P3)
 - **What:** `poseidon_of_string(tx.category_name)` computes the witness hash from the DB value. `poseidon_of_string(intent.table)` computes the target hash from the schema_config key. If these strings differ (e.g., DB stores "AWS" but schema key is "aws_spend"), the circuit comparison always returns 0 matches — the proof is valid but the aggregate is silently 0.
 - **Why:** Found by Codex outside voice during feat/zk-universalization eng review (2026-04-02). The `contains_key(&intent.table)` guardrail in proxy.rs checks that the table exists in schema_config, but does not validate that the category_name values already in the DB match the schema key. The demo DB is seeded from code so this risk is minimal today, but customer-loaded data could have inconsistencies.

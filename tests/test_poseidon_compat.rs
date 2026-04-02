@@ -11,6 +11,28 @@ fn canonicalization_is_case_insensitive() {
     assert_eq!(h1, h3, "leading/trailing whitespace must be trimmed");
 }
 
+/// Empty string must return an error (not a valid table key).
+#[test]
+fn empty_string_returns_error() {
+    let result = poseidon_of_string("");
+    assert!(result.is_err(), "expected Err for empty string, got Ok");
+    let result_whitespace = poseidon_of_string("   ");
+    assert!(
+        result_whitespace.is_err(),
+        "expected Err for whitespace-only string, got Ok"
+    );
+}
+
+/// Non-ASCII bytes must return an error (table keys must be pure ASCII).
+#[test]
+fn non_ascii_input_returns_error() {
+    let result = poseidon_of_string("résumé_data");
+    assert!(
+        result.is_err(),
+        "expected Err for non-ASCII input, got Ok"
+    );
+}
+
 /// Strings longer than 93 bytes must return an error (3 × 31-byte chunk limit).
 #[test]
 fn oversized_input_returns_error() {
