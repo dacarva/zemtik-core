@@ -222,16 +222,15 @@ pub struct FastLaneResult {
     pub key_id: String,
     #[allow(dead_code)]
     pub timestamp_unix: i64,
-    /// SHA-256(category_name || start.to_le_bytes() || end.to_le_bytes()) hex
-    #[allow(dead_code)]
-    pub query_hash: String,
 }
 
 /// Outcome returned by `engine_fast::run_fast_lane`.
+///
+/// `EmptyResult` has been removed: zero-row results now return `Ok(FastLaneResult)`
+/// with `row_count == 0` so the receipt is cryptographically signed.
 pub enum EngineResult {
     Ok(FastLaneResult),
     DbError(String),
-    EmptyResult,
     SignError(String),
 }
 

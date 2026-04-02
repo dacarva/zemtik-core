@@ -226,3 +226,21 @@ fn past_1_day() {
     let diff = tr.end_unix_secs - tr.start_unix_secs;
     assert!((diff - 86_400).abs() < 5);
 }
+
+#[test]
+fn may_2024() {
+    let tr = parse_time_range("May 2024 payroll", 0).unwrap();
+    // 2024-05-01 00:00:00 UTC = 1714521600
+    // 2024-05-31 23:59:59 UTC = 1717199999
+    assert_eq!(tr.start_unix_secs, 1_714_521_600);
+    assert_eq!(tr.end_unix_secs, 1_717_199_999);
+}
+
+#[test]
+fn bare_year_ignores_non_year_numbers() {
+    // "2000" is not a valid bare year (range is 2010-2099) — should default to current year
+    let tr_control = parse_time_range("total payroll", 0).unwrap();
+    let tr = parse_time_range("we have 2000 employees, show payroll", 0).unwrap();
+    assert_eq!(tr.start_unix_secs, tr_control.start_unix_secs,
+        "2000 should NOT match as a year — expected current-year default");
+}

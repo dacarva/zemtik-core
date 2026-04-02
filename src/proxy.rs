@@ -29,9 +29,12 @@ struct ProxyState {
     /// Serializes ZK pipeline executions — the circuit uses shared files in circuit_dir.
     pipeline_lock: tokio::sync::Mutex<()>,
     /// File-based receipts DB, shared across requests.
-    receipts_db: tokio::sync::Mutex<Connection>,
+    /// WARNING: std::sync::MutexGuard<Connection> must NEVER be held across an .await point.
+    /// Lock inside spawn_blocking or in a synchronous scope that drops before any .await.
+    receipts_db: std::sync::Mutex<Connection>,
     /// Separate in-memory ledger DB for FastLane reads (avoids contention with receipts_db).
-    ledger_db: tokio::sync::Mutex<Connection>,
+    /// WARNING: std::sync::MutexGuard<Connection> must NEVER be held across an .await point.
+    ledger_db: std::sync::Mutex<Connection>,
     /// Application configuration (ports, paths).
     config: Arc<AppConfig>,
     /// Bank signing key bytes (loaded once at startup, passed into spawn_blocking).
@@ -133,8 +136,8 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_lock: tokio::sync::Mutex::new(()),
-        receipts_db: tokio::sync::Mutex::new(receipts_conn),
-        ledger_db: tokio::sync::Mutex::new(ledger_conn),
+        receipts_db: std::sync::Mutex::new(receipts_conn),
+        ledger_db: std::sync::Mutex::new(ledger_conn),
         config: Arc::clone(&config),
         signing_key_bytes,
         schema_config_hash,
@@ -254,12 +257,15 @@ async fn handle_chat_completions(
     let intent_result = match intent_result_raw {
         Ok(r) => r,
         Err(e) => {
-            // Log rejection and return 400
-            let db_guard = state.receipts_db.lock().await;
-            if let Err(db_err) = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string()) {
-                eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
+            // Log rejection synchronously — std::sync::Mutex must not be held across .await
+            {
+                let db_guard = state.receipts_db
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Err(db_err) = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string()) {
+                    eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
+                }
             }
-            drop(db_guard);
             println!("[ROUTE] Intent rejection: {}", e);
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -309,12 +315,25 @@ async fn handle_fast_lane(
     let key_bytes = state.signing_key_bytes.clone();
     let schema_config_hash = state.schema_config_hash.clone();
 
-    // Run sum + attestation in blocking thread (rusqlite is !Send across await)
-    let ledger_guard = state.ledger_db.lock().await;
-    let signing_key = db::PrivateKey::import(key_bytes)
-        .map_err(|e| ProxyError(anyhow::anyhow!("import signing key: {}", e)))?;
-    let engine_result = engine_fast::run_fast_lane(&ledger_guard, &signing_key, &category_name, start, end);
-    drop(ledger_guard);
+    // Run sum + attestation in a blocking thread:
+    //  - rusqlite Connection is !Send, cannot cross await boundaries
+    //  - std::sync::MutexGuard is !Send, cannot be moved into spawn_blocking directly
+    //  - Clone Arc<ProxyState> and lock inside the blocking thread
+    let state2 = Arc::clone(&state);
+    let category_name_blocking = category_name.clone();
+    let engine_result = tokio::task::spawn_blocking(move || {
+        let guard = state2.ledger_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let signing_key = db::PrivateKey::import(key_bytes)
+            .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
+        Ok::<EngineResult, anyhow::Error>(
+            engine_fast::run_fast_lane(&guard, &signing_key, &category_name_blocking, start, end)
+        )
+    })
+    .await
+    .map_err(|e| ProxyError(anyhow::anyhow!("spawn_blocking join: {}", e)))?
+    .map_err(ProxyError)?;
 
     let fl = match engine_result {
         EngineResult::Ok(r) => r,
@@ -323,37 +342,6 @@ async fn handle_fast_lane(
         }
         EngineResult::SignError(e) => {
             return Err(ProxyError(anyhow::anyhow!("FastLane sign error: {}", e)));
-        }
-        EngineResult::EmptyResult => {
-            // Return 200 with aggregate=0
-            let receipt_id = Uuid::new_v4().to_string();
-            let timestamp = Utc::now().to_rfc3339();
-            let ev = evidence::build_evidence_pack(
-                &receipt_id, "fast_lane", 0, 0, None, None,
-                "", &schema_config_hash, &timestamp,
-                Some(intent_result.confidence),
-            );
-            let payload = serde_json::json!({
-                "category": category_name,
-                "total_spend_usd": 0,
-                "row_count": 0,
-                "data_provenance": "ZEMTIK_FAST_LANE_ATTESTATION",
-                "raw_data_transmitted": false,
-                "note": "No rows matched the query criteria.",
-                "evidence": ev
-            });
-            return Ok(
-                build_fast_lane_response(
-                    &mut body,
-                    payload,
-                    &state,
-                    &api_key,
-                    &receipt_id,
-                    &intent_result,
-                    &ev,
-                )
-                .await?,
-            );
         }
     };
 
@@ -373,9 +361,11 @@ async fn handle_fast_lane(
         Some(intent_result.confidence),
     );
 
-    // Insert receipt
+    // Insert receipt — lock synchronously, never hold std::sync::MutexGuard across .await
     {
-        let db_guard = state.receipts_db.lock().await;
+        let db_guard = state.receipts_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _ = receipts::insert_receipt(
             &db_guard,
             &receipts::Receipt {
@@ -403,7 +393,7 @@ async fn handle_fast_lane(
         total_start.elapsed().as_secs_f64() * 1000.0,
     );
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "category": category_name,
         "total_spend_usd": fl.aggregate,
         "row_count": fl.row_count,
@@ -411,6 +401,11 @@ async fn handle_fast_lane(
         "raw_data_transmitted": false,
         "evidence": ev
     });
+    if fl.row_count == 0 {
+        payload["note"] = serde_json::Value::String(
+            "No rows matched the query criteria.".to_owned()
+        );
+    }
 
     build_fast_lane_response(
         &mut body,
@@ -551,7 +546,9 @@ async fn handle_zk_slow_lane(
         println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
         println!("[BUNDLE] ID: {}", br.bundle_id);
 
-        let db_guard = state.receipts_db.lock().await;
+        let db_guard = state.receipts_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match receipts::insert_receipt(
             &db_guard,
             &receipts::Receipt {
@@ -771,9 +768,12 @@ async fn handle_verify(
     State(state): State<Arc<ProxyState>>,
     Path(id): Path<String>,
 ) -> Result<Response, ProxyError> {
-    let db_guard = state.receipts_db.lock().await;
-    let receipt = receipts::get_receipt(&db_guard, &id).map_err(ProxyError)?;
-    drop(db_guard);
+    let receipt = {
+        let db_guard = state.receipts_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        receipts::get_receipt(&db_guard, &id).map_err(ProxyError)?
+    };
 
     match receipt {
         None => Ok((StatusCode::NOT_FOUND, Html(render_not_found(&id))).into_response()),
@@ -794,10 +794,10 @@ fn read_public_inputs_from_bundle(bundle_path: &str) -> Option<serde_json::Value
 }
 
 fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value>) -> String {
-    let (badge_color, status_label) = if r.proof_status.starts_with("VALID") {
-        ("#22c55e", "VALID")
-    } else {
-        ("#ef4444", "INVALID")
+    let (badge_color, status_label) = match r.proof_status.as_str() {
+        s if s.starts_with("VALID") => ("#22c55e", "VALID"),
+        "FAST_LANE_ATTESTED" => ("#3b82f6", "FAST LANE ATTESTED"),
+        _ => ("#ef4444", "INVALID"),
     };
 
     let aggregate = readable

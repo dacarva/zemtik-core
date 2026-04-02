@@ -91,8 +91,9 @@ static RE_LAST_YEAR: LazyLock<Regex> =
 static RE_YTD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(ytd|year[- ]to[- ]date)\b").unwrap());
 
+// Range 2010–2099: avoids false matches on "2000 employees" etc.
 static RE_BARE_YEAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(20\d{2})\b").unwrap());
+    LazyLock::new(|| Regex::new(r"\b(20[1-9][0-9])\b").unwrap());
 
 /// Patterns that signal a time expression without being a supported format.
 /// When any of these match but no supported pattern did, we return TimeAmbiguousError.

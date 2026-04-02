@@ -146,11 +146,8 @@
 - **Context:** Not urgent for the synthetic PoC (500 seeded transactions with small amounts). Becomes a real risk when Supabase/real DB is connected. Implement alongside sum_by_category.
 - **Depends on:** db.rs::sum_by_category implemented (this PR).
 
-### EvidencePack: include key_id for EmptyResult responses (P2, before production)
-- **What:** When FastLane returns `EngineResult::EmptyResult` (no rows match), the EvidencePack currently has empty `key_id` and both `proof_hash`/`attestation_hash` as None. A verifier cannot determine which key attested the zero-spend result.
-- **Why:** Found by Claude adversarial review (feat/routing-engine, 2026-03-30). A forged zero-result EvidencePack with empty key_id is indistinguishable from a genuine one. Fix: compute and sign the query hash even when row_count=0, record the key_id and attestation_hash.
-- **Effort:** S (human) → S (CC+gstack)
-- **Depends on:** feat/routing-engine merged.
+### ~~EvidencePack: include key_id for EmptyResult responses~~ ✓ DONE (fix/critical-bugs-v040, 2026-04-02)
+- `EngineResult::EmptyResult` removed. All FastLane results (including row_count=0) return `Ok(FastLaneResult)` with a signed unified attestation. Zero-result receipts are now cryptographically bound to the installation key.
 
 ### ~~intent.rs: compile regexes once~~ ✓ DONE (feat/intent-engine, v0.4.0)
 - `time_parser.rs` uses `std::sync::LazyLock` for all regexes (compiled once at first use). `RegexBackend` uses `str::contains()` — no `Regex::new()` calls in the hot path.
@@ -158,28 +155,17 @@
 ### run_zk_pipeline: reuse ledger DB instead of re-initializing (P3)
 - **What:** `run_zk_pipeline` calls `db::init_db()` on every ZK request, re-seeding the demo SQLite in-memory DB each time. Share the existing `ledger_db` from `ProxyState`.
 - **Why:** Found by Claude adversarial review (feat/routing-engine, 2026-03-30). Wastes CPU on every ZK slow-lane request; creates correctness risk if `pipeline_lock` is ever bypassed with concurrent ZK requests.
+- **WARNING (Sprint 2):** `ProxyState.ledger_db` is always an in-memory SQLite connection (seeded via `init_ledger_sqlite`). `run_zk_pipeline` calls `db::init_db()` which can select Supabase when `DB_BACKEND=supabase`. Passing `ledger_db` directly to ZK would silently use the wrong backend in Supabase mode. Before implementing: either add a Supabase FastLane connector (Sprint 2 scope) or document that this reuse only applies to SQLite mode.
 - **Effort:** S (human) → S (CC+gstack)
 
-### run_fast_lane blocks async executor while holding ledger_db lock (P2)
-- **What:** `engine_fast::run_fast_lane` is called synchronously in the async Axum handler while holding the `ledger_db` Tokio Mutex. Wrap it in `tokio::task::spawn_blocking`, mirroring the fix applied to ONNX inference in `af98abe`.
-- **Why:** Blocking a Tokio worker thread while holding a mutex delays all other in-flight async tasks on that thread. Under load, a slow FastLane DB query blocks new requests from being accepted. Found by Claude adversarial review (feat/intent-engine, 2026-04-01).
-- **How to apply:** Same pattern as the ONNX spawn_blocking wrapper in `proxy.rs` — move the `run_fast_lane` call into `spawn_blocking`, pass Arc clones of required state.
-- **Effort:** S (human: ~30min / CC: ~5min)
-- **Depends on:** feat/intent-engine merged.
+### ~~run_fast_lane blocks async executor while holding ledger_db lock~~ ✓ DONE (fix/critical-bugs-v040, 2026-04-02)
+- `ledger_db` and `receipts_db` changed from `tokio::sync::Mutex<Connection>` to `std::sync::Mutex<Connection>`. FastLane call wrapped in `spawn_blocking(Arc::clone(&state))`. All `.lock().await` call sites replaced with `.lock().unwrap_or_else(|e| e.into_inner())`.
 
-### RE_BARE_YEAR captures non-year numbers (P3)
-- **What:** `time_parser.rs` bare year regex `\b(20\d{2})\b` matches any 4-digit number starting with `20`, including "2000 employees" (→ year 2000) or "budget was $2099" (→ year 2099). A prompt like "we have 2000 employees, show me payroll" returns a year-2000 time range instead of the current-year default.
-- **Why:** Found by Claude adversarial review (feat/intent-engine, 2026-04-01). Operators won't notice because no error is raised — routing silently uses the wrong historical range, producing ZK proofs for incorrect time windows.
-- **How to apply:** Restrict the regex to plausible year range (e.g., `20[1-3][0-9]` to cover 2010–2039), or require the year to appear adjacent to a time-context word. Document the constraint clearly.
-- **Effort:** S (human: ~1h / CC: ~10min)
-- **Depends on:** feat/intent-engine merged.
+### ~~RE_BARE_YEAR captures non-year numbers~~ ✓ DONE (fix/critical-bugs-v040, 2026-04-02)
+- Changed `\b(20\d{2})\b` → `\b(20[1-9][0-9])\b` (range 2010–2099). "2000 employees" no longer matches. Regression test `bare_year_ignores_non_year_numbers` added.
 
-### Add test for "May 2024" month name parsing (P3)
-- **What:** `RE_MONTH_NAME` lists short-form abbreviations (`Jan|Feb|Mar|Apr|Jun|Jul|...`) but omits `May` from the short-form list — `May` is only matched via the full-name branch. Add an explicit test to confirm `parse_time_range("May 2024 payroll", 0)` resolves correctly.
-- **Why:** Every other month has an unambiguous 3-letter abbreviation tested. "May" is both its own full name and abbreviation, making it easy to miss in the alternation. Found by Claude adversarial review (feat/intent-engine, 2026-04-01).
-- **How to apply:** Add `fn may_2024()` test to `tests/test_time_parser.rs` asserting `start = 1714521600`, `end = 1717199999`.
-- **Effort:** XS (human: ~5min / CC: ~1min)
-- **Depends on:** feat/intent-engine merged.
+### ~~Add test for "May 2024" month name parsing~~ ✓ DONE (fix/critical-bugs-v040, 2026-04-02)
+- `fn may_2024()` test added to `tests/test_time_parser.rs`, asserting `start = 1714521600`, `end = 1717199999`.
 
 ### Exact table key substring bypasses embedding threshold (P3, INVESTIGATE)
 - **What:** In `extract_intent_with_backend`, rule 2 (substring gate) gives confidence `1.0` and skips all embedding + margin checks when exactly one table key or alias appears verbatim in the prompt. A user who knows any table key (e.g., `aws_spend`) can craft prompts that always route to FastLane regardless of what the embedding would score.
@@ -188,6 +174,13 @@
 - **Effort:** S (human: ~1h / CC: ~10min)
 - **Depends on:** feat/intent-engine merged.
 
+### RE_BARE_YEAR historical range limitation (P3, post-v1)
+- **What:** `RE_BARE_YEAR` regex is restricted to `20[1-9][0-9]` (2010–2099) to prevent false matches like "2000 employees". Pre-2010 historical data queries (2000–2009) will fall through to the current-year default with no error.
+- **Why:** Sprint 1 (fix/critical-bugs-v040) narrowed the range from 2000–2099 to 2010–2099 to close the silent mismatch bug. The right long-term fix is a context-aware time parser that only treats 4-digit numbers as years when adjacent to financial context words.
+- **How to apply:** Either expand the regex with context anchors (e.g., `\b(20[0-9]{2})\b(?=\s*(spending|spend|payroll|travel|cost|budget))`), or replace RE_BARE_YEAR with a proper NLP time expression parser in v2.
+- **Effort:** S (human: ~2h / CC: ~15min)
+- **Depends on:** Sprint 1 merged.
+
 ### intent.rs v2: multi-table query support (P3, post-v1)
 - **What:** Extend intent.rs to extract multiple table names from a single query and apply the cross-sensitivity OR rule across all extracted tables.
 - **Why:** v1 extracts only the first table match. A query like "What was Q1 payroll vs AWS spend?" would only process the first table found. The cross-sensitivity OR rule (if ANY table is critical → ZK SlowLane) is architecturally correct but unreachable in v1 for multi-table queries. v1 behavior: extract first table, add a note in the response: "Note: only processed [table] — multi-table queries not yet supported."
@@ -195,3 +188,10 @@
 - **Cons:** Multi-table output requires either two separate Evidence Packs or a new combined format. Schema for combined Evidence Pack needs design.
 - **Context:** v1 single-table is a conscious shortcut. The router.rs OR rule is implemented correctly but only exercised in unit tests with simulated multi-table intent. Real user queries will need this in v2.
 - **Depends on:** feat/routing-engine merged (provides the single-table v1 foundation).
+
+### /verify page: show aggregate and category for FastLane receipts (P3, before v1)
+- **What:** `/verify/:id` renders aggregate and category from `public_inputs_readable.json` inside the bundle ZIP. FastLane receipts have no bundle ZIP — `bundle_path` is empty, so aggregate and category show "—" on the verify page.
+- **Why:** Found by Codex outside voice during fix/critical-bugs-v040 eng review (2026-04-02). FastLane attestation is the primary path for low-sensitivity tables. Auditors hitting `/verify/:id` for a FastLane receipt see no meaningful data beyond the badge and receipt ID.
+- **How to apply:** Option A: store `aggregate` and `category_name` directly in the receipts table (schema migration). Option B: derive them from the `EvidencePack` JSON stored in the response (no schema change but requires storing the payload). Option A is cleaner — add `aggregate i64` and `category_name TEXT` columns to the receipts table with a v3 migration, populate on insert in `handle_fast_lane`.
+- **Effort:** S (human: ~2h / CC: ~15min)
+- **Depends on:** fix/critical-bugs-v040 merged.
