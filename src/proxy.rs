@@ -577,14 +577,15 @@ async fn handle_zk_slow_lane(
         None
     };
 
-    let target_category = db::schema_key_to_category_code(&intent.table)
-        .ok_or_else(|| ProxyError(anyhow::anyhow!(
-            "table '{}' has no circuit category mapping — cannot generate ZK proof",
-            intent.table
+    let target_category_hash = db::poseidon_of_string(&intent.table)
+        .map(|fr| db::fr_to_decimal(&fr))
+        .map_err(|e| ProxyError(anyhow::anyhow!(
+            "table '{}' not recognized in schema_config — cannot generate ZK proof: {}",
+            intent.table, e
         )))?;
     let params = QueryParams {
         client_id: 123,
-        target_category,
+        target_category_hash,
         category_name: intent.category_name.clone(),
         start_time: intent.start_unix_secs as u64,
         end_time: intent.end_unix_secs as u64,
@@ -807,14 +808,9 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
         .unwrap_or_else(|| "—".to_owned());
 
     let category = readable
-        .and_then(|v| v.get("target_category"))
-        .and_then(|v| v.as_u64())
-        .map(|n| match n {
-            1 => "Payroll".to_owned(),
-            2 => "AWS Infrastructure".to_owned(),
-            3 => "Coffee & Meals".to_owned(),
-            _ => format!("Category {}", n),
-        })
+        .and_then(|v| v.get("category_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
         .unwrap_or_else(|| "—".to_owned());
 
     format!(
@@ -915,14 +911,15 @@ async fn run_zk_pipeline(
     prompt_hash: String,
     intent: crate::types::IntentResult,
 ) -> anyhow::Result<ZkPipelineResult> {
-    let target_category = db::schema_key_to_category_code(&intent.table)
-        .ok_or_else(|| anyhow::anyhow!(
-            "table '{}' has no circuit category mapping — cannot generate ZK proof",
-            intent.table
+    let target_category_hash = db::poseidon_of_string(&intent.table)
+        .map(|fr| db::fr_to_decimal(&fr))
+        .map_err(|e| anyhow::anyhow!(
+            "table '{}' not recognized in schema_config — cannot generate ZK proof: {}",
+            intent.table, e
         ))?;
     let params = QueryParams {
         client_id: 123,
-        target_category,
+        target_category_hash,
         category_name: intent.category_name.clone(),
         start_time: intent.start_unix_secs as u64,
         end_time: intent.end_unix_secs as u64,

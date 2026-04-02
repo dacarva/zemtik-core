@@ -16,8 +16,8 @@ fn dummy_sig() -> SignatureData {
 fn dummy_params() -> QueryParams {
     QueryParams {
         client_id: 1,
-        target_category: 2,
-        category_name: "AWS".to_owned(),
+        target_category_hash: "12345".to_owned(),
+        category_name: "aws_spend".to_owned(),
         start_time: 1_704_067_200,
         end_time: 1_711_929_599,
     }
@@ -30,6 +30,7 @@ fn dummy_txns(n: usize) -> Vec<Transaction> {
             client_id: 1,
             amount: i as u64 + 1,
             category: 2,
+            category_name: "aws_spend".to_owned(),
             timestamp: 1_704_067_200 + i as u64,
         })
         .collect()
@@ -63,7 +64,7 @@ fn generate_batched_prover_toml_creates_file() {
     generate_batched_prover_toml(&[(txns, sig)], &params, dir.path()).unwrap();
 
     let content = std::fs::read_to_string(dir.path().join("Prover.toml")).unwrap();
-    assert!(content.contains("target_category = \"2\""));
+    assert!(content.contains("target_category_hash = \""));
     assert!(content.contains("[[batches]]"));
     assert!(content.contains("[[batches.transactions]]"));
 }

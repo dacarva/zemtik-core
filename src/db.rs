@@ -1,7 +1,7 @@
 use anyhow::Context;
 pub use babyjubjub_rs::PrivateKey;
 use babyjubjub_rs::Fr;
-use ff_ce::{PrimeField, PrimeFieldRepr};
+use ff_ce::{Field, PrimeField, PrimeFieldRepr};
 use num_bigint::{BigInt, Sign};
 use poseidon_rs::Poseidon;
 use rusqlite::Connection;
@@ -14,17 +14,49 @@ pub const CAT_PAYROLL: u64 = 1;
 pub const CAT_AWS: u64 = 2;
 pub const CAT_COFFEE: u64 = 3;
 
-/// Map a schema-config table key to its Noir circuit category code.
+/// Compute the Poseidon BN254 hash of a table name string.
 ///
-/// Returns `None` if the table key is not recognized in the demo dataset.
-/// Used by the ZK slow lane to build QueryParams from extracted intent.
-pub fn schema_key_to_category_code(schema_key: &str) -> Option<u64> {
-    match schema_key.to_ascii_lowercase().as_str() {
-        "payroll" => Some(CAT_PAYROLL),
-        "aws_spend" => Some(CAT_AWS),
-        "travel" => Some(CAT_COFFEE),
-        _ => None,
+/// Canonicalizes input (trim + lowercase) and encodes as 3×31-byte chunks
+/// zero-padded → 3 Fr elements → poseidon hash (arity 3).
+/// Compatible with `bn254::hash_3` in the Noir circuit.
+///
+/// Max input length after canonicalization: 93 bytes (3 × 31).
+pub fn poseidon_of_string(s: &str) -> anyhow::Result<Fr> {
+    let s = s.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        s.len() <= 93,
+        "poseidon_of_string: input '{}' is {} bytes (max 93)",
+        s,
+        s.len()
+    );
+
+    let bytes = s.as_bytes();
+    let mut chunks = [Fr::zero(); 3];
+    for (i, chunk_fr) in chunks.iter_mut().enumerate() {
+        let start = i * 31;
+        if start >= bytes.len() {
+            // Already zero-initialized
+            continue;
+        }
+        let end = std::cmp::min(start + 31, bytes.len());
+        // Encode bytes as least-significant part of a 31-byte big-endian chunk,
+        // matching Noir's Field literal: 0x000...006177735f7370656e64 for "aws_spend".
+        // bytes go at the END (LSB side) of padded, with leading zeros.
+        let len = end - start;
+        let mut padded = [0u8; 31];
+        padded[31 - len..].copy_from_slice(&bytes[start..end]);
+        // Place the 31-byte chunk as the low bytes of a 32-byte big-endian Field.
+        let mut be_buf = [0u8; 32];
+        be_buf[1..32].copy_from_slice(&padded);
+        let big = BigInt::from_bytes_be(Sign::Plus, &be_buf);
+        *chunk_fr = Fr::from_str(&big.to_string())
+            .ok_or_else(|| anyhow::anyhow!("chunk {} exceeds BN254 field order", i))?;
     }
+
+    let poseidon = Poseidon::new();
+    poseidon
+        .hash(chunks.to_vec())
+        .map_err(|e| anyhow::anyhow!("poseidon hash failed: {}", e))
 }
 
 // Q1 2024 UNIX timestamp boundaries.
@@ -120,6 +152,8 @@ fn generate_seed_transactions() -> Vec<Transaction> {
                 client_id: 123,
                 amount: base_amount + (i / 3) * 100,
                 category,
+                // category_name is still used here by the seeder (NOT dead code post-Sprint 2)
+                category_name: category_name(category).to_owned(),
                 timestamp: Q1_START + i * (day * 90 / 500),
             }
         })
@@ -214,7 +248,7 @@ fn seed_sqlite(conn: &Connection) -> anyhow::Result<()> {
 
 fn query_sqlite(conn: &Connection, client_id: i64) -> anyhow::Result<Vec<Transaction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, client_id, amount, category, timestamp \
+        "SELECT id, client_id, amount, category, timestamp, category_name \
          FROM transactions WHERE client_id = ?1 ORDER BY id",
     )?;
     let rows = stmt.query_map(rusqlite::params![client_id], |row| {
@@ -224,6 +258,7 @@ fn query_sqlite(conn: &Connection, client_id: i64) -> anyhow::Result<Vec<Transac
             amount: row.get::<_, i64>(2)? as u64,
             category: row.get::<_, i64>(3)? as u64,
             timestamp: row.get::<_, i64>(4)? as u64,
+            category_name: row.get(5)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -242,6 +277,7 @@ struct SupabaseRow {
     amount: i64,
     category: i64,
     timestamp: i64,
+    category_name: String,
 }
 
 /// Create the transactions table via a direct Postgres connection if it
@@ -438,7 +474,7 @@ async fn query_supabase(
         .query(&[
             ("client_id", format!("eq.{}", client_id)),
             ("order", "id.asc".to_owned()),
-            ("select", "id,client_id,amount,category,timestamp".to_owned()),
+            ("select", "id,client_id,amount,category,timestamp,category_name".to_owned()),
         ])
         .send()
         .await
@@ -463,6 +499,7 @@ async fn query_supabase(
             amount: r.amount as u64,
             category: r.category as u64,
             timestamp: r.timestamp as u64,
+            category_name: r.category_name,
         })
         .collect())
 }
@@ -511,7 +548,7 @@ pub fn compute_tx_commitment(txns: &[Transaction]) -> anyhow::Result<Fr> {
         .map(|tx| {
             h(vec![
                 fr_from_u64(tx.amount),
-                fr_from_u64(tx.category),
+                poseidon_of_string(&tx.category_name)?,
                 fr_from_u64(tx.timestamp),
             ])
         })

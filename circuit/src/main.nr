@@ -13,7 +13,7 @@ global BATCH_COUNT: u32 = 10;
 // A single bank ledger row (private witness data).
 struct Transaction {
     amount: u64,
-    category: u64,
+    category: Field,
     timestamp: u64,
 }
 
@@ -46,7 +46,7 @@ struct BatchInput {
 // Returns the partial aggregate spend for this batch.
 fn process_batch(
     batch: BatchInput,
-    target_category: u64,
+    target_category_hash: Field,
     start_time: u64,
     end_time: u64,
     bank_pub_key_x: Field,
@@ -66,7 +66,7 @@ fn process_batch(
     for i in 0..TX_COUNT {
         tx_h[i] = bn254::hash_3([
             batch.transactions[i].amount as Field,
-            batch.transactions[i].category as Field,
+            batch.transactions[i].category,
             batch.transactions[i].timestamp as Field,
         ]);
     }
@@ -111,7 +111,7 @@ fn process_batch(
     // -----------------------------------------------------------------------
     let mut total: Field = 0;
     for i in 0..TX_COUNT {
-        let matches_query = (batch.transactions[i].category == target_category)
+        let matches_query = (batch.transactions[i].category == target_category_hash)
             & (batch.transactions[i].timestamp >= start_time)
             & (batch.transactions[i].timestamp <= end_time);
 
@@ -137,7 +137,7 @@ fn process_batch(
 // Return value (public):
 //   The total verified aggregate spend across all BATCH_COUNT batches.
 fn main(
-    target_category: pub u64,
+    target_category_hash: pub Field,
     start_time: pub u64,
     end_time: pub u64,
     bank_pub_key_x: pub Field,
@@ -148,7 +148,7 @@ fn main(
     for i in 0..BATCH_COUNT {
         total += process_batch(
             batches[i],
-            target_category,
+            target_category_hash,
             start_time,
             end_time,
             bank_pub_key_x,
@@ -156,4 +156,19 @@ fn main(
         );
     }
     total
+}
+
+#[test]
+fn test_poseidon_aws_spend() {
+    // "aws_spend" = 0x6177735f7370656e64 (9 bytes) -&gt; zero-padded to 31 bytes
+    // Encoding: big-endian in 32-byte buffer (1 zero byte prefix + 31 data bytes)
+    // chunk0 = bytes[0..31] -&gt; place at buf[1..32] -&gt; Field literal
+    let chunk0: Field = 0x00000000000000000000000000000000000000000000006177735f7370656e64;
+    let chunk1: Field = 0;
+    let chunk2: Field = 0;
+    let result = bn254::hash_3([chunk0, chunk1, chunk2]);
+    // Print the decimal for cross-language verification against Rust poseidon_of_string
+    println(f"bn254::hash_3(aws_spend) = {result}");
+    // Assert non-trivial (actual cross-language value verified in tests/test_poseidon_compat.rs)
+    assert(result != 0);
 }

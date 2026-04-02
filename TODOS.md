@@ -195,3 +195,27 @@
 - **How to apply:** Option A: store `aggregate` and `category_name` directly in the receipts table (schema migration). Option B: derive them from the `EvidencePack` JSON stored in the response (no schema change but requires storing the payload). Option A is cleaner — add `aggregate i64` and `category_name TEXT` columns to the receipts table with a v3 migration, populate on insert in `handle_fast_lane`.
 - **Effort:** S (human: ~2h / CC: ~15min)
 - **Depends on:** fix/critical-bugs-v040 merged.
+
+---
+
+## feat/zk-universalization TODOs (added 2026-04-02, plan-ceo-review)
+
+### poseidon_of_string: strings > 93 bytes not supported (P3)
+- **What:** `poseidon_of_string()` in `db.rs` uses a 3×31-byte chunk encoding (arity 3). Table names
+  > 93 bytes would silently truncate or panic. Today all enterprise table keys are < 32 bytes.
+- **Why:** Found during plan-ceo-review CEO review (2026-04-02). Not a real risk for the demo schema
+  but becomes relevant if someone onboards a table with a very long name (e.g., "enterprise_q4_aws_infrastructure_spend"). 
+  The function should validate `s.len() <= 93` at runtime and return `Err(...)` clearly.
+- **How to apply:** Add `anyhow::ensure!(s.len() <= 93, "table key too long for poseidon_of_string: {} bytes", s.len());`
+  at the top of the function. For longer strings, use arity-5 with 5 chunks (31 bytes each = 155 bytes max).
+- **Effort:** XS (human: ~5min / CC: ~1min)
+- **Priority:** P3 — not blocking Sprint 2, add alongside the initial implementation
+- **Depends on:** feat/zk-universalization (Sprint 2) merged.
+
+### category_name DB / schema_config mismatch produces silent ZK undercount (P3)
+- **What:** `poseidon_of_string(tx.category_name)` computes the witness hash from the DB value. `poseidon_of_string(intent.table)` computes the target hash from the schema_config key. If these strings differ (e.g., DB stores "AWS" but schema key is "aws_spend"), the circuit comparison always returns 0 matches — the proof is valid but the aggregate is silently 0.
+- **Why:** Found by Codex outside voice during feat/zk-universalization eng review (2026-04-02). The `contains_key(&intent.table)` guardrail in proxy.rs checks that the table exists in schema_config, but does not validate that the category_name values already in the DB match the schema key. The demo DB is seeded from code so this risk is minimal today, but customer-loaded data could have inconsistencies.
+- **How to apply:** In `sign_transactions` or `compute_tx_commitment`, validate that `tx.category_name` is present in `schema_config.tables` keys before hashing. Alternatively: add a startup validation step that queries the DB for distinct `category_name` values and checks them against `schema_config.tables`. Return a clear error if any DB category_name has no corresponding schema key.
+- **Effort:** S (human: ~1h / CC: ~15min)
+- **Priority:** P3 — not blocking Sprint 2, relevant before second enterprise client onboards
+- **Depends on:** feat/zk-universalization (Sprint 2) merged.

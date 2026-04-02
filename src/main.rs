@@ -91,9 +91,11 @@ async fn main() -> anyhow::Result<()> {
     println!("OK ({} transactions for client 123)", txns.len());
 
     // Query: client 123's AWS spend in Q1 2024
+    let category_hash_fr = db::poseidon_of_string("aws_spend")
+        .context("compute target_category_hash for aws_spend")?;
     let params = QueryParams {
         client_id: 123,
-        target_category: db::CAT_AWS,
+        target_category_hash: db::fr_to_decimal(&category_hash_fr),
         category_name: "aws_spend".to_owned(),
         start_time: db::Q1_START,
         end_time: db::Q1_END,

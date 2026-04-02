@@ -8,6 +8,7 @@ fn make_txns(n: usize) -> Vec<Transaction> {
             client_id: 1,
             amount: i as u64 + 1,
             category: 2,
+            category_name: "aws_spend".to_owned(),
             timestamp: Q1_START + i as u64,
         })
         .collect()

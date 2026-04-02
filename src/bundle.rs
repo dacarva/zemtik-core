@@ -95,7 +95,8 @@ pub fn generate_bundle(
 
     // Build human-readable public inputs JSON
     let public_inputs_readable = serde_json::json!({
-        "target_category": params.target_category,
+        "target_category_hash": params.target_category_hash,
+        "category_name": params.category_name,
         "start_time": params.start_time,
         "end_time": params.end_time,
         "bank_pub_key_x": sig.pub_key_x,
@@ -117,7 +118,7 @@ pub fn generate_bundle(
         "raw_rows_sent_to_llm": 0,
         "query_params": {
             "client_id": params.client_id,
-            "target_category": params.target_category,
+            "target_category_hash": params.target_category_hash,
             "category_name": params.category_name,
             "start_time": params.start_time,
             "end_time": params.end_time

@@ -193,25 +193,40 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
 
 #[cfg(test)]
 mod tests {
+    use num_bigint::BigUint;
     use tempfile::tempdir;
 
     // -----------------------------------------------------------------------
     // cross_verify_sidecar tests
     // -----------------------------------------------------------------------
 
+    /// Compute the big-endian Poseidon hash bytes for "aws_spend" for test fixtures.
+    fn aws_spend_hash_bytes() -> [u8; 32] {
+        let fr = crate::db::poseidon_of_string("aws_spend").expect("poseidon_of_string aws_spend");
+        let decimal = crate::db::fr_to_decimal(&fr);
+        let big = num_bigint::BigUint::parse_bytes(decimal.as_bytes(), 10)
+            .expect("fr_to_decimal produces valid decimal");
+        let be_bytes = big.to_bytes_be();
+        let mut buf = [0u8; 32];
+        // right-align into 32 bytes (big-endian, zero-padded on left)
+        buf[32 - be_bytes.len()..].copy_from_slice(&be_bytes);
+        buf
+    }
+
     fn write_cross_verify_fixtures(
         dir: &std::path::Path,
         binary: &[u8; 192],
         pk_x_decimal: &str,
         pk_y_decimal: &str,
-        category: u64,
+        category_hash: &str,
         start: u64,
         end: u64,
         aggregate: u64,
     ) {
         std::fs::write(dir.join("public_inputs"), binary).unwrap();
         let json = serde_json::json!({
-            "target_category": category,
+            "target_category_hash": category_hash,
+            "category_name": "aws_spend",
             "start_time": start,
             "end_time": end,
             "bank_pub_key_x": pk_x_decimal,
@@ -230,8 +245,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let pk_x = [0u8; 32];
         let pk_y = [0u8; 32];
-        let binary = super::build_public_inputs_binary(2, 1000, 2000, &pk_x, &pk_y, 42);
-        write_cross_verify_fixtures(dir.path(), &binary, "0", "0", 2, 1000, 2000, 42);
+        let hash_bytes = aws_spend_hash_bytes();
+        let hash_decimal = BigUint::from_bytes_be(&hash_bytes).to_string();
+        let binary = super::build_public_inputs_binary(&hash_bytes, 1000, 2000, &pk_x, &pk_y, 42);
+        write_cross_verify_fixtures(dir.path(), &binary, "0", "0", &hash_decimal, 1000, 2000, 42);
 
         let result = super::cross_verify_sidecar(dir.path());
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
@@ -242,9 +259,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let pk_x = [0u8; 32];
         let pk_y = [0u8; 32];
+        let hash_bytes = aws_spend_hash_bytes();
+        let hash_decimal = BigUint::from_bytes_be(&hash_bytes).to_string();
         // binary says 42, sidecar says 9999999
-        let binary = super::build_public_inputs_binary(2, 1000, 2000, &pk_x, &pk_y, 42);
-        write_cross_verify_fixtures(dir.path(), &binary, "0", "0", 2, 1000, 2000, 9_999_999);
+        let binary = super::build_public_inputs_binary(&hash_bytes, 1000, 2000, &pk_x, &pk_y, 42);
+        write_cross_verify_fixtures(dir.path(), &binary, "0", "0", &hash_decimal, 1000, 2000, 9_999_999);
 
         let err = super::cross_verify_sidecar(dir.path()).unwrap_err();
         assert!(
@@ -259,11 +278,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let pk_x = [0u8; 32];
         let pk_y = [0u8; 32];
-        let binary = super::build_public_inputs_binary(2, 1000, 2000, &pk_x, &pk_y, 42);
+        let hash_bytes = aws_spend_hash_bytes();
+        let hash_decimal = BigUint::from_bytes_be(&hash_bytes).to_string();
+        let binary = super::build_public_inputs_binary(&hash_bytes, 1000, 2000, &pk_x, &pk_y, 42);
         std::fs::write(dir.path().join("public_inputs"), &binary).unwrap();
         // JSON without verified_aggregate
         let json = serde_json::json!({
-            "target_category": 2,
+            "target_category_hash": hash_decimal,
+            "category_name": "aws_spend",
             "start_time": 1000,
             "end_time": 2000,
             "bank_pub_key_x": "0",
@@ -287,9 +309,10 @@ mod tests {
 /// Cross-verify the binary `public_inputs` file against `public_inputs_readable.json`.
 ///
 /// The binary file encodes 6 × 32-byte big-endian BN254 field elements in this order:
-///   [target_category, start_time, end_time, bank_pub_key_x, bank_pub_key_y, verified_aggregate]
+///   [target_category_hash, start_time, end_time, bank_pub_key_x, bank_pub_key_y, verified_aggregate]
 ///
-/// u64 fields (indices 0, 1, 2, 5) must have the first 24 bytes zero; the last 8 are
+/// target_category_hash (index 0) is a full 254-bit Poseidon Field — compared as BigUint decimal.
+/// u64 fields (indices 1, 2, 5) must have the first 24 bytes zero; the last 8 are
 /// interpreted as a big-endian u64.
 /// Pubkey fields (indices 3, 4) are compared as BigUint byte representations.
 fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
@@ -309,6 +332,11 @@ fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
     let readable: serde_json::Value =
         serde_json::from_slice(&readable_bytes).context("parse public_inputs_readable.json")?;
 
+    // Parse a 32-byte chunk at index i as a decimal string (full Field, 254-bit).
+    let parse_field_decimal = |i: usize| -> anyhow::Result<String> {
+        Ok(BigUint::from_bytes_be(&binary[i * 32..(i + 1) * 32]).to_string())
+    };
+
     // Helper to parse a 32-byte chunk at index i as a u64 (first 24 bytes must be zero).
     let parse_u64_field = |i: usize, name: &str| -> anyhow::Result<u64> {
         let chunk = &binary[i * 32..(i + 1) * 32];
@@ -322,7 +350,7 @@ fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
     };
 
     // Parse the 6 fields
-    let bin_category = parse_u64_field(0, "target_category")?;
+    let bin_category_hash = parse_field_decimal(0)?;
     let bin_start = parse_u64_field(1, "start_time")?;
     let bin_end = parse_u64_field(2, "end_time")?;
     let bin_pk_x = BigUint::from_bytes_be(&binary[3 * 32..4 * 32]);
@@ -343,7 +371,7 @@ fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("public inputs mismatch: '{}' missing or invalid in sidecar", key))
     };
 
-    let sid_category = get_u64("target_category")?;
+    let sid_category_hash = get_str("target_category_hash")?;
     let sid_start = get_u64("start_time")?;
     let sid_end = get_u64("end_time")?;
     let sid_pk_x = BigUint::parse_bytes(get_str("bank_pub_key_x")?.as_bytes(), 10)
@@ -352,8 +380,8 @@ fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("public inputs mismatch: 'bank_pub_key_y' is not a valid decimal"))?;
     let sid_aggregate = get_u64("verified_aggregate")?;
 
-    if bin_category != sid_category {
-        anyhow::bail!("public inputs mismatch: target_category binary={} sidecar={}", bin_category, sid_category);
+    if bin_category_hash != sid_category_hash {
+        anyhow::bail!("public inputs mismatch: target_category_hash binary={} sidecar={}", bin_category_hash, sid_category_hash);
     }
     if bin_start != sid_start {
         anyhow::bail!("public inputs mismatch: start_time binary={} sidecar={}", bin_start, sid_start);
@@ -376,9 +404,10 @@ fn cross_verify_sidecar(extract_dir: &Path) -> anyhow::Result<()> {
 
 /// Build a 192-byte public_inputs binary from the 6 BN254 field values.
 /// Each value is encoded as a 32-byte big-endian buffer.
+/// category_hash_bytes is the full 32-byte big-endian Poseidon Field (254 bits).
 #[cfg(test)]
 fn build_public_inputs_binary(
-    category: u64,
+    category_hash_bytes: &[u8; 32],
     start: u64,
     end: u64,
     pk_x: &[u8; 32],
@@ -389,7 +418,7 @@ fn build_public_inputs_binary(
     let encode_u64 = |val: u64, slot: &mut [u8]| {
         slot[24..32].copy_from_slice(&val.to_be_bytes());
     };
-    encode_u64(category, &mut buf[0..32]);
+    buf[0..32].copy_from_slice(category_hash_bytes);
     encode_u64(start, &mut buf[32..64]);
     encode_u64(end, &mut buf[64..96]);
     buf[96..128].copy_from_slice(pk_x);

@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use uuid::Uuid;
 
-use crate::db::BATCH_SIZE;
+use crate::db::{fr_to_decimal, poseidon_of_string, BATCH_SIZE};
 use crate::types::{QueryParams, SignatureData, Transaction};
 
 /// Serialize the batched circuit inputs to `circuit_dir/Prover.toml`.
@@ -21,7 +21,7 @@ pub fn generate_batched_prover_toml(
     let capacity = batches.len() * BATCH_SIZE * 200 + batches.len() * 100 + 512;
     let mut toml = String::with_capacity(capacity);
 
-    toml.push_str(&format!("target_category = \"{}\"\n", params.target_category));
+    toml.push_str(&format!("target_category_hash = \"{}\"\n", params.target_category_hash));
     toml.push_str(&format!("start_time = \"{}\"\n", params.start_time));
     toml.push_str(&format!("end_time = \"{}\"\n", params.end_time));
 
@@ -38,7 +38,8 @@ pub fn generate_batched_prover_toml(
         for tx in txns {
             toml.push_str("\n[[batches.transactions]]\n");
             toml.push_str(&format!("amount = \"{}\"\n", tx.amount));
-            toml.push_str(&format!("category = \"{}\"\n", tx.category));
+            let cat_fr = poseidon_of_string(&tx.category_name)?;
+            toml.push_str(&format!("category = \"{}\"\n", fr_to_decimal(&cat_fr)));
             toml.push_str(&format!("timestamp = \"{}\"\n", tx.timestamp));
         }
     }
