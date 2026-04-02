@@ -200,17 +200,9 @@
 
 ## feat/zk-universalization TODOs (added 2026-04-02, plan-ceo-review)
 
-### poseidon_of_string: strings > 93 bytes not supported (P3)
-- **What:** `poseidon_of_string()` in `db.rs` uses a 3×31-byte chunk encoding (arity 3). Table names
-  > 93 bytes would silently truncate or panic. Today all enterprise table keys are < 32 bytes.
-- **Why:** Found during plan-ceo-review CEO review (2026-04-02). Not a real risk for the demo schema
-  but becomes relevant if someone onboards a table with a very long name (e.g., "enterprise_q4_aws_infrastructure_spend"). 
-  The function should validate `s.len() <= 93` at runtime and return `Err(...)` clearly.
-- **How to apply:** Add `anyhow::ensure!(s.len() <= 93, "table key too long for poseidon_of_string: {} bytes", s.len());`
-  at the top of the function. For longer strings, use arity-5 with 5 chunks (31 bytes each = 155 bytes max).
-- **Effort:** XS (human: ~5min / CC: ~1min)
-- **Priority:** P3 — not blocking Sprint 2, add alongside the initial implementation
-- **Depends on:** feat/zk-universalization (Sprint 2) merged.
+### ~~poseidon_of_string: strings > 93 bytes not supported~~ ✓ DONE (feat/zk-universalization, 2026-04-02)
+- `anyhow::ensure!(s.len() <= 93, ...)` added at top of `poseidon_of_string` in `db.rs`.
+- `oversized_input_returns_error` and `max_length_input_succeeds` tests added in `tests/test_poseidon_compat.rs`.
 
 ### category_name DB / schema_config mismatch produces silent ZK undercount (P3)
 - **What:** `poseidon_of_string(tx.category_name)` computes the witness hash from the DB value. `poseidon_of_string(intent.table)` computes the target hash from the schema_config key. If these strings differ (e.g., DB stores "AWS" but schema key is "aws_spend"), the circuit comparison always returns 0 matches — the proof is valid but the aggregate is silently 0.
