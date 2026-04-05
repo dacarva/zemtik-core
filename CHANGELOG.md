@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-04-05
+
+### Added
+- **Sidecar manifest** — bundles now include `manifest.json` with a SHA-256 hash of `public_inputs_readable.json`, making the sidecar tamper-evident. `zemtik verify` enforces manifest presence for `bundle_version >= 2`; older bundles skip the check.
+- **Outgoing prompt hash** — `outgoing_prompt_hash` (SHA-256 of the financial payload JSON sent to the LLM) is now tracked in `EvidencePack`, receipts DB, and bundle `request_meta.json`. Visible in `zemtik verify` output and `zemtik list`. This is a Rust-layer commitment; circuit-level commitment is planned for Sprint 3.
+- **Configurable `bb verify` timeout** — `ZEMTIK_VERIFY_TIMEOUT_SECS` env var (default 120) controls how long the proxy waits for `bb verify` before returning HTTP 504. Prevents indefinite hangs in the ZK slow lane.
+
+### Fixed
+- **OpenAI error propagation** — HTTP error responses from OpenAI now include the full response body and status code in the error message. `query_openai` accepts an optional `base_url` override for integration testing via wiremock.
+- **Typed `ProxyError`** — `ProxyError` is now an enum (`Internal` → HTTP 500, `Timeout` → HTTP 504) instead of a tuple struct. ZK slow lane timeout returns 504; internal errors return 500.
+- **`outgoing_prompt_hash` correctness** — hash is set to `None` in receipts when `fully_verifiable=false` (no proof artifact exists to match against). Serialization errors now propagate instead of silently producing a hash of an empty string.
+- **Test reliability** — env-var tests for `ZEMTIK_VERIFY_TIMEOUT_SECS` serialized with a static mutex (ISSUE-001) to prevent data races in parallel test execution.
+
 ## [0.5.1] - 2026-04-05
 
 ### Performance

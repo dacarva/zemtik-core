@@ -10,3 +10,7 @@ proxy_port: 4000
 # db_path: ~/.zemtik/zemtik.db
 # receipts_db_path: ~/.zemtik/receipts.db
 # receipts_dir: ~/.zemtik/receipts
+
+# Seconds before bb verify is abandoned on timeout (not killed — known limitation, see TODOS.md).
+# Configurable via ZEMTIK_VERIFY_TIMEOUT_SECS env var only (YAML knob not yet wired in v0.5.x).
+# export ZEMTIK_VERIFY_TIMEOUT_SECS=120

@@ -35,6 +35,7 @@ fn sample_receipt(id: &str) -> Receipt {
         proof_hash: Some("deadbeef".to_owned()),
         data_exfiltrated: 0,
         intent_confidence: None,
+        outgoing_prompt_hash: None,
     }
 }
 
@@ -88,7 +89,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3, "expected migration to reach version 3");
 }
 
 #[test]
@@ -98,7 +99,64 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3, "migration should be idempotent at version 3");
+}
+
+#[test]
+fn test_migration_v2_to_v3() {
+    // Simulate a v2 database: create base table + run only v1+v2 migrations manually
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipts (
+            receipt_id   TEXT PRIMARY KEY,
+            bundle_path  TEXT NOT NULL,
+            proof_status TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            bb_version   TEXT NOT NULL,
+            prompt_hash  TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN engine_used TEXT DEFAULT 'zk_slow_lane_legacy';
+        ALTER TABLE receipts ADD COLUMN proof_hash TEXT;
+        ALTER TABLE receipts ADD COLUMN data_exfiltrated INTEGER DEFAULT 0;
+        CREATE TABLE IF NOT EXISTS intent_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt TEXT NOT NULL,
+            error TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN intent_confidence REAL DEFAULT NULL;
+        PRAGMA user_version = 2;
+        COMMIT;",
+    )
+    .unwrap();
+
+    let version_before: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_before, 2);
+
+    run_migration(&conn).unwrap();
+
+    let version_after: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_after, 3, "v2→v3 migration must bump to version 3");
+
+    // Verify the column exists
+    let col_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('receipts') WHERE name='outgoing_prompt_hash'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(col_count, 1, "outgoing_prompt_hash column must exist after v3 migration");
 }
 
 #[test]
@@ -126,6 +184,50 @@ fn test_list_receipts() {
     insert_receipt(&conn, &sample_receipt("id-2")).unwrap();
     let list = list_receipts(&conn).unwrap();
     assert_eq!(list.len(), 2);
+}
+
+#[test]
+fn test_outgoing_prompt_hash_stored_and_retrieved() {
+    let conn = open_in_memory().unwrap();
+    let mut r = sample_receipt("hash-uuid");
+    r.outgoing_prompt_hash = Some("sha256:abc123def456".to_owned());
+    insert_receipt(&conn, &r).unwrap();
+
+    let found = get_receipt(&conn, "hash-uuid").unwrap().unwrap();
+    assert_eq!(
+        found.outgoing_prompt_hash,
+        Some("sha256:abc123def456".to_owned()),
+        "outgoing_prompt_hash must round-trip through DB"
+    );
+}
+
+#[test]
+fn test_outgoing_prompt_hash_null_for_old_rows() {
+    let conn = open_in_memory().unwrap();
+    let r = sample_receipt("null-hash-uuid"); // outgoing_prompt_hash: None
+    insert_receipt(&conn, &r).unwrap();
+
+    let found = get_receipt(&conn, "null-hash-uuid").unwrap().unwrap();
+    assert_eq!(
+        found.outgoing_prompt_hash, None,
+        "None outgoing_prompt_hash must deserialize correctly"
+    );
+}
+
+#[test]
+fn test_list_receipts_includes_outgoing_hash() {
+    let conn = open_in_memory().unwrap();
+    let mut r = sample_receipt("list-hash-uuid");
+    r.outgoing_prompt_hash = Some("sha256:listtest123".to_owned());
+    insert_receipt(&conn, &r).unwrap();
+
+    let list = list_receipts(&conn).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        list[0].outgoing_prompt_hash,
+        Some("sha256:listtest123".to_owned()),
+        "list_receipts must return outgoing_prompt_hash field"
+    );
 }
 
 #[test]

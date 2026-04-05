@@ -276,24 +276,41 @@ pub fn generate_proof(run_dir: &Path) -> anyhow::Result<bool> {
 }
 
 /// Run `bb verify` in `run_dir` to verify the proof.
+///
+/// Timeout is controlled by `ZEMTIK_VERIFY_TIMEOUT_SECS` (default: 120).
+/// A value of 0 is treated as unset (floor guard). If the timeout fires, the
+/// bb process is abandoned (not killed) — a known limitation documented in TODOS.md.
 pub fn verify_proof(run_dir: &Path) -> anyhow::Result<Option<bool>> {
     let proof_path = run_dir.join("proofs/proof/proof");
     if !proof_path.exists() {
         return Ok(None);
     }
 
+    let timeout_secs = read_verify_timeout();
     let t = Instant::now();
 
-    let verify_out = Command::new("bb")
-        .args([
-            "verify",
-            "-p", "proofs/proof/proof",
-            "-k", "proofs/proof/vk",
-            "-i", "proofs/proof/public_inputs",
-        ])
-        .current_dir(run_dir)
-        .output()
-        .context("spawn bb verify")?;
+    let run_dir_owned = run_dir.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = Command::new("bb")
+            .args([
+                "verify",
+                "-p", "proofs/proof/proof",
+                "-k", "proofs/proof/vk",
+                "-i", "proofs/proof/public_inputs",
+            ])
+            .current_dir(&run_dir_owned)
+            .output()
+            .context("spawn bb verify");
+        let _ = tx.send(result);
+    });
+
+    let verify_out = rx
+        .recv_timeout(std::time::Duration::from_secs(timeout_secs))
+        .map_err(|_| anyhow::anyhow!(
+            "bb verify timed out after {}s — check CRS availability or bb version mismatch",
+            timeout_secs
+        ))??;
 
     let elapsed = t.elapsed().as_secs_f32();
     let valid = verify_out.status.success();
@@ -303,6 +320,16 @@ pub fn verify_proof(run_dir: &Path) -> anyhow::Result<Option<bool>> {
         elapsed
     );
     Ok(Some(valid))
+}
+
+/// Read the `ZEMTIK_VERIFY_TIMEOUT_SECS` env var.
+/// Returns 120 if unset, unparseable, or 0 (floor guard — 0 would cause immediate timeout).
+pub fn read_verify_timeout() -> u64 {
+    std::env::var("ZEMTIK_VERIFY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(120)
 }
 
 /// Read the proof and verification key artifacts from `run_dir` and return them

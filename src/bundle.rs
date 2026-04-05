@@ -58,6 +58,7 @@ pub fn parse_bb_version(raw: &str) -> Option<(u32, u32, u32)> {
 ///   public_inputs            — raw binary public inputs (for `bb verify -i`)
 ///   public_inputs_readable.json — human-readable labeled public inputs
 ///   circuit_hash.txt         — SHA-256 of the circuit ACIR JSON
+///   manifest.json            — sidecar SHA-256 for tamper detection (v0.5.1+)
 ///   request_meta.json        — bundle metadata
 pub fn generate_bundle(
     params: &QueryParams,
@@ -66,6 +67,7 @@ pub fn generate_bundle(
     sig: &SignatureData,
     request_hash: Option<&str>,
     prompt_hash: Option<&str>,
+    outgoing_prompt_hash: Option<&str>,
     run_dir: &Path,
     circuit_dir: &Path,
     receipts_dir: &Path,
@@ -106,16 +108,32 @@ pub fn generate_bundle(
     let public_inputs_readable_bytes =
         serde_json::to_vec_pretty(&public_inputs_readable).context("serialize public_inputs_readable")?;
 
+    // Compute SHA-256 of sidecar bytes for manifest integrity
+    let sidecar_hash = format!("sha256:{}", hex::encode(Sha256::digest(&public_inputs_readable_bytes)));
+
+    // Build manifest.json — makes the sidecar tamper-evident
+    let manifest = serde_json::json!({
+        "zemtik_version": "0.5.1",
+        "bundle_version": 2,
+        "created_at": timestamp,
+        "sidecar_hash": sidecar_hash,
+        "algorithm": "sha256"
+    });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).context("serialize manifest")?;
+
     // Build request_meta.json
     let request_meta = serde_json::json!({
         "bundle_id": bundle_id,
-        "bundle_version": 1,
+        "bundle_version": 2,
         "request_hash": request_hash.unwrap_or(""),
         "prompt_hash": prompt_hash.unwrap_or(""),
         "timestamp_utc": timestamp,
         "bb_version": bb_version,
         "proof_status": proof_status,
         "raw_rows_sent_to_llm": 0,
+        // Rust-layer commitment to what was sent to the LLM.
+        // NOTE: Not a ZK public input — circuit-level commitment deferred to Sprint 3.
+        "outgoing_prompt_hash": outgoing_prompt_hash.unwrap_or(""),
         "query_params": {
             "client_id": params.client_id,
             "target_category_hash": params.target_category_hash,
@@ -163,6 +181,9 @@ pub fn generate_bundle(
 
         zip.start_file("circuit_hash.txt", opts).context("zip start circuit_hash.txt")?;
         std::io::Write::write_all(&mut zip, circuit_hash.as_bytes()).context("zip write circuit_hash.txt")?;
+
+        zip.start_file("manifest.json", opts).context("zip start manifest.json")?;
+        std::io::Write::write_all(&mut zip, &manifest_bytes).context("zip write manifest.json")?;
 
         zip.start_file("request_meta.json", opts).context("zip start request_meta.json")?;
         std::io::Write::write_all(&mut zip, &request_meta_bytes).context("zip write request_meta.json")?;

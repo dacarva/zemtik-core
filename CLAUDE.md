@@ -99,7 +99,7 @@ POST /v1/chat/completions (user prompt)
 | `bundle.rs` | ZIP bundle creation for portable proofs |
 | `openai.rs` | OpenAI Chat Completions API client |
 | `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json` |
-| `receipts.rs` | SQLite receipts ledger (CRUD + v2 migration: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
+| `receipts.rs` | SQLite receipts ledger (CRUD + v3 migration: adds `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |
@@ -114,7 +114,7 @@ Layered resolution order (later overrides earlier):
 
 1. Hardcoded defaults (`~/.zemtik/` subdirs: `circuit/`, `runs/`, `keys/`, `receipts/`, `receipts.db`, `zemtik.db`)
 2. YAML file (`~/.zemtik/config.yaml`)
-3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`)
+3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120))
 4. CLI flags (`--port`, `--circuit-dir`)
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end runs.
@@ -134,7 +134,7 @@ GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin inten
 - `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json`. Tables must include `description` and `example_prompts` fields for the embedding backend.
 - FastLane always uses the in-memory seeded SQLite ledger (Supabase FastLane connector deferred to v2).
 - The ZK slow lane supports any table key via Poseidon BN254 hashing (Sprint 2). No code change needed — just add the table to `schema_config.json` with `"sensitivity": "critical"`.
-- `bb verify` subprocess has no timeout in proxy mode (potential deadlock risk).
+- `bb verify` has a configurable timeout (`ZEMTIK_VERIFY_TIMEOUT_SECS`, default 120s); returns HTTP 504 on expiry. Known gap: the `bb` child process is abandoned (not killed) on timeout — see `TODOS.md` "Kill abandoned bb on timeout".
 - `--no-verify` hook bypass and force-push to main are never acceptable.
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).
 - EmbeddingBackend downloads BGE-small-en model (~130MB) on first proxy start to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip. First start can take 30–120s.
