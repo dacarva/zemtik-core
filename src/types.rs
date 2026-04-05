@@ -8,6 +8,9 @@ pub struct Transaction {
     pub client_id: i64,
     pub amount: u64,
     pub category: u64,
+    /// Schema-config table key (e.g. "aws_spend"). Used by poseidon_of_string
+    /// at the ZK boundary. Stored as-is from DB; category: u64 stays for DB INSERTs.
+    pub category_name: String,
     pub timestamp: u64,
 }
 
@@ -15,8 +18,10 @@ pub struct Transaction {
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryParams {
     pub client_id: i64,
-    pub target_category: u64,
-    /// Category name for display (e.g. "AWS")
+    /// Poseidon BN254 hash of the table name, as decimal string.
+    /// Pre-serialized once at the proxy call site.
+    pub target_category_hash: String,
+    /// Human-readable category name (e.g. "aws_spend") for display.
     pub category_name: String,
     pub start_time: u64,
     pub end_time: u64,
@@ -103,7 +108,10 @@ pub struct TokenUsage {
 /// The public inputs visible to anyone holding the proof.
 #[derive(Serialize)]
 pub struct ZkPublicInputs {
-    pub target_category: u64,
+    /// Poseidon BN254 hash of the queried table name, as decimal string.
+    pub target_category_hash: String,
+    /// Human-readable category name for auditors (the 77-digit hash is not user-friendly).
+    pub category_name: String,
     pub start_time: u64,
     pub end_time: u64,
     pub bank_pub_key_x: String,
@@ -155,7 +163,8 @@ impl AuditRecord {
                 proof_hex,
                 verification_key_hex: vk_hex,
                 public_inputs: ZkPublicInputs {
-                    target_category: params.target_category,
+                    target_category_hash: params.target_category_hash.clone(),
+                    category_name: params.category_name.clone(),
                     start_time: params.start_time,
                     end_time: params.end_time,
                     bank_pub_key_x: sig.pub_key_x.clone(),

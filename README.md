@@ -259,7 +259,7 @@ bb verify -p proof -k vk
 
 - **CLI pipeline query is hardcoded** — 500 transactions, client 123, `aws_spend`, Q1 2024. Proxy mode supports natural-language queries against tables defined in `schema_config.json`.
 - **FastLane uses demo data** — FastLane always reads from the in-memory seeded SQLite ledger. Supabase FastLane connector is deferred to v2.
-- **Circuit category mapping** — The ZK slow lane only supports tables with a matching entry in `schema_key_to_category_code` (`aws_spend`, `payroll`, `travel`). New tables require a new circuit variant.
+- **Circuit category mapping** — Since Sprint 2, the ZK slow lane supports any table key via Poseidon BN254 hashing. No code change is needed to add new tables — just add them to `schema_config.json` with `"sensitivity": "critical"`.
 - **Single query type** — `SUM(amount) WHERE category AND time_range`. COUNT, AVG, and multi-dimensional filters require new circuit variants.
 - **Proving infrastructure** — The current setup uses local CPU proving. For sub-second proofs at scale, GPU/FPGA hardware is required—and it must remain on-prem (remote proving exposes the private witness).
 

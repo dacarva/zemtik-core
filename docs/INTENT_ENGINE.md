@@ -92,7 +92,7 @@ Both backends use the same deterministic time parser. It extracts a `(start_unix
 
 If the prompt contains a time-like word that does not match any pattern, the parser returns `TimeRangeAmbiguous`. This routes the request to ZK SlowLane, not HTTP 400.
 
-Expressions that trigger `TimeRangeAmbiguous` include: `recently`, `previously`, `last year`, `next year`, `prior quarter`, `current year`, `earlier`, `ago`. Note that `last year` is explicitly treated as ambiguous — use `YYYY` (e.g., `2024`) for a full prior calendar year instead.
+Expressions that trigger `TimeRangeAmbiguous` include: `recently`, `previously`, `next year`, `current year`, `earlier`, `ago`, `before the acquisition`, `in the old fiscal year`. Relative expressions with clear semantics — `last year`, `prior year`, `last quarter`, `prior quarter`, `last month`, `prior month` — are **recognized** patterns and do not trigger `TimeRangeAmbiguous`.
 
 A `TimeRangeAmbiguous` result causes conservative routing to the ZK SlowLane regardless of the confidence score or table sensitivity. This is intentional: an ambiguous time range might query data outside the intended window, and the ZK proof circuit needs precise bounds.
 

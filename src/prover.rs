@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use uuid::Uuid;
 
-use crate::db::BATCH_SIZE;
+use crate::db::{fr_to_decimal, poseidon_of_string, BATCH_SIZE};
 use crate::types::{QueryParams, SignatureData, Transaction};
 
 /// Serialize the batched circuit inputs to `circuit_dir/Prover.toml`.
@@ -21,7 +21,7 @@ pub fn generate_batched_prover_toml(
     let capacity = batches.len() * BATCH_SIZE * 200 + batches.len() * 100 + 512;
     let mut toml = String::with_capacity(capacity);
 
-    toml.push_str(&format!("target_category = \"{}\"\n", params.target_category));
+    toml.push_str(&format!("target_category_hash = \"{}\"\n", params.target_category_hash));
     toml.push_str(&format!("start_time = \"{}\"\n", params.start_time));
     toml.push_str(&format!("end_time = \"{}\"\n", params.end_time));
 
@@ -38,7 +38,8 @@ pub fn generate_batched_prover_toml(
         for tx in txns {
             toml.push_str("\n[[batches.transactions]]\n");
             toml.push_str(&format!("amount = \"{}\"\n", tx.amount));
-            toml.push_str(&format!("category = \"{}\"\n", tx.category));
+            let cat_fr = poseidon_of_string(&tx.category_name)?;
+            toml.push_str(&format!("category = \"{}\"\n", fr_to_decimal(&cat_fr)));
             toml.push_str(&format!("timestamp = \"{}\"\n", tx.timestamp));
         }
     }
@@ -90,7 +91,58 @@ pub fn validate_circuit_dir(circuit_dir: &Path) -> anyhow::Result<()> {
         circuit_dir.parent().unwrap_or(circuit_dir).display()
     );
 
+    // If a compiled circuit artifact exists, validate that its ABI matches what this
+    // binary expects. A mismatch means the installed circuit is from a different version
+    // (e.g. a stale main-branch artifact). Catching this at startup prevents a cryptic
+    // mid-pipeline nargo error like "Expected argument X, but none was found".
+    let circuit_json = circuit_dir.join("target/zemtik_circuit.json");
+    if circuit_json.exists() {
+        validate_circuit_abi(&circuit_json).with_context(|| {
+            format!(
+                "Compiled circuit at '{}' is incompatible with this binary.\n\
+                 Re-run install.sh from the repo root to update the installed circuit:\n\
+                 ./install.sh",
+                circuit_json.display()
+            )
+        })?;
+    }
+
     Ok(())
+}
+
+/// Read the compiled circuit's ABI and verify the first public parameter is
+/// `target_category_hash`. This guards against stale compiled artifacts from a
+/// different branch (e.g. a v0.4.x main-branch artifact that uses `target_category`
+/// instead of the sprint2 Poseidon-hashed form).
+fn validate_circuit_abi(circuit_json: &Path) -> anyhow::Result<()> {
+    const EXPECTED_FIRST_PARAM: &str = "target_category_hash";
+
+    let bytes = std::fs::read(circuit_json)
+        .with_context(|| format!("read circuit JSON from {}", circuit_json.display()))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("parse circuit JSON")?;
+
+    let first_param = json
+        .get("abi")
+        .and_then(|a| a.get("parameters"))
+        .and_then(|p| p.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str());
+
+    match first_param {
+        Some(name) if name == EXPECTED_FIRST_PARAM => Ok(()),
+        Some(name) => anyhow::bail!(
+            "circuit ABI mismatch: compiled artifact has '{}' as first parameter, \
+             but this binary expects '{}'",
+            name,
+            EXPECTED_FIRST_PARAM
+        ),
+        None => anyhow::bail!(
+            "circuit ABI missing 'abi.parameters' — artifact may be corrupt or from an \
+             incompatible Noir version"
+        ),
+    }
 }
 
 /// Serialize a single batch of circuit inputs to `circuit_dir/Prover.toml`.

@@ -130,7 +130,7 @@ The routing decision and confidence score are included in every response's `evid
 | No table identified in prompt | 400 | `"no table identified in prompt"` |
 | No messages in request body | 400 | `"no messages in request body"` |
 | Empty prompt | 400 | `"empty prompt"` |
-| Table matched but not in circuit map | 500 | `"table not mapped to circuit category"` |
+| Table key is empty, non-ASCII, or >93 bytes | 500 | `"cannot hash table key '...' (key must be ≤93 bytes after lowercasing)"` |
 | `bb verify` fails | 500 | `"proof verification failed"` |
 
 ---
@@ -139,7 +139,7 @@ The routing decision and confidence score are included in every response's `evid
 
 **What happens if my table isn't listed in `schema_config.json`?**
 
-The query is routed to ZK SlowLane as a fail-secure fallback. The ZK slow lane will fail if the table key also has no entry in the circuit category map. Add the table to `schema_config.json` to ensure correct routing.
+The query is routed to ZK SlowLane as a fail-secure fallback. Any table key that is valid ASCII and ≤93 bytes can be processed by the ZK slow lane — the circuit uses Poseidon BN254 hashing of the table name, so no hardcoded category mapping is needed. Add the table to `schema_config.json` to ensure correct routing and sensitivity classification.
 
 **What if no table is identified?**
 
