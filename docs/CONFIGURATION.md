@@ -45,6 +45,12 @@ You can mix layers freely. Most deployments use only `.env` + `schema_config.jso
 | `ZEMTIK_INTENT_BACKEND` | `embed` | `embed`, `regex` | Intent extraction backend. `embed` uses BGE-small-en ONNX for semantic matching. `regex` uses keyword substring matching. Case-insensitive. |
 | `ZEMTIK_INTENT_THRESHOLD` | `0.65` | `0.0`–`1.0` | Cosine similarity threshold for the embedding backend. Prompts below this confidence score are routed to ZK SlowLane. |
 
+### ZK pipeline
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_VERIFY_TIMEOUT_SECS` | `120` | positive integer | Seconds the proxy waits for `bb verify` before returning HTTP 504. Note: the `bb` child process is abandoned (not killed) on timeout — see `TODOS.md`. Only configurable via env var; the YAML knob is not yet wired in v0.5.x. |
+
 ### Runtime paths
 
 Zemtik uses `~/.zemtik/` as its state directory. These variables override individual subdirectories:
@@ -177,6 +183,7 @@ Every proxy response includes an `evidence` object at the top level of the Chat 
 | `row_count` | number | Number of transactions processed |
 | `receipt_id` | string | UUID of the receipt row in `receipts.db` |
 | `zemtik_confidence` | float or null | Intent extraction confidence score (0.0–1.0). `null` when the regex backend was used (confidence not applicable). |
+| `outgoing_prompt_hash` | string or null | SHA-256 of the JSON payload sent to the LLM (Rust-layer commitment). `null` when `fully_verifiable=false` (no proof artifact). Visible in `zemtik verify` output and `zemtik list`. |
 | `data_exfiltrated` | integer | Always `0`. Explicit machine-readable assertion. |
 | `timestamp` | string | ISO 8601 timestamp of the request |
 
@@ -188,15 +195,16 @@ Receipts are stored in `~/.zemtik/receipts.db` (SQLite). The table undergoes aut
 
 ```sql
 CREATE TABLE receipts (
-    id               TEXT PRIMARY KEY,       -- UUID v4
-    request_hash     TEXT NOT NULL,          -- SHA-256 of the raw request body
-    prompt_hash      TEXT NOT NULL,          -- SHA-256 of the extracted user prompt
-    engine_used      TEXT NOT NULL,          -- "FastLane" or "ZkSlowLane"
-    proof_hash       TEXT,                   -- NULL for FastLane
-    attestation_hash TEXT,                   -- NULL for ZkSlowLane
-    data_exfiltrated INTEGER NOT NULL DEFAULT 0,
-    intent_confidence REAL,                  -- NULL for regex backend
-    created_at       TEXT NOT NULL           -- ISO 8601
+    id                   TEXT PRIMARY KEY,       -- UUID v4
+    request_hash         TEXT NOT NULL,          -- SHA-256 of the raw request body
+    prompt_hash          TEXT NOT NULL,          -- SHA-256 of the extracted user prompt
+    engine_used          TEXT NOT NULL,          -- "FastLane" or "ZkSlowLane"
+    proof_hash           TEXT,                   -- NULL for FastLane
+    attestation_hash     TEXT,                   -- NULL for ZkSlowLane
+    data_exfiltrated     INTEGER NOT NULL DEFAULT 0,
+    intent_confidence    REAL,                   -- NULL for regex backend
+    outgoing_prompt_hash TEXT,                   -- NULL when fully_verifiable=false (added v3)
+    created_at           TEXT NOT NULL           -- ISO 8601
 );
 ```
 

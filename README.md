@@ -188,7 +188,7 @@ zemtik-core/
 │   ├── prover.rs         # nargo / bb subprocess pipeline
 │   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs          # Audit record writer
-│   ├── receipts.rs       # Receipts ledger (CRUD + v2 migration: engine_used, intent_confidence)
+│   ├── receipts.rs       # Receipts ledger (CRUD + v3 migration: outgoing_prompt_hash; v2: engine_used, intent_confidence)
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig loading
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)

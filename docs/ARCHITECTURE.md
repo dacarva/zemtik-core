@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.4.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0.
+**Scope note:** This document is aligned with **v0.5.2** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout.
 
 ---
 
@@ -128,7 +128,7 @@ POST /v1/chat/completions (user prompt)
 | `verify.rs` / `bundle.rs` | Bundle ZIP + offline verification |
 | `openai.rs` | Chat Completions client |
 | `config.rs` | Layered config + schema load |
-| `receipts.rs` | SQLite receipts (v2: `intent_confidence`) |
+| `receipts.rs` | SQLite receipts (v3: adds `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key at `~/.zemtik/keys/bank_sk` (0600) |
 | `types.rs` | `IntentResult`, `Route`, `EngineResult`, `EvidencePack`, … |
 | `audit.rs` | JSON audit records under `audit/` |
@@ -209,15 +209,15 @@ Per batch: reconstruct 4-level Poseidon tree → `eddsa_verify::<PoseidonHasher>
 
 ### 9. Receipts, Bundles, and Verify (`receipts.rs`, `bundle.rs`, `verify.rs`)
 
-ZK slow lane writes portable ZIP bundles under `~/.zemtik/receipts/` and rows in `receipts.db` (engine used, proof hash, prompt/request hashes, `intent_confidence` in v2). **`cargo run -- verify`** replays `bb verify` on a bundle. The HTTP proxy also exposes a receipt viewer route for bundle ids (see `proxy.rs`).
+ZK slow lane writes portable ZIP bundles under `~/.zemtik/receipts/` and rows in `receipts.db` (engine used, proof hash, prompt/request hashes, `intent_confidence` in v2, `outgoing_prompt_hash` in v3). Bundles at `bundle_version >= 2` include a `manifest.json` sidecar (SHA-256 of `public_inputs_readable.json`); `zemtik verify` enforces manifest presence for these bundles. **`cargo run -- verify`** replays `bb verify` on a bundle. The HTTP proxy also exposes a receipt viewer route for bundle ids (see `proxy.rs`).
 
 ### 10. The OpenAI Client (`src/openai.rs` and proxy injection)
 
 **CLI pipeline** sends a JSON payload including `period_start` / `period_end` and `data_provenance: "ZEMTIK_VALID_ZK_PROOF"` (see `openai.rs`).
 
-**Proxy FastLane** replaces the last user message with a summary that includes an **`evidence`** object: engine name, `attestation_hash`, `schema_config_hash`, aggregate, `row_count`, `receipt_id`, `zemtik_confidence`, and `data_exfiltrated: 0`.
+**Proxy FastLane** replaces the last user message with a summary that includes an **`evidence`** object: engine name, `attestation_hash`, `schema_config_hash`, aggregate, `row_count`, `receipt_id`, `zemtik_confidence`, `outgoing_prompt_hash`, and `data_exfiltrated: 0`.
 
-**Proxy ZK slow lane** injects the same compact summary into the last user message for the model, and adds the same top-level **`evidence`** object on the HTTP response as FastLane (ZK `proof_hash`, `engine_used`, `intent`, etc.). Receipt metadata still captures `proof_hash` and confidence server-side.
+**Proxy ZK slow lane** injects the same compact summary into the last user message for the model, and adds the same top-level **`evidence`** object on the HTTP response as FastLane (ZK `proof_hash`, `engine_used`, `intent`, `outgoing_prompt_hash`, etc.). `outgoing_prompt_hash` is `None` when `fully_verifiable=false` (no proof artifact exists). Receipt metadata captures `proof_hash`, confidence, and `outgoing_prompt_hash` server-side.
 
 In all cases, individual transaction amounts, timestamps, and client identifiers stay out of the outbound LLM payload.
 
@@ -301,7 +301,7 @@ FastLane provides cryptographic attestation over the aggregate path, not a succi
 
 5. **Public inputs sidecar:** Human-readable metadata in bundles is not separately committed inside the circuit (documented in verifier UX); rely on `bb verify` for proof / VK / binary public inputs.
 
-6. **`bb verify` timeout:** Proxy does not bound `bb verify` wall time; a hung verifier can block the ZK pipeline (`pipeline_lock`).
+6. **`bb verify` process cleanup:** `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120s) bounds how long the proxy waits for `bb verify`. A timeout returns HTTP 504 to the client, but the `bb` child process is abandoned rather than killed — orphaned processes can accumulate under load. See `TODOS.md` "Kill abandoned bb on timeout" for the fix. (Resolved: unbounded wait prior to v0.5.2.)
 
 7. **Universal category hash (Sprint 2):** The circuit uses a Poseidon BN254 hash of the table key string instead of a hardcoded integer code. Any table defined in `schema_config.json` can run the ZK slow lane without a code change. The hash is computed by `poseidon_of_string()` in `db.rs` and verified cross-language against Noir `bn254::hash_3`.
 
