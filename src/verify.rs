@@ -241,9 +241,14 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
 #[cfg(test)]
 mod timeout_tests {
     use crate::prover::read_verify_timeout;
+    use std::sync::Mutex;
+
+    // Serialize all env-var tests — parallel mutation of the same var is racy.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_verify_timeout_env_parsing_default() {
+        let _g = ENV_LOCK.lock().unwrap();
         // ZEMTIK_VERIFY_TIMEOUT_SECS unset → 120
         std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
         assert_eq!(read_verify_timeout(), 120);
@@ -251,6 +256,7 @@ mod timeout_tests {
 
     #[test]
     fn test_verify_timeout_env_parsing_custom() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "60");
         assert_eq!(read_verify_timeout(), 60);
         std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
@@ -258,6 +264,7 @@ mod timeout_tests {
 
     #[test]
     fn test_verify_timeout_env_parsing_zero() {
+        let _g = ENV_LOCK.lock().unwrap();
         // 0 must NOT cause immediate timeout — treated as unset
         std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "0");
         assert_eq!(read_verify_timeout(), 120);
@@ -266,6 +273,7 @@ mod timeout_tests {
 
     #[test]
     fn test_verify_timeout_env_parsing_invalid() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "notanumber");
         assert_eq!(read_verify_timeout(), 120);
         std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
