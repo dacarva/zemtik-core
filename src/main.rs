@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 1: Initialize the ledger and fetch transactions
     // -----------------------------------------------------------------------
+    let db_start = Instant::now();
     let backend = db::init_db().await?;
     print!("[DB] Initializing {} ledger... ", backend.label());
     let txns = db::query_transactions(&backend, 123).await?;
@@ -88,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
         txns.len()
     );
     let batch_count = txns.len() / db::BATCH_SIZE;
-    println!("OK ({} transactions for client 123)", txns.len());
+    let db_secs = db_start.elapsed().as_secs_f32();
+    println!("OK ({} transactions for client 123) ({:.2}s)", txns.len(), db_secs);
 
     // Query: client 123's AWS spend in Q1 2024
     let category_hash_fr = db::poseidon_of_string("aws_spend")
@@ -109,13 +111,15 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 3: Bank KMS signs each batch independently with BabyJubJub EdDSA
     // -----------------------------------------------------------------------
+    let sign_start = Instant::now();
     print!(
         "[KMS] Signing {} batches of {} transactions with BabyJubJub EdDSA... ",
         batch_count,
         db::BATCH_SIZE
     );
     let batches = db::sign_transaction_batches(&txns, &bank_key)?;
-    println!("OK");
+    let sign_secs = sign_start.elapsed().as_secs_f32();
+    println!("OK ({:.2}s)", sign_secs);
     let first_sig = &batches[0].1;
     println!(
         "      pub_key_x = {}...{}",
@@ -126,9 +130,11 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 4: Generate the Prover.toml input file for the Noir circuit
     // -----------------------------------------------------------------------
+    let toml_start = Instant::now();
     print!("[NOIR] Writing Prover.toml ({} batches)... ", batch_count);
     prover::generate_batched_prover_toml(&batches, &params, &app_config.circuit_dir)?;
-    println!("OK");
+    let toml_secs = toml_start.elapsed().as_secs_f32();
+    println!("OK ({:.2}s)", toml_secs);
 
     // -----------------------------------------------------------------------
     // Step 5: Compile the Noir circuit (cached after first run)
@@ -191,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // Step 8b: Generate proof bundle
     // -----------------------------------------------------------------------
+    let bundle_start = Instant::now();
     let bundle_result = if fully_verifiable {
         println!("[BUNDLE] Generating proof bundle...");
         match bundle::generate_bundle(
@@ -239,9 +246,12 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let bundle_secs = bundle_start.elapsed().as_secs_f32();
+
     // -----------------------------------------------------------------------
     // Step 9: Send ONLY the verified aggregate to OpenAI
     // -----------------------------------------------------------------------
+    let ai_start = Instant::now();
     println!("\n[AI] Querying gpt-5.4-nano with ZK-verified payload...");
     println!(
         "     Payload: {{ category: \"{}\", total_spend_usd: {}, provenance: \"ZEMTIK_VALID_ZK_PROOF\" }}",
@@ -257,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
         None,
     )
     .await?;
+    let ai_secs = ai_start.elapsed().as_secs_f32();
 
     // -----------------------------------------------------------------------
     // Step 10: Write the audit record
@@ -298,6 +309,18 @@ async fn main() -> anyhow::Result<()> {
     println!("  Aggregate: ${}", aggregate);
     println!("  ZK Proof : {}", proof_status);
     println!("  Raw rows sent to OpenAI: 0");
+
+    let accounted = db_secs + sign_secs + toml_secs + circuit_execution_secs + bundle_secs + ai_secs;
+    println!("\n  ── Timing breakdown ──────────────────────────────");
+    println!("  DB init + query  : {:7.2}s", db_secs);
+    println!("  EdDSA signing    : {:7.2}s  (Poseidon commitment x10 batches + BabyJubJub sign)", sign_secs);
+    println!("  Prover.toml      : {:7.2}s  (500 tx category hashes → Field encoding)", toml_secs);
+    println!("  nargo execute    : {:7.2}s  (circuit witness + EdDSA constraint check)", circuit_execution_secs);
+    println!("  bb prove+verify  : {:7.2}s  (UltraHonk proof generation + local verify)", elapsed.as_secs_f32() - accounted);
+    println!("  Bundle + receipt : {:7.2}s", bundle_secs);
+    println!("  OpenAI query     : {:7.2}s", ai_secs);
+    println!("  ─────────────────────────");
+    println!("  Total            : {:7.2}s", elapsed.as_secs_f32());
 
     if let Some(ref br) = bundle_result {
         println!("  Bundle   : {}", br.bundle_path.display());
