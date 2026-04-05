@@ -12,7 +12,7 @@ fn fast_lane_zero_result_has_signed_attestation() {
     let key = load_or_generate_key(dir.path()).unwrap();
 
     // "nonexistent_category" has no rows in the ledger DB.
-    let result = run_fast_lane(&conn, &key, "nonexistent_category", 1704067200, 1711929599);
+    let result = run_fast_lane(&conn, &key, 123, "nonexistent_category", 1704067200, 1711929599);
     match result {
         EngineResult::Ok(fl) => {
             assert_eq!(fl.row_count, 0, "expected zero rows");
@@ -42,6 +42,7 @@ fn fast_lane_sign_never_exceeds_field() {
         let result = run_fast_lane(
             &conn,
             &key,
+            123,
             "aws_spend",
             1704067200,
             1711929599,
@@ -65,8 +66,8 @@ fn fast_lane_attestation_differs_by_category() {
     let dir = tempfile::tempdir().unwrap();
     let key = load_or_generate_key(dir.path()).unwrap();
 
-    let r1 = run_fast_lane(&conn, &key, "aws_spend", 1704067200, 1711929599);
-    let r2 = run_fast_lane(&conn, &key, "payroll",   1704067200, 1711929599);
+    let r1 = run_fast_lane(&conn, &key, 123, "aws_spend", 1704067200, 1711929599);
+    let r2 = run_fast_lane(&conn, &key, 123, "payroll",   1704067200, 1711929599);
 
     match (r1, r2) {
         (EngineResult::Ok(fl1), EngineResult::Ok(fl2)) => {

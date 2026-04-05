@@ -233,14 +233,15 @@ fn init_sqlite() -> anyhow::Result<DbBackend> {
 /// Returns `Err(SumOverflow)` if the SQLite aggregate is negative (overflow guard).
 pub fn sum_by_category(
     conn: &Connection,
+    client_id: i64,
     category_name: &str,
     start_unix_secs: i64,
     end_unix_secs: i64,
 ) -> anyhow::Result<(i64, usize)> {
     let (sum, count): (Option<i64>, i64) = conn.query_row(
         "SELECT SUM(amount), COUNT(*) FROM transactions
-         WHERE category_name = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
-        rusqlite::params![category_name, start_unix_secs, end_unix_secs],
+         WHERE category_name = ?1 AND timestamp >= ?2 AND timestamp <= ?3 AND client_id = ?4",
+        rusqlite::params![category_name, start_unix_secs, end_unix_secs, client_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
@@ -249,6 +250,83 @@ pub fn sum_by_category(
         anyhow::bail!("sum_by_category: aggregate overflow detected (negative sum)");
     }
     Ok((total, count as usize))
+}
+
+/// Aggregate amounts for a category from a Supabase PostgREST endpoint.
+///
+/// Uses a pagination loop (1000 rows per page) to handle any table size.
+/// The `amount` column is read as `i64` (integer minor units — no f64 to avoid
+/// precision loss on large aggregates). Null amounts are skipped with a warning.
+/// Returns `(sum, row_count)`.
+pub async fn query_sum_by_category(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    table: &str,
+    category_name: &str,
+    client_id: i64,
+    start_unix_secs: i64,
+    end_unix_secs: i64,
+) -> anyhow::Result<(i64, usize)> {
+    let base = url.trim_end_matches('/');
+    let mut total: i64 = 0;
+    let mut row_count: usize = 0;
+    let page_size: usize = 1000;
+    let mut offset: usize = 0;
+
+    loop {
+        let end_idx = offset + page_size - 1;
+        let endpoint = format!(
+            "{}/rest/v1/{}?category_name=eq.{}&client_id=eq.{}&timestamp=gte.{}&timestamp=lte.{}&select=amount",
+            base, table, category_name, client_id, start_unix_secs, end_unix_secs
+        );
+
+        let resp = client
+            .get(&endpoint)
+            .header("apikey", key)
+            .header("Authorization", format!("Bearer {}", key))
+            .header("Range", format!("{}-{}", offset, end_idx))
+            .send()
+            .await
+            .context("PostgREST query_sum_by_category request")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!(
+                "PostgREST returned {} for table '{}' query",
+                status,
+                table
+            );
+        }
+
+        let rows: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .context("parse PostgREST response JSON")?;
+
+        let page_len = rows.len();
+        for row in &rows {
+            let amount = row
+                .get("amount")
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+                })
+                .unwrap_or_else(|| {
+                    eprintln!("[WARN] query_sum_by_category: skipping row with null/unparseable amount");
+                    0
+                });
+            total = total.checked_add(amount).unwrap_or(total);
+        }
+        row_count += page_len;
+
+        if page_len < page_size {
+            break; // last page
+        }
+        offset += page_size;
+    }
+
+    Ok((total, row_count))
 }
 
 fn seed_sqlite(conn: &Connection) -> anyhow::Result<()> {
@@ -388,27 +466,31 @@ async fn init_supabase() -> anyhow::Result<DbBackend> {
     Ok(backend)
 }
 
-/// `true` when `SUPABASE_AUTO_SEED` is unset or any truthy value; `false` for
-/// `0`, `false`, `no`, `off` (case-insensitive).
+/// `true` only when `SUPABASE_AUTO_SEED` is explicitly set to a truthy value
+/// (`1`, `true`, `yes`, `on`). Defaults to `false` when unset — prevents demo
+/// rows from being inserted into a client's production database on first run.
+/// Local dev: set `SUPABASE_AUTO_SEED=1`.
 fn supabase_auto_seed_enabled() -> bool {
     match std::env::var("SUPABASE_AUTO_SEED") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "0" | "false" | "no" | "off")
-        }
-        Err(_) => true,
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 
-/// `true` when `SUPABASE_AUTO_CREATE_TABLE` is unset or any truthy value;
-/// `false` for `0`, `false`, `no`, `off` (case-insensitive).
+/// `true` only when `SUPABASE_AUTO_CREATE_TABLE` is explicitly set to a truthy
+/// value (`1`, `true`, `yes`, `on`). Defaults to `false` when unset — prevents
+/// DDL from running against a client's production database on first run.
+/// Local dev: set `SUPABASE_AUTO_CREATE_TABLE=1`.
 fn supabase_auto_create_table_enabled() -> bool {
     match std::env::var("SUPABASE_AUTO_CREATE_TABLE") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "0" | "false" | "no" | "off")
-        }
-        Err(_) => true,
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 
@@ -660,6 +742,155 @@ pub fn sign_transaction_batches(
     }
 
     Ok(batches)
+}
+
+#[cfg(test)]
+mod supabase_query_tests {
+    use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_rows(n: usize, amount: i64) -> serde_json::Value {
+        let rows: Vec<_> = (0..n).map(|_| serde_json::json!({"amount": amount})).collect();
+        serde_json::Value::Array(rows)
+    }
+
+    #[tokio::test]
+    async fn single_page_sum_correct() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_rows(3, 100)))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (sum, count) = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await.unwrap();
+        assert_eq!(sum, 300);
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn string_amounts_parsed() {
+        let server = MockServer::start().await;
+        let rows = serde_json::json!([{"amount": "12345"}]);
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rows))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (sum, count) = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await.unwrap();
+        assert_eq!(sum, 12345);
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn null_amount_skipped() {
+        let server = MockServer::start().await;
+        let rows = serde_json::json!([{"amount": null}]);
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rows))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (sum, count) = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await.unwrap();
+        assert_eq!(sum, 0);
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn empty_result_returns_zero() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (sum, count) = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await.unwrap();
+        assert_eq!(sum, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn pagination_exactly_1000_boundary() {
+        let server = MockServer::start().await;
+        // Page 1: exactly 1000 rows → must fetch page 2
+        // Page 2: 0 rows → terminate
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .and(wiremock::matchers::header("range", "0-999"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_rows(1000, 1)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .and(wiremock::matchers::header("range", "1000-1999"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (sum, count) = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await.unwrap();
+        assert_eq!(sum, 1000);
+        assert_eq!(count, 1000);
+    }
+
+    #[tokio::test]
+    async fn pagination_two_pages() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .and(wiremock::matchers::header("range", "0-999"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_rows(1000, 1)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .and(wiremock::matchers::header("range", "1000-1999"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_rows(50, 1)))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (sum, count) = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await.unwrap();
+        assert_eq!(sum, 1050);
+        assert_eq!(count, 1050);
+    }
+
+    #[tokio::test]
+    async fn client_id_filter_in_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .and(query_param("client_id", "eq.1001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 1001, 0, 9999).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn http_4xx_returns_err() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/v1/transactions"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = query_sum_by_category(&client, &server.uri(), "key", "transactions", "aws", 123, 0, 9999).await;
+        assert!(result.is_err());
+    }
 }
 
 #[cfg(test)]

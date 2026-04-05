@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
-    time::Instant,
+    process::{Child, Command, ExitStatus},
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -275,11 +275,28 @@ pub fn generate_proof(run_dir: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Poll a child process until it exits or the deadline is reached.
+/// On timeout, kills the child and reaps it to avoid zombies.
+/// Returns `Ok(ExitStatus)` on normal exit, `Err` on timeout.
+pub fn poll_child_with_timeout(child: &mut Child, timeout_secs: u64) -> anyhow::Result<ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait().context("poll child process")? {
+            Some(status) => return Ok(status),
+            None if Instant::now() >= deadline => {
+                child.kill().ok(); // ignore "already exited" errors
+                child.wait().ok(); // reap zombie — must happen before temp dir cleanup on macOS
+                anyhow::bail!("bb verify timed out after {}s — check CRS availability or bb version mismatch", timeout_secs);
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
 /// Run `bb verify` in `run_dir` to verify the proof.
 ///
 /// Timeout is controlled by `ZEMTIK_VERIFY_TIMEOUT_SECS` (default: 120).
-/// A value of 0 is treated as unset (floor guard). If the timeout fires, the
-/// bb process is abandoned (not killed) — a known limitation documented in TODOS.md.
+/// On timeout, the bb child process is killed and reaped before returning Err.
 pub fn verify_proof(run_dir: &Path) -> anyhow::Result<Option<bool>> {
     let proof_path = run_dir.join("proofs/proof/proof");
     if !proof_path.exists() {
@@ -289,31 +306,21 @@ pub fn verify_proof(run_dir: &Path) -> anyhow::Result<Option<bool>> {
     let timeout_secs = read_verify_timeout();
     let t = Instant::now();
 
-    let run_dir_owned = run_dir.to_owned();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = Command::new("bb")
-            .args([
-                "verify",
-                "-p", "proofs/proof/proof",
-                "-k", "proofs/proof/vk",
-                "-i", "proofs/proof/public_inputs",
-            ])
-            .current_dir(&run_dir_owned)
-            .output()
-            .context("spawn bb verify");
-        let _ = tx.send(result);
-    });
+    let mut child = Command::new("bb")
+        .args([
+            "verify",
+            "-p", "proofs/proof/proof",
+            "-k", "proofs/proof/vk",
+            "-i", "proofs/proof/public_inputs",
+        ])
+        .current_dir(run_dir)
+        .spawn()
+        .context("spawn bb verify")?;
 
-    let verify_out = rx
-        .recv_timeout(std::time::Duration::from_secs(timeout_secs))
-        .map_err(|_| anyhow::anyhow!(
-            "bb verify timed out after {}s — check CRS availability or bb version mismatch",
-            timeout_secs
-        ))??;
+    let status = poll_child_with_timeout(&mut child, timeout_secs)?;
 
     let elapsed = t.elapsed().as_secs_f32();
-    let valid = verify_out.status.success();
+    let valid = status.success();
     println!(
         "[NOIR] Proof verified: {} ({:.2}s)",
         if valid { "VALID" } else { "INVALID" },
@@ -348,4 +355,33 @@ pub fn read_proof_artifacts(run_dir: &Path) -> anyhow::Result<Option<(String, St
         .with_context(|| format!("read vk from {}", vk_path.display()))?;
 
     Ok(Some((hex::encode(&proof_bytes), hex::encode(&vk_bytes))))
+}
+
+#[cfg(test)]
+mod poll_child_tests {
+    use super::*;
+
+    #[test]
+    fn kill_on_timeout_kills_and_returns_err() {
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        let result = poll_child_with_timeout(&mut child, 1);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("timed out"), "expected 'timed out' in: {}", msg);
+        // Process should be reaped — try_wait returns Some (not None/zombie)
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "child should be reaped after kill+wait"
+        );
+    }
+
+    #[test]
+    fn success_path_returns_exit_status() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let status = poll_child_with_timeout(&mut child, 5).expect("should succeed");
+        assert!(status.success());
+    }
 }

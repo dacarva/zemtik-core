@@ -206,32 +206,24 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
         }
 
         // Run bb verify with configurable timeout.
-        // The bb process is abandoned (not killed) on timeout — known limitation (TODOS.md).
+        // On timeout, the bb child process is killed and reaped before returning Err.
         let timeout_secs = crate::prover::read_verify_timeout();
-        let extract_dir_clone = extract_dir.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = Command::new("bb")
-                .args([
-                    "verify",
-                    "-p", "proof.bin",
-                    "-k", "vk.bin",
-                    "-i", "public_inputs",
-                ])
-                .current_dir(&extract_dir_clone)
-                .output()
-                .context("spawn bb verify");
-            let _ = tx.send(result);
-        });
+        let mut child = Command::new("bb")
+            .args([
+                "verify",
+                "-p", "proof.bin",
+                "-k", "vk.bin",
+                "-i", "public_inputs",
+            ])
+            .current_dir(&extract_dir)
+            .spawn()
+            .context("spawn bb verify")?;
 
-        let verify_out = rx
-            .recv_timeout(std::time::Duration::from_secs(timeout_secs))
-            .map_err(|_| anyhow::anyhow!(
-                "bb verify timed out after {}s — check CRS availability or bb version mismatch",
-                timeout_secs
-            ))??;
+        let status = crate::prover::poll_child_with_timeout(&mut child, timeout_secs)?;
+        // Temp dir cleanup happens after this block (in the outer always-run cleanup)
+        // which ensures child is already reaped before the directory is removed.
 
-        let valid = verify_out.status.success();
+        let valid = status.success();
 
         Ok(VerifyResult {
             valid,

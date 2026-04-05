@@ -23,25 +23,20 @@ static BN254_FIELD_ORDER: LazyLock<BigInt> = LazyLock::new(|| {
 /// Always returns `EngineResult::Ok` (even for row_count == 0) so that
 /// zero-result receipts are cryptographically bound to a specific installation key.
 /// Does NOT acquire `pipeline_lock` — FastLane is fully concurrent.
-pub fn run_fast_lane(
-    db_conn: &Connection,
+/// Sign an aggregate result and return a `FastLaneResult` with attestation.
+/// Called by both the SQLite path (via `run_fast_lane`) and the Supabase path.
+pub fn attest_fast_lane(
     signing_key: &PrivateKey,
     category_name: &str,
+    aggregate: i64,
+    row_count: usize,
     start_unix_secs: i64,
     end_unix_secs: i64,
 ) -> EngineResult {
-    // 1. Aggregate from DB
-    let (aggregate, row_count) = match sum_by_category(db_conn, category_name, start_unix_secs, end_unix_secs) {
-        Ok(v) => v,
-        Err(e) => return EngineResult::DbError(e.to_string()),
-    };
-
-    // 2. Timestamp
+    // 1. Timestamp
     let timestamp_unix = Utc::now().timestamp();
 
-    // 3. Unified attestation payload:
-    //    SHA-256(category_name || start_le || end_le || aggregate_le || row_count_u64_le || timestamp_le)
-    //    Same format for row_count == 0 and row_count > 0.
+    // 2. Unified attestation payload
     let mut h = Sha256::new();
     h.update(category_name.as_bytes());
     h.update(start_unix_secs.to_le_bytes());
@@ -51,8 +46,7 @@ pub fn run_fast_lane(
     h.update(timestamp_unix.to_le_bytes());
     let payload_bytes: [u8; 32] = h.finalize().into();
 
-    // 4. BabyJubJub sign
-    // Reduce mod BN254 field order — ~25% of raw SHA-256 hashes exceed the field order.
+    // 3. BabyJubJub sign
     let msg_raw = BigInt::from_bytes_le(num_bigint::Sign::Plus, &payload_bytes);
     let msg = msg_raw % &*BN254_FIELD_ORDER;
     let sig = match signing_key.sign(msg) {
@@ -60,11 +54,11 @@ pub fn run_fast_lane(
         Err(e) => return EngineResult::SignError(format!("{}", e)),
     };
 
-    // 5. attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
+    // 4. attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
     let sig_bytes = format!("{}{}{}", sig.r_b8.x, sig.r_b8.y, sig.s);
     let attestation_hash = hex::encode(Sha256::digest(sig_bytes.as_bytes()));
 
-    // 6. key_id = SHA-256(pub_key_x || pub_key_y)
+    // 5. key_id = SHA-256(pub_key_x || pub_key_y)
     let pub_key = signing_key.public();
     let key_material = format!("{}{}", pub_key.x, pub_key.y);
     let key_id = hex::encode(Sha256::digest(key_material.as_bytes()));
@@ -76,4 +70,19 @@ pub fn run_fast_lane(
         key_id,
         timestamp_unix,
     })
+}
+
+pub fn run_fast_lane(
+    db_conn: &Connection,
+    signing_key: &PrivateKey,
+    client_id: i64,
+    category_name: &str,
+    start_unix_secs: i64,
+    end_unix_secs: i64,
+) -> EngineResult {
+    let (aggregate, row_count) = match sum_by_category(db_conn, client_id, category_name, start_unix_secs, end_unix_secs) {
+        Ok(v) => v,
+        Err(e) => return EngineResult::DbError(e.to_string()),
+    };
+    attest_fast_lane(signing_key, category_name, aggregate, row_count, start_unix_secs, end_unix_secs)
 }

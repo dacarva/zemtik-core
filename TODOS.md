@@ -228,3 +228,39 @@
 - **Effort:** S (human: ~1h / CC: ~15min)
 - **Priority:** P3 — not blocking Sprint 2, relevant before second enterprise client onboards
 - **Depends on:** feat/zk-universalization (Sprint 2) merged.
+
+---
+
+## Commercial Readiness Sprint TODOs (added 2026-04-05, plan-ceo-review)
+
+### Kill bb prove (generate_proof) on timeout (P3)
+- **What:** Add timeout + kill to `prover.rs::generate_proof` — the `bb prove` subprocess has no timeout guard. If `bb prove` hangs, the process runs indefinitely and is never killed.
+- **Why:** `generate_proof` (`prover.rs`) uses `std::process::Command::output()` with no timeout — the same pattern that `verify_proof` had before the Commercial Readiness Sprint fix. `bb prove` is typically slower than `bb verify` and more likely to hang on machine sleep/CRS download stall. Flagged by outside voice (plan-ceo-review, 2026-04-05).
+- **How to apply:** Same pattern as the Commit 5 fix: `Command::spawn()` + polling loop with `child.try_wait()` + `child.kill().ok()` + `child.wait().ok()` on timeout. Add `ZEMTIK_PROVE_TIMEOUT_SECS` env var (or reuse `ZEMTIK_VERIFY_TIMEOUT_SECS`; they can share the same default).
+- **Effort:** S (human: ~1h / CC: ~15min)
+- **Priority:** P3 — not a pilot blocker; current timeout mitigates the proxy deadlock for verify. Implement in Pilot Week 1 hardening.
+- **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+
+### Proxy auth middleware: require explicit caller authentication (P2, before second pilot)
+- **What:** Add authentication middleware so only authorized callers can use the proxy when it is bound to a non-localhost address. Options: `ZEMTIK_API_KEY` header check, mTLS, or IP allowlist.
+- **Why:** When `ZEMTIK_BIND_ADDR=0.0.0.0`, the proxy falls back to the server's `OPENAI_API_KEY` env var if no `Authorization` header is provided. Any machine on the LAN can use the server's OpenAI key without authentication. Found by Codex outside voice (plan-eng-review, 2026-04-05).
+- **How to apply:** Add an Axum middleware layer that checks a `ZEMTIK_PROXY_API_KEY` header on all routes when `bind_addr` is non-localhost. Return `401 Unauthorized` if the key is missing or invalid. For localhost-only deployments, skip the check.
+- **Effort:** S (human: ~2h / CC: ~15min)
+- **Priority:** P2 — required before installing on any untrusted network. For the v0.6.0 pilot, the CDO deploys on an internal LAN — document that `OPENAI_API_KEY` must NOT be set on the server (require callers to pass their own key).
+- **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+
+### table_name field in TableConfig (P3, Pilot Week 1)
+- **What:** Add `table_name: Option<String>` to `TableConfig` in `config.rs`. If set, use this as the Supabase table name in `query_sum_by_category` instead of the schema_config key.
+- **Why:** Currently, `query_sum_by_category` queries `/rest/v1/{table}` where `{table}` is the schema_config key. This means the Supabase table MUST be named identically to the schema_config key. A CDO with a table named `bank_transactions` and a schema key `aws_spend` would need to rename their table. Found by Codex outside voice (plan-eng-review, 2026-04-05).
+- **How to apply:** `TableConfig { ..., table_name: Option<String> }`. In `query_sum_by_category`, use `table_config.table_name.as_deref().unwrap_or(schema_key)` as the PostgREST table name.
+- **Effort:** XS (human: ~30min / CC: ~10min)
+- **Priority:** P3 — v0.6.0 pilots can name their Supabase table to match the schema key. Add before second client if table naming flexibility is needed.
+- **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+
+### Restore aarch64-linux-gnu and x86_64-apple-darwin CI targets (P3)
+- **What:** Re-add `aarch64-unknown-linux-gnu` and `x86_64-apple-darwin` to the `release.yml` build matrix. Currently removed because `ort-sys@2.0.0-rc.11` does not provide prebuilt ONNX Runtime for Intel Mac and its cross-compilation from x86_64 picks up aarch64 OpenSSL for the build script linker (ABI mismatch).
+- **Why:** Removed 2026-04-05 to unblock v0.6.0 release. `x86_64-linux` and `aarch64-apple-darwin` cover the CDO pilot use case. Intel Mac and aarch64-Linux ARM servers would benefit from coverage.
+- **How to apply:** Option A: migrate from `ort` to `ort-tract` backend in `fastembed` — pure Rust, no prebuilt dependencies, cross-compiles cleanly. Option B: use `cargo-cross` with Docker images for aarch64-linux-gnu. Option C: when `ort-sys` adds prebuilt support for these targets, re-add them.
+- **Effort:** M (human: ~1 day / CC: ~30min) for Option A; S for Option C.
+- **Priority:** P3 — no active CDO/accounting pilot uses Intel Mac or aarch64-Linux.
+- **Depends on:** v0.6.0 merged.

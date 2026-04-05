@@ -39,6 +39,11 @@ pub struct TableConfig {
     /// Example natural-language prompts that should match this table.
     #[serde(default)]
     pub example_prompts: Vec<String>,
+    /// Per-table client_id override. When set, takes precedence over the global
+    /// ZEMTIK_CLIENT_ID. Useful for multi-client deployments where each table
+    /// belongs to a different end client.
+    #[serde(default)]
+    pub client_id: Option<i64>,
 }
 
 /// Load a schema_config.json file. Returns `(config, sha256_hex_of_file_bytes)`.
@@ -100,6 +105,14 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
 #[serde(default)]
 pub struct AppConfig {
     pub proxy_port: u16,
+    /// Bind address for the proxy server. Default: "127.0.0.1:4000".
+    /// Env: ZEMTIK_BIND_ADDR. Backward compat: if absent, constructed from proxy_port.
+    #[serde(skip)]
+    pub bind_addr: String,
+    /// Allowed CORS origins. Default: ["http://localhost:4000"].
+    /// Env: ZEMTIK_CORS_ORIGINS (comma-separated). Use "*" for wildcard.
+    #[serde(skip)]
+    pub cors_origins: Vec<String>,
     pub openai_api_key: Option<String>,
     pub circuit_dir: PathBuf,
     pub runs_dir: PathBuf,
@@ -122,6 +135,15 @@ pub struct AppConfig {
     /// SHA-256 of schema_config.json bytes (set at load time).
     #[serde(skip)]
     pub schema_config_hash: Option<String>,
+    /// Client ID for DB filtering. Default: 123. Env: ZEMTIK_CLIENT_ID.
+    #[serde(skip)]
+    pub client_id: i64,
+    /// Supabase project URL. Env: SUPABASE_URL.
+    #[serde(skip)]
+    pub supabase_url: Option<String>,
+    /// Supabase service role key. Env: SUPABASE_SERVICE_KEY.
+    #[serde(skip)]
+    pub supabase_service_key: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -130,6 +152,8 @@ impl Default for AppConfig {
         let base = home.join(".zemtik");
         AppConfig {
             proxy_port: 4000,
+            bind_addr: "127.0.0.1:4000".to_owned(),
+            cors_origins: vec!["http://localhost:4000".to_owned()],
             openai_api_key: None,
             circuit_dir: base.join("circuit"),
             runs_dir: base.join("runs"),
@@ -143,6 +167,9 @@ impl Default for AppConfig {
             schema_config_path: base.join("schema_config.json"),
             schema_config: None,
             schema_config_hash: None,
+            client_id: 123,
+            supabase_url: None,
+            supabase_service_key: None,
         }
     }
 }
@@ -232,6 +259,22 @@ pub fn load_from_sources(
     if let Some(v) = env.get("OPENAI_API_KEY") {
         config.openai_api_key = Some(v.clone());
     }
+    if let Some(v) = env.get("ZEMTIK_CLIENT_ID") {
+        config.client_id = v.trim().parse::<i64>().context("parse ZEMTIK_CLIENT_ID")?;
+    }
+    if let Some(v) = env.get("SUPABASE_URL") {
+        config.supabase_url = Some(v.clone());
+    }
+    if let Some(v) = env.get("SUPABASE_SERVICE_KEY") {
+        config.supabase_service_key = Some(v.clone());
+    }
+    if let Some(v) = env.get("ZEMTIK_CORS_ORIGINS") {
+        config.cors_origins = v
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
 
     // Layer 4: CLI flags
     if let Some(port) = cli.port {
@@ -239,6 +282,14 @@ pub fn load_from_sources(
     }
     if let Some(ref dir) = cli.circuit_dir {
         config.circuit_dir = dir.clone();
+    }
+
+    // Resolve bind_addr after all layers are applied:
+    // Priority: ZEMTIK_BIND_ADDR > proxy_port (YAML/env/CLI) > default "127.0.0.1:4000"
+    if let Some(v) = env.get("ZEMTIK_BIND_ADDR") {
+        config.bind_addr = v.trim().to_owned();
+    } else {
+        config.bind_addr = format!("127.0.0.1:{}", config.proxy_port);
     }
 
     // Load schema_config if present (absent is allowed; proxy mode enforces it later).
@@ -249,6 +300,127 @@ pub fn load_from_sources(
     }
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn empty_cli() -> CliArgs {
+        CliArgs::default()
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    // --- bind_addr ---
+
+    #[test]
+    fn bind_addr_from_env() {
+        let cfg = load_from_sources(None, &env(&[("ZEMTIK_BIND_ADDR", "0.0.0.0:9000")]), &empty_cli()).unwrap();
+        assert_eq!(cfg.bind_addr, "0.0.0.0:9000");
+    }
+
+    #[test]
+    fn bind_addr_from_proxy_port_yaml() {
+        let yaml = "proxy_port: 8080\n";
+        let cfg = load_from_sources(Some(yaml), &env(&[]), &empty_cli()).unwrap();
+        assert_eq!(cfg.bind_addr, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn bind_addr_default() {
+        let cfg = load_from_sources(None, &env(&[]), &empty_cli()).unwrap();
+        assert_eq!(cfg.bind_addr, "127.0.0.1:4000");
+    }
+
+    #[test]
+    fn bind_addr_env_wins_over_yaml_proxy_port() {
+        let yaml = "proxy_port: 8080\n";
+        let cfg = load_from_sources(Some(yaml), &env(&[("ZEMTIK_BIND_ADDR", "0.0.0.0:4000")]), &empty_cli()).unwrap();
+        assert_eq!(cfg.bind_addr, "0.0.0.0:4000");
+    }
+
+    // --- cors_origins ---
+
+    #[test]
+    fn cors_origins_from_env_comma_separated() {
+        let cfg = load_from_sources(None, &env(&[("ZEMTIK_CORS_ORIGINS", "http://a.com,http://b.com")]), &empty_cli()).unwrap();
+        assert_eq!(cfg.cors_origins, vec!["http://a.com", "http://b.com"]);
+    }
+
+    #[test]
+    fn cors_origins_wildcard() {
+        let cfg = load_from_sources(None, &env(&[("ZEMTIK_CORS_ORIGINS", "*")]), &empty_cli()).unwrap();
+        assert_eq!(cfg.cors_origins, vec!["*"]);
+    }
+
+    #[test]
+    fn cors_origins_trims_whitespace() {
+        let cfg = load_from_sources(None, &env(&[("ZEMTIK_CORS_ORIGINS", " http://a.com , http://b.com ")]), &empty_cli()).unwrap();
+        assert_eq!(cfg.cors_origins, vec!["http://a.com", "http://b.com"]);
+    }
+
+    #[test]
+    fn cors_origins_default() {
+        let cfg = load_from_sources(None, &env(&[]), &empty_cli()).unwrap();
+        assert_eq!(cfg.cors_origins, vec!["http://localhost:4000"]);
+    }
+
+    // --- client_id ---
+
+    #[test]
+    fn client_id_from_env() {
+        let cfg = load_from_sources(None, &env(&[("ZEMTIK_CLIENT_ID", "1001")]), &empty_cli()).unwrap();
+        assert_eq!(cfg.client_id, 1001i64);
+    }
+
+    #[test]
+    fn client_id_default_is_123() {
+        let cfg = load_from_sources(None, &env(&[]), &empty_cli()).unwrap();
+        assert_eq!(cfg.client_id, 123i64);
+    }
+
+    #[test]
+    fn client_id_invalid_env_returns_err() {
+        let result = load_from_sources(None, &env(&[("ZEMTIK_CLIENT_ID", "not_a_number")]), &empty_cli());
+        assert!(result.is_err());
+    }
+
+    // --- per-table client_id ---
+
+    #[test]
+    fn table_config_with_client_id_deserializes() {
+        let json = r#"{"sensitivity":"critical","description":"test","example_prompts":["foo"],"client_id":1001}"#;
+        let tc: TableConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(tc.client_id, Some(1001i64));
+    }
+
+    #[test]
+    fn table_config_without_client_id_is_none() {
+        let json = r#"{"sensitivity":"critical","description":"test","example_prompts":["foo"]}"#;
+        let tc: TableConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(tc.client_id, None);
+    }
+
+    // --- effective_client_id resolution ---
+
+    #[test]
+    fn effective_client_id_uses_table_override() {
+        let table_client_id: Option<i64> = Some(1001);
+        let global_client_id: i64 = 123;
+        let effective = table_client_id.unwrap_or(global_client_id);
+        assert_eq!(effective, 1001);
+    }
+
+    #[test]
+    fn effective_client_id_falls_back_to_global() {
+        let table_client_id: Option<i64> = None;
+        let global_client_id: i64 = 123;
+        let effective = table_client_id.unwrap_or(global_client_id);
+        assert_eq!(effective, 123);
+    }
 }
 
 impl AppConfig {

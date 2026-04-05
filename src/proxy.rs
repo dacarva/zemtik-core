@@ -17,8 +17,8 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::intent::IntentBackend;
 use crate::types::{
-    AuditRecord, EngineResult, EvidencePack, IntentResult, OpenAiRequestLog, OpenAiResponseLog,
-    QueryParams, Route, SignatureData, TokenUsage,
+    AuditRecord, EngineResult, EvidencePack, IntentResult, MessageContent, OpenAiRequestLog,
+    OpenAiResponseLog, QueryParams, Route, SignatureData, TokenUsage,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
@@ -147,26 +147,32 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         intent_backend,
     });
 
+    let cors = if config.cors_origins == ["*"] {
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    } else {
+        let origins: Vec<HeaderValue> = config
+            .cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    };
+
     let app = Router::new()
+        .route("/health", get(handle_health))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/verify/{id}", get(handle_verify))
         .route("/{*path}", any(handle_passthrough))
-        // Restrict CORS to localhost origins — CorsLayer::permissive() sets
-        // Access-Control-Allow-Origin: * which enables cross-origin data exfiltration
-        // from any browser page on the developer workstation. This proxy binds to
-        // 127.0.0.1 so restrict to same-host origins only.
-        .layer(
-            CorsLayer::new()
-                .allow_origin([
-                    axum::http::HeaderValue::from_static("http://localhost:4000"),
-                    axum::http::HeaderValue::from_static("http://127.0.0.1:4000"),
-                ])
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
+        .layer(cors)
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{}", config.proxy_port);
+    let addr = config.bind_addr.clone();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     println!("╔══════════════════════════════════════════════════╗");
@@ -223,7 +229,9 @@ async fn handle_chat_completions(
             .map_err(ProxyError::Internal)?,
     ));
 
-    // Extract the last user message prompt for intent parsing
+    // Extract the last user message prompt for intent parsing.
+    // Handles both plain-string content and the content-parts array format
+    // sent by openai-python v1.x and other modern SDKs.
     let prompt = body
         .get("messages")
         .and_then(|m| m.as_array())
@@ -233,9 +241,12 @@ async fn handle_chat_completions(
                 .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
         })
         .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_owned();
+        .map(|c| {
+            serde_json::from_value::<MessageContent>(c.clone())
+                .map(|mc| mc.to_text())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
 
     // Extract intent using SchemaConfig
     let schema = state.config.schema_config.as_ref().ok_or_else(|| {
@@ -287,12 +298,19 @@ async fn handle_chat_completions(
 
     let route = router::decide_route(&intent_result, schema);
 
+    // Resolve effective client_id: per-table override takes precedence over global config.
+    let effective_client_id: i64 = schema
+        .tables
+        .get(&intent_result.table)
+        .and_then(|tc| tc.client_id)
+        .unwrap_or(state.config.client_id);
+
     match route {
         Route::FastLane => {
-            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, total_start).await
+            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
         }
         Route::ZkSlowLane => {
-            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, total_start).await
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
         }
     }
 }
@@ -305,6 +323,7 @@ async fn handle_fast_lane(
     request_hash: String,
     prompt_hash: String,
     intent_result: crate::types::IntentResult,
+    effective_client_id: i64,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
     println!(
@@ -317,26 +336,59 @@ async fn handle_fast_lane(
     let end = intent_result.end_unix_secs;
     let key_bytes = state.signing_key_bytes.clone();
     let schema_config_hash = state.schema_config_hash.clone();
+    let client_id = effective_client_id;
+    let table = intent_result.table.clone();
 
-    // Run sum + attestation in a blocking thread:
-    //  - rusqlite Connection is !Send, cannot cross await boundaries
-    //  - std::sync::MutexGuard is !Send, cannot be moved into spawn_blocking directly
-    //  - Clone Arc<ProxyState> and lock inside the blocking thread
-    let state2 = Arc::clone(&state);
-    let category_name_blocking = category_name.clone();
-    let engine_result = tokio::task::spawn_blocking(move || {
-        let guard = state2.ledger_db
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let signing_key = db::PrivateKey::import(key_bytes)
-            .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
-        Ok::<EngineResult, anyhow::Error>(
-            engine_fast::run_fast_lane(&guard, &signing_key, &category_name_blocking, start, end)
+    let engine_result: EngineResult = if let (Some(url), Some(svc_key)) = (
+        &state.config.supabase_url,
+        &state.config.supabase_service_key,
+    ) {
+        // Supabase path: query PostgREST, then sign the aggregate
+        let (aggregate, row_count) = db::query_sum_by_category(
+            &state.http_client,
+            url,
+            svc_key,
+            &table,
+            &category_name,
+            client_id,
+            start,
+            end,
         )
-    })
-    .await
-    .map_err(|e| ProxyError::Internal(anyhow::anyhow!("spawn_blocking join: {}", e)))?
-    .map_err(ProxyError::Internal)?;
+        .await
+        .map_err(ProxyError::Internal)?;
+
+        let key_bytes2 = key_bytes.clone();
+        let category_name2 = category_name.clone();
+        tokio::task::spawn_blocking(move || {
+            let signing_key = db::PrivateKey::import(key_bytes2)
+                .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
+            Ok::<EngineResult, anyhow::Error>(
+                engine_fast::attest_fast_lane(&signing_key, &category_name2, aggregate, row_count, start, end)
+            )
+        })
+        .await
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("spawn_blocking join: {}", e)))?
+        .map_err(ProxyError::Internal)?
+    } else {
+        // SQLite path (local dev / demo mode): in-memory ledger with seeded data.
+        // ledger_db is always initialized at startup regardless of DB_BACKEND;
+        // in Supabase mode this branch is never reached.
+        let state2 = Arc::clone(&state);
+        let category_name_blocking = category_name.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = state2.ledger_db
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let signing_key = db::PrivateKey::import(key_bytes)
+                .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
+            Ok::<EngineResult, anyhow::Error>(
+                engine_fast::run_fast_lane(&guard, &signing_key, client_id, &category_name_blocking, start, end)
+            )
+        })
+        .await
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("spawn_blocking join: {}", e)))?
+        .map_err(ProxyError::Internal)?
+    };
 
     let fl = match engine_result {
         EngineResult::Ok(r) => r,
@@ -525,6 +577,7 @@ async fn handle_zk_slow_lane(
     request_hash: String,
     prompt_hash: String,
     intent: crate::types::IntentResult,
+    effective_client_id: i64,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
@@ -542,7 +595,7 @@ async fn handle_zk_slow_lane(
             .enable_all()
             .build()
             .context("build local runtime")?;
-        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone))
+        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id))
     })
     .await
     .context("ZK blocking task panicked")?
@@ -605,7 +658,7 @@ async fn handle_zk_slow_lane(
             intent.table, e
         )))?;
     let params = QueryParams {
-        client_id: 123,
+        client_id: effective_client_id,
         target_category_hash,
         category_name: intent.category_name.clone(),
         start_time: intent.start_unix_secs as u64,
@@ -932,6 +985,7 @@ async fn run_zk_pipeline(
     request_hash: String,
     prompt_hash: String,
     intent: crate::types::IntentResult,
+    effective_client_id: i64,
 ) -> anyhow::Result<ZkPipelineResult> {
     let target_category_hash = db::poseidon_of_string(&intent.table)
         .map(|fr| db::fr_to_decimal(&fr))
@@ -940,7 +994,7 @@ async fn run_zk_pipeline(
             intent.table, e
         ))?;
     let params = QueryParams {
-        client_id: 123,
+        client_id: effective_client_id,
         target_category_hash,
         category_name: intent.category_name.clone(),
         start_time: intent.start_unix_secs as u64,
@@ -948,7 +1002,7 @@ async fn run_zk_pipeline(
     };
 
     let backend = db::init_db().await.context("init DB")?;
-    let txns = db::query_transactions(&backend, 123)
+    let txns = db::query_transactions(&backend, effective_client_id)
         .await
         .context("query transactions")?;
     if txns.len() != 500 {
@@ -1067,6 +1121,39 @@ async fn run_zk_pipeline(
         bundle_result,
         outgoing_prompt_hash: committed_hash,
     })
+}
+
+/// Health check endpoint. Probes Supabase connectivity when DB_BACKEND=supabase.
+/// For SQLite (local dev), always returns 200 — in-memory DB is always up.
+async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
+    if let (Some(url), Some(key)) = (
+        &state.config.supabase_url,
+        &state.config.supabase_service_key,
+    ) {
+        let probe_url = format!("{}/rest/v1/", url.trim_end_matches('/'));
+        let result = state
+            .http_client
+            .get(&probe_url)
+            .header("apikey", key.as_str())
+            .header("Authorization", format!("Bearer {}", key))
+            .send()
+            .await;
+        match result {
+            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 200 => (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})),
+            ),
+            _ => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"status": "degraded", "reason": "db_unreachable"})),
+            ),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})),
+        )
+    }
 }
 
 /// Transparent passthrough for non-intercepted routes.
