@@ -12,7 +12,6 @@
 ///
 /// Override backend:
 ///   ZEMTIK_INTENT_BACKEND=regex cargo run --bin intent-eval --features eval
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
