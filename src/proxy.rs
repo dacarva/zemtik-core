@@ -58,7 +58,8 @@ struct ZkPipelineResult {
     fully_verifiable: bool,
     bundle_result: Option<bundle::BundleResult>,
     /// SHA-256 of the ZK payload JSON sent to the LLM (Rust-layer commitment).
-    outgoing_prompt_hash: String,
+    /// None when fully_verifiable=false — no bundle artifact exists to match against.
+    outgoing_prompt_hash: Option<String>,
 }
 
 /// Entry point for proxy mode. Starts Axum on the configured port.
@@ -365,7 +366,10 @@ async fn handle_fast_lane(
         );
     }
     let outgoing_hash = hex::encode(Sha256::digest(
-        serde_json::to_string(&payload).unwrap_or_default().as_bytes()
+        serde_json::to_string(&payload)
+            .context("serialize payload for outgoing hash")
+            .map_err(ProxyError::Internal)?
+            .as_bytes(),
     ));
 
     let ev = evidence::build_evidence_pack(
@@ -580,7 +584,7 @@ async fn handle_zk_slow_lane(
                 proof_hash: zk.proof_hex.clone(),
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent.confidence),
-                outgoing_prompt_hash: Some(zk.outgoing_prompt_hash.clone()),
+                outgoing_prompt_hash: zk.outgoing_prompt_hash.clone(),
             },
         ) {
             Ok(()) => Some(br),
@@ -678,7 +682,7 @@ async fn handle_zk_slow_lane(
         &state.schema_config_hash,
         &timestamp_ev,
         Some(intent.confidence),
-        Some(zk.outgoing_prompt_hash.clone()),
+        zk.outgoing_prompt_hash.clone(),
     );
     let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
@@ -1013,11 +1017,9 @@ async fn run_zk_pipeline(
         "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
         "raw_data_transmitted": false
     });
-    let outgoing_prompt_hash = hex::encode(Sha256::digest(
-        serde_json::to_string(&zk_payload_for_hash)
-            .unwrap_or_default()
-            .as_bytes(),
-    ));
+    let outgoing_prompt_hash_str = serde_json::to_string(&zk_payload_for_hash)
+        .context("serialize ZK payload for outgoing hash")?;
+    let outgoing_prompt_hash = hex::encode(Sha256::digest(outgoing_prompt_hash_str.as_bytes()));
 
     // Generate bundle while run_dir is still present (guard cleans it up after)
     let bundle_result = if fully_verifiable {
@@ -1043,6 +1045,15 @@ async fn run_zk_pipeline(
         None
     };
 
+    // Only commit a hash when there's an actual verifiable bundle to match against.
+    // If fully_verifiable=false (no proof file, nargo-execute path), the receipt
+    // should not assert a commitment that has no corresponding artifact.
+    let committed_hash = if fully_verifiable {
+        Some(outgoing_prompt_hash)
+    } else {
+        None
+    };
+
     Ok(ZkPipelineResult {
         txns_len,
         batch_count,
@@ -1054,7 +1065,7 @@ async fn run_zk_pipeline(
         vk_hex,
         fully_verifiable,
         bundle_result,
-        outgoing_prompt_hash,
+        outgoing_prompt_hash: committed_hash,
     })
 }
 

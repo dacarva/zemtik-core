@@ -96,6 +96,11 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
         let meta: serde_json::Value =
             serde_json::from_slice(&meta_bytes).context("parse request_meta.json")?;
 
+        let bundle_version = meta
+            .get("bundle_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+
         let timestamp = meta
             .get("timestamp_utc")
             .and_then(|v| v.as_str())
@@ -136,8 +141,17 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
         // Cross-verify binary public_inputs against the human-readable sidecar
         cross_verify_sidecar(&extract_dir)?;
 
-        // Verify manifest.json sidecar hash if present (backward compat: skip if absent)
+        // Verify manifest.json sidecar hash.
+        // bundle_version >= 2 requires manifest.json — absence is a tamper indicator.
+        // Older bundles (bundle_version == 1) skip this check for backward compatibility.
         let manifest_path = extract_dir.join("manifest.json");
+        if bundle_version >= 2 && !manifest_path.exists() {
+            anyhow::bail!(
+                "Bundle integrity check FAILED: manifest.json is required for bundle_version {} but is absent. \
+                 This may indicate a tampered or incomplete bundle.",
+                bundle_version
+            );
+        }
         if manifest_path.exists() {
             let manifest_bytes = std::fs::read(&manifest_path).context("read manifest.json")?;
             let manifest: serde_json::Value =

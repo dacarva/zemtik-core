@@ -54,6 +54,10 @@ fn test_zip_entry_no_filename_returns_error() {
 
 /// Build a minimal synthetic bundle ZIP with required fields and a valid manifest.
 fn make_minimal_bundle(path: &Path, with_manifest: bool, correct_hash: bool) {
+    make_minimal_bundle_v(path, with_manifest, correct_hash, 2);
+}
+
+fn make_minimal_bundle_v(path: &Path, with_manifest: bool, correct_hash: bool, bundle_version: u64) {
     // Build consistent binary public_inputs and sidecar.
     // Field layout: [target_category_hash(0..32), start(32..64), end(64..96),
     //                pk_x(96..128), pk_y(128..160), aggregate(160..192)]
@@ -99,7 +103,7 @@ fn make_minimal_bundle(path: &Path, with_manifest: bool, correct_hash: bool) {
     zip.start_file("request_meta.json", opts).unwrap();
     let meta = serde_json::json!({
         "bundle_id": "test",
-        "bundle_version": 2,
+        "bundle_version": bundle_version,
         "timestamp_utc": "2026-01-01T00:00:00Z",
         "bb_version": "4.0.0",
         "proof_status": "VALID",
@@ -169,11 +173,12 @@ fn test_manifest_hash_matches() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// Commit 3: old bundle without manifest.json → backward compat, no manifest error
+/// Commit 3: old bundle (bundle_version=1) without manifest.json → backward compat, no manifest error.
+/// bundle_version >= 2 requires manifest; bundle_version 1 skips the check.
 #[test]
 fn test_manifest_absent_old_bundle() {
     let tmp = std::env::temp_dir().join(format!("manifest-absent-{}.zip", std::process::id()));
-    make_minimal_bundle(&tmp, false, false); // no manifest
+    make_minimal_bundle_v(&tmp, false, false, 1); // no manifest, bundle_version=1 (old format)
 
     // verify_bundle will fail at bb version check (bb not in CI), but must NOT fail
     // because of missing manifest — backward compatibility guarantee.
