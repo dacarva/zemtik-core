@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
             first_sig,
             None,
             None,
+            None, // outgoing_prompt_hash: CLI pipeline uses ai_result.outgoing_request_hash (logged, not in bundle)
             &run_dir,
             &app_config.circuit_dir,
             &app_config.receipts_dir,
@@ -224,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
                         proof_hash: proof_hex.clone(),
                         data_exfiltrated: 0,
                         intent_confidence: None,  // CLI pipeline has no intent extraction
+                        outgoing_prompt_hash: None, // CLI pipeline: hash computed from query_openai result
                     },
                 )?;
                 Some(br)
@@ -252,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         "2024-01-01",
         "2024-03-31",
         app_config.openai_api_key.as_deref(),
+        None,
     )
     .await?;
 

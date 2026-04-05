@@ -84,6 +84,7 @@ pub struct PipelineInfo {
 }
 
 #[derive(Serialize)]
+#[derive(Debug)]
 pub struct OpenAiRequestLog {
     pub model: String,
     pub system_prompt: String,
@@ -99,6 +100,7 @@ pub struct OpenAiResponseLog {
 }
 
 #[derive(Serialize)]
+#[derive(Debug)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -193,11 +195,14 @@ impl AuditRecord {
 
 /// Enriched result returned by `query_openai`, carrying both the advisory
 /// text and the data needed to build the audit record.
+#[derive(Debug)]
 pub struct OpenAiResult {
     pub content: String,
     pub model: String,
     pub usage: TokenUsage,
     pub request_log: OpenAiRequestLog,
+    /// SHA-256 of the serialized JSON request body sent to the LLM.
+    pub outgoing_request_hash: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,4 +268,9 @@ pub struct EvidencePack {
     pub receipt_id: String,
     /// Intent matching confidence score (None for legacy/CLI pipeline rows).
     pub zemtik_confidence: Option<f32>,
+    /// SHA-256 of the JSON payload sent to the LLM (Rust-layer commitment).
+    /// None for legacy rows (pre-v3) or CLI pipeline rows.
+    /// NOTE: Circuit-level commitment deferred to Sprint 3 (TODOS.md).
+    #[serde(default)]
+    pub outgoing_prompt_hash: Option<String>,
 }

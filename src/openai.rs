@@ -1,10 +1,11 @@
 use anyhow::Context;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::types::{OpenAiRequestLog, OpenAiResult, TokenUsage};
 
-const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_BASE_URL: &str = "https://api.openai.com";
 const MODEL: &str = "gpt-5.4-nano";
 const MAX_COMPLETION_TOKENS: u32 = 150;
 
@@ -59,6 +60,9 @@ struct Usage {
 /// that Zemtik provides: the LLM sees the cryptographic proof outcome, not
 /// the underlying ledger data.
 ///
+/// `base_url` overrides the default OpenAI endpoint — used for testing with wiremock.
+/// Pass `None` to use the production URL.
+///
 /// Returns `OpenAiResult` with the advisory text plus full request/response
 /// metadata for audit logging.
 pub async fn query_openai(
@@ -67,6 +71,7 @@ pub async fn query_openai(
     start_date: &str,
     end_date: &str,
     config_api_key: Option<&str>,
+    base_url: Option<&str>,
 ) -> anyhow::Result<OpenAiResult> {
     let api_key = config_api_key
         .map(|s| s.to_owned())
@@ -74,6 +79,7 @@ pub async fn query_openai(
         .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.trim().is_empty()))
         .context("OPENAI_API_KEY not set (set via env var or openai_api_key in config.yaml)")?;
 
+    let resolved_base_url = base_url.unwrap_or(OPENAI_BASE_URL);
     let client = Client::new();
 
     // Construct the JSON payload that the advisor receives.
@@ -107,17 +113,25 @@ pub async fn query_openai(
         max_completion_tokens: MAX_COMPLETION_TOKENS,
     };
 
+    let request_json = serde_json::to_string(&request).context("serialize OpenAI request")?;
+    let outgoing_request_hash = hex::encode(Sha256::digest(request_json.as_bytes()));
+
+    let api_url = format!("{}/v1/chat/completions", resolved_base_url);
     let response = client
-        .post(OPENAI_API_URL)
+        .post(&api_url)
         .bearer_auth(&api_key)
-        .json(&request)
+        .header("Content-Type", "application/json")
+        .body(request_json)
         .send()
         .await
         .context("send request to OpenAI")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("failed to read OpenAI response body (HTTP {})", status))?;
         anyhow::bail!("OpenAI API error {}: {}", status, body);
     }
 
@@ -147,5 +161,71 @@ pub async fn query_openai(
             user_message,
             max_completion_tokens: MAX_COMPLETION_TOKENS,
         },
+        outgoing_request_hash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_query_openai_body_read_failure() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&mock_server)
+            .await;
+
+        let result = query_openai(
+            1000,
+            "aws_spend",
+            "2024-01-01",
+            "2024-03-31",
+            Some("test-api-key"),
+            Some(&mock_server.uri()),
+        )
+        .await;
+
+        assert!(result.is_err(), "expected Err for HTTP 500, got Ok");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("500"),
+            "expected HTTP status code 500 in error message, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_openai_error_includes_status() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .mount(&mock_server)
+            .await;
+
+        let result = query_openai(
+            500,
+            "aws_spend",
+            "2024-01-01",
+            "2024-03-31",
+            Some("test-api-key"),
+            Some(&mock_server.uri()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("429"),
+            "expected 429 in error message, got: {}",
+            msg
+        );
+    }
 }
