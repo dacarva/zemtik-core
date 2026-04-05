@@ -22,21 +22,35 @@ pub const CAT_COFFEE: u64 = 3;
 ///
 /// Max input length after canonicalization: 93 bytes (3 × 31).
 pub fn poseidon_of_string(s: &str) -> anyhow::Result<Fr> {
-    let s = s.trim().to_ascii_lowercase();
-    anyhow::ensure!(!s.is_empty(), "poseidon_of_string: empty string is not a valid table key");
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Fr>> = RefCell::new(HashMap::new());
+    }
+
+    let key = s.trim().to_ascii_lowercase();
+
+    // Fast path: ~996 of 1001 calls per ZK request hit the same 3-5 category names.
+    let cached = CACHE.with(|c| c.borrow().get(&key).copied());
+    if let Some(fr) = cached {
+        return Ok(fr);
+    }
+
+    anyhow::ensure!(!key.is_empty(), "poseidon_of_string: empty string is not a valid table key");
     anyhow::ensure!(
-        s.is_ascii(),
+        key.is_ascii(),
         "poseidon_of_string: key '{}' contains non-ASCII bytes — table keys must be ASCII",
-        s
+        key
     );
     anyhow::ensure!(
-        s.len() <= 93,
+        key.len() <= 93,
         "poseidon_of_string: input '{}' is {} bytes (max 93)",
-        s,
-        s.len()
+        key,
+        key.len()
     );
 
-    let bytes = s.as_bytes();
+    let bytes = key.as_bytes();
     let mut chunks = [Fr::zero(); 3];
     for (i, chunk_fr) in chunks.iter_mut().enumerate() {
         let start = i * 31;
@@ -60,9 +74,12 @@ pub fn poseidon_of_string(s: &str) -> anyhow::Result<Fr> {
     }
 
     let poseidon = Poseidon::new();
-    poseidon
+    let result = poseidon
         .hash(chunks.to_vec())
-        .map_err(|e| anyhow::anyhow!("poseidon hash failed: {}", e))
+        .map_err(|e| anyhow::anyhow!("poseidon hash failed: {}", e))?;
+
+    CACHE.with(|c| c.borrow_mut().insert(key, result));
+    Ok(result)
 }
 
 // Q1 2024 UNIX timestamp boundaries.
