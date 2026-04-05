@@ -91,7 +91,58 @@ pub fn validate_circuit_dir(circuit_dir: &Path) -> anyhow::Result<()> {
         circuit_dir.parent().unwrap_or(circuit_dir).display()
     );
 
+    // If a compiled circuit artifact exists, validate that its ABI matches what this
+    // binary expects. A mismatch means the installed circuit is from a different version
+    // (e.g. a stale main-branch artifact). Catching this at startup prevents a cryptic
+    // mid-pipeline nargo error like "Expected argument X, but none was found".
+    let circuit_json = circuit_dir.join("target/zemtik_circuit.json");
+    if circuit_json.exists() {
+        validate_circuit_abi(&circuit_json).with_context(|| {
+            format!(
+                "Compiled circuit at '{}' is incompatible with this binary.\n\
+                 Re-run install.sh from the repo root to update the installed circuit:\n\
+                 ./install.sh",
+                circuit_json.display()
+            )
+        })?;
+    }
+
     Ok(())
+}
+
+/// Read the compiled circuit's ABI and verify the first public parameter is
+/// `target_category_hash`. This guards against stale compiled artifacts from a
+/// different branch (e.g. a v0.4.x main-branch artifact that uses `target_category`
+/// instead of the sprint2 Poseidon-hashed form).
+fn validate_circuit_abi(circuit_json: &Path) -> anyhow::Result<()> {
+    const EXPECTED_FIRST_PARAM: &str = "target_category_hash";
+
+    let bytes = std::fs::read(circuit_json)
+        .with_context(|| format!("read circuit JSON from {}", circuit_json.display()))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).context("parse circuit JSON")?;
+
+    let first_param = json
+        .get("abi")
+        .and_then(|a| a.get("parameters"))
+        .and_then(|p| p.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str());
+
+    match first_param {
+        Some(name) if name == EXPECTED_FIRST_PARAM => Ok(()),
+        Some(name) => anyhow::bail!(
+            "circuit ABI mismatch: compiled artifact has '{}' as first parameter, \
+             but this binary expects '{}'",
+            name,
+            EXPECTED_FIRST_PARAM
+        ),
+        None => anyhow::bail!(
+            "circuit ABI missing 'abi.parameters' — artifact may be corrupt or from an \
+             incompatible Noir version"
+        ),
+    }
 }
 
 /// Serialize a single batch of circuit inputs to `circuit_dir/Prover.toml`.
