@@ -38,11 +38,16 @@
 - **Trigger:** feat/verifier-flow adds `verify` as 2nd subcommand. Migrate before adding a 3rd.
 - **Depends on:** feat/verifier-flow merged
 
-### bb verify timeout (prevents proxy deadlock)
-- **What:** Add a timeout to the `Command::new("bb").args(["verify", ...]).output()` call in `verify_bundle`.
-- **Why:** `bb` can hang indefinitely (CRS download, stalled network, native deadlock). In proxy mode, the hung `bb` holds `pipeline_lock` forever, deadlocking all subsequent requests. Found by Claude adversarial review (feat/verifier-flow, 2026-03-26).
-- **How to apply:** Spawn `bb verify` as a child process, set a deadline (e.g., 60s), and kill it if it exceeds the limit. Return an error to the caller.
-- **Effort:** S (human) → S (CC+gstack)
+### ~~bb verify timeout (prevents proxy deadlock)~~ ✓ DONE (fix/pipeline-timing-instrumentation v0.5.2)
+- `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120) controls the timeout. Proxy returns HTTP 504 on expiry.
+- **Known gap:** `bb` is abandoned (not killed) on timeout — see "Kill abandoned bb on timeout" P3 item below.
+
+### Kill abandoned `bb` on timeout (DoS hardening)
+- **What:** Switch from `Command::output()` (blocking) to `Child` + `child.kill()` so the `bb` process is actually killed when the timeout fires, not just abandoned.
+- **Why:** The current timeout returns 504 to the client but leaves the `bb` child process running indefinitely. Under load, repeated timed-out ZK requests stack orphaned `bb` processes + temp directories, eventually exhausting process table and disk. Flagged by adversarial review (v0.5.2, two models).
+- **How to apply:** Use `Command::spawn()` → `Child`. On timeout, call `child.kill().ok()` and `child.wait().ok()`. Clean up temp dirs only after the child exits.
+- **Effort:** S (human ~2h) → S (CC+gstack ~15min)
+- **Priority:** P3 (current timeout mitigates deadlock; kill is a hardening step)
 
 ### Integration tests for bb-dependent paths
 - **What:** Integration tests for `verify_bundle` happy path, `generate_bundle`, and `run_verify_cli` that require the `bb` binary.
