@@ -215,6 +215,22 @@ fn test_outgoing_prompt_hash_null_for_old_rows() {
 }
 
 #[test]
+fn test_list_receipts_includes_outgoing_hash() {
+    let conn = open_in_memory().unwrap();
+    let mut r = sample_receipt("list-hash-uuid");
+    r.outgoing_prompt_hash = Some("sha256:listtest123".to_owned());
+    insert_receipt(&conn, &r).unwrap();
+
+    let list = list_receipts(&conn).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        list[0].outgoing_prompt_hash,
+        Some("sha256:listtest123".to_owned()),
+        "list_receipts must return outgoing_prompt_hash field"
+    );
+}
+
+#[test]
 fn test_insert_intent_rejection() {
     let conn = open_in_memory().unwrap();
     insert_intent_rejection(&conn, "some prompt", "NoTableIdentified").unwrap();

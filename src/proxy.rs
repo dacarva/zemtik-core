@@ -1119,3 +1119,31 @@ impl From<anyhow::Error> for ProxyError {
         ProxyError::Internal(e)
     }
 }
+
+#[cfg(test)]
+mod proxy_error_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn test_proxy_error_timeout_returns_504() {
+        let err = ProxyError::Timeout("bb took too long".to_owned());
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            "ProxyError::Timeout must map to HTTP 504"
+        );
+    }
+
+    #[test]
+    fn test_proxy_error_internal_returns_500() {
+        let err = ProxyError::Internal(anyhow::anyhow!("something broke"));
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "ProxyError::Internal must map to HTTP 500"
+        );
+    }
+}

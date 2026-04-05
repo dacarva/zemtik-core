@@ -145,6 +145,30 @@ fn test_manifest_hash_mismatch_detected() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// Commit 3: correct sidecar hash in manifest → passes integrity check (may still fail at bb)
+#[test]
+fn test_manifest_hash_matches() {
+    let tmp = std::env::temp_dir().join(format!("manifest-match-{}.zip", std::process::id()));
+    make_minimal_bundle(&tmp, true, true); // with manifest, correct hash
+
+    let result = zemtik::verify::verify_bundle(Path::new(&tmp));
+    // If bb is available and verifies, Ok — fine.
+    // If bb is absent or fails, Err — must NOT contain "hash mismatch" or "integrity check FAILED".
+    match &result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("hash mismatch") && !msg.contains("integrity check FAILED"),
+                "correct manifest must not trigger integrity error, got: {}",
+                msg
+            );
+        }
+        Ok(_) => {} // bb installed and valid proof — fine
+    }
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
 /// Commit 3: old bundle without manifest.json → backward compat, no manifest error
 #[test]
 fn test_manifest_absent_old_bundle() {
