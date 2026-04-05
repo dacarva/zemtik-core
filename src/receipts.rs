@@ -20,6 +20,9 @@ pub struct Receipt {
     pub data_exfiltrated: i64,
     /// Intent matching confidence score; None for legacy rows (pre-v2).
     pub intent_confidence: Option<f32>,
+    /// SHA-256 of the JSON payload sent to the LLM (Rust-layer commitment).
+    /// None for legacy rows (pre-v3) or CLI pipeline rows.
+    pub outgoing_prompt_hash: Option<String>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -57,6 +60,7 @@ pub fn open_receipts_db(db_path: &std::path::Path) -> anyhow::Result<Connection>
 /// Version 0 → 1: adds engine_used, proof_hash, data_exfiltrated columns
 ///                 and creates intent_rejections table.
 /// Version 1 → 2: adds intent_confidence column.
+/// Version 2 → 3: adds outgoing_prompt_hash column.
 pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -90,6 +94,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v2")?;
     }
 
+    if version < 3 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN outgoing_prompt_hash TEXT DEFAULT NULL;
+             PRAGMA user_version = 3;
+             COMMIT;",
+        )
+        .context("apply migration v3")?;
+    }
+
     Ok(())
 }
 
@@ -99,8 +113,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
         "INSERT INTO receipts
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
-             data_exfiltrated, intent_confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             data_exfiltrated, intent_confidence, outgoing_prompt_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -114,6 +128,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.proof_hash,
             r.data_exfiltrated,
             r.intent_confidence,
+            r.outgoing_prompt_hash,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -149,7 +164,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     COALESCE(engine_used, 'zk_slow_lane_legacy'),
                     proof_hash,
                     COALESCE(data_exfiltrated, 0),
-                    intent_confidence
+                    intent_confidence,
+                    outgoing_prompt_hash
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -169,6 +185,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 proof_hash: row.get(9)?,
                 data_exfiltrated: row.get(10)?,
                 intent_confidence: row.get(11)?,
+                outgoing_prompt_hash: row.get(12)?,
             })
         })
         .context("query receipts")?;
@@ -186,7 +203,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     COALESCE(engine_used, 'zk_slow_lane_legacy'),
                     proof_hash,
                     COALESCE(data_exfiltrated, 0),
-                    intent_confidence
+                    intent_confidence,
+                    outgoing_prompt_hash
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -206,6 +224,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 proof_hash: row.get(9)?,
                 data_exfiltrated: row.get(10)?,
                 intent_confidence: row.get(11)?,
+                outgoing_prompt_hash: row.get(12)?,
             })
         })
         .context("query receipt")?;
