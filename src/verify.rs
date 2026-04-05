@@ -3,10 +3,12 @@ use std::process::Command;
 
 use anyhow::Context;
 use num_bigint::BigUint;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::bundle::parse_bb_version;
 
+#[derive(Debug)]
 pub struct VerifyResult {
     pub valid: bool,
     pub circuit_hash: String,
@@ -14,6 +16,9 @@ pub struct VerifyResult {
     pub timestamp: String,
     pub raw_rows_sent_to_llm: u64,
     pub bb_version_used: String,
+    /// SHA-256 of the JSON payload sent to the LLM (Rust-layer commitment).
+    /// None for bundles generated before v0.5.1.
+    pub outgoing_prompt_hash: Option<String>,
 }
 
 /// Verify a proof bundle ZIP by extracting it and calling `bb verify` directly.
@@ -105,6 +110,11 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
             .get("raw_rows_sent_to_llm")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let outgoing_prompt_hash = meta
+            .get("outgoing_prompt_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_owned());
 
         let readable_bytes = std::fs::read(extract_dir.join("public_inputs_readable.json"))
             .context("read public_inputs_readable.json")?;
@@ -125,6 +135,26 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
 
         // Cross-verify binary public_inputs against the human-readable sidecar
         cross_verify_sidecar(&extract_dir)?;
+
+        // Verify manifest.json sidecar hash if present (backward compat: skip if absent)
+        let manifest_path = extract_dir.join("manifest.json");
+        if manifest_path.exists() {
+            let manifest_bytes = std::fs::read(&manifest_path).context("read manifest.json")?;
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&manifest_bytes).context("parse manifest.json")?;
+
+            if let Some(expected) = manifest.get("sidecar_hash").and_then(|v| v.as_str()) {
+                let actual = format!("sha256:{}", hex::encode(Sha256::digest(&readable_bytes)));
+                if actual != expected {
+                    anyhow::bail!(
+                        "Bundle integrity check FAILED: sidecar hash mismatch.\n  Expected: {}\n  Got:      {}",
+                        expected,
+                        actual
+                    );
+                }
+                println!("[zemtik] Bundle integrity: sidecar hash OK");
+            }
+        }
 
         // Check bb version compatibility
         let local_bb_raw = {
@@ -161,17 +191,31 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
             }
         }
 
-        // Run bb verify
-        let verify_out = Command::new("bb")
-            .args([
-                "verify",
-                "-p", "proof.bin",
-                "-k", "vk.bin",
-                "-i", "public_inputs",
-            ])
-            .current_dir(&extract_dir)
-            .output()
-            .context("spawn bb verify")?;
+        // Run bb verify with configurable timeout.
+        // The bb process is abandoned (not killed) on timeout — known limitation (TODOS.md).
+        let timeout_secs = crate::prover::read_verify_timeout();
+        let extract_dir_clone = extract_dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = Command::new("bb")
+                .args([
+                    "verify",
+                    "-p", "proof.bin",
+                    "-k", "vk.bin",
+                    "-i", "public_inputs",
+                ])
+                .current_dir(&extract_dir_clone)
+                .output()
+                .context("spawn bb verify");
+            let _ = tx.send(result);
+        });
+
+        let verify_out = rx
+            .recv_timeout(std::time::Duration::from_secs(timeout_secs))
+            .map_err(|_| anyhow::anyhow!(
+                "bb verify timed out after {}s — check CRS availability or bb version mismatch",
+                timeout_secs
+            ))??;
 
         let valid = verify_out.status.success();
 
@@ -182,6 +226,7 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
             timestamp,
             raw_rows_sent_to_llm,
             bb_version_used,
+            outgoing_prompt_hash,
         })
     })();
 
@@ -189,6 +234,42 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
     let _ = std::fs::remove_dir_all(&extract_dir);
 
     result
+}
+
+/// Tests for `ZEMTIK_VERIFY_TIMEOUT_SECS` env var parsing.
+/// These validate the floor guard behavior without requiring `bb`.
+#[cfg(test)]
+mod timeout_tests {
+    use crate::prover::read_verify_timeout;
+
+    #[test]
+    fn test_verify_timeout_env_parsing_default() {
+        // ZEMTIK_VERIFY_TIMEOUT_SECS unset → 120
+        std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+        assert_eq!(read_verify_timeout(), 120);
+    }
+
+    #[test]
+    fn test_verify_timeout_env_parsing_custom() {
+        std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "60");
+        assert_eq!(read_verify_timeout(), 60);
+        std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+    }
+
+    #[test]
+    fn test_verify_timeout_env_parsing_zero() {
+        // 0 must NOT cause immediate timeout — treated as unset
+        std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "0");
+        assert_eq!(read_verify_timeout(), 120);
+        std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+    }
+
+    #[test]
+    fn test_verify_timeout_env_parsing_invalid() {
+        std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "notanumber");
+        assert_eq!(read_verify_timeout(), 120);
+        std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +527,10 @@ pub fn run_verify_cli(zip_path: &Path) -> anyhow::Result<()> {
     println!("  Timestamp        : {}", result.timestamp);
     println!("  Raw rows to LLM  : {}", result.raw_rows_sent_to_llm);
     println!("  bb version       : {}", result.bb_version_used);
+    if let Some(ref hash) = result.outgoing_prompt_hash {
+        println!("  Outgoing hash    : {}", hash);
+        println!("  (Rust-layer commitment — circuit-level commitment deferred to Sprint 3)");
+    }
     println!();
 
     if result.valid {

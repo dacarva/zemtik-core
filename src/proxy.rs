@@ -57,6 +57,8 @@ struct ZkPipelineResult {
     vk_hex: Option<String>,
     fully_verifiable: bool,
     bundle_result: Option<bundle::BundleResult>,
+    /// SHA-256 of the ZK payload JSON sent to the LLM (Rust-layer commitment).
+    outgoing_prompt_hash: String,
 }
 
 /// Entry point for proxy mode. Starts Axum on the configured port.
@@ -204,7 +206,7 @@ async fn handle_chat_completions(
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
         .or_else(|| state.config.openai_api_key.clone())
         .ok_or_else(|| {
-            ProxyError(anyhow::anyhow!(
+            ProxyError::Internal(anyhow::anyhow!(
                 "No Authorization header, OPENAI_API_KEY env var, or openai_api_key in config.yaml"
             ))
         })?;
@@ -212,12 +214,12 @@ async fn handle_chat_completions(
     let request_hash = hex::encode(Sha256::digest(
         &serde_json::to_vec(&body)
             .context("serialize request body for hashing")
-            .map_err(ProxyError)?,
+            .map_err(ProxyError::Internal)?,
     ));
     let prompt_hash = hex::encode(Sha256::digest(
         &serde_json::to_vec(&body["messages"])
             .context("serialize messages for hashing")
-            .map_err(ProxyError)?,
+            .map_err(ProxyError::Internal)?,
     ));
 
     // Extract the last user message prompt for intent parsing
@@ -236,7 +238,7 @@ async fn handle_chat_completions(
 
     // Extract intent using SchemaConfig
     let schema = state.config.schema_config.as_ref().ok_or_else(|| {
-        ProxyError(anyhow::anyhow!("schema_config not loaded"))
+        ProxyError::Internal(anyhow::anyhow!("schema_config not loaded"))
     })?;
 
     // Run intent extraction in a blocking thread — the embedding backend holds a
@@ -251,7 +253,7 @@ async fn handle_chat_completions(
             intent::extract_intent_with_backend(&prompt_clone, &schema_clone, backend.as_ref(), threshold)
         })
         .await
-        .map_err(|e| ProxyError(anyhow::anyhow!("intent backend thread panicked: {}", e)))?
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("intent backend thread panicked: {}", e)))?
     };
 
     let intent_result = match intent_result_raw {
@@ -332,21 +334,39 @@ async fn handle_fast_lane(
         )
     })
     .await
-    .map_err(|e| ProxyError(anyhow::anyhow!("spawn_blocking join: {}", e)))?
-    .map_err(ProxyError)?;
+    .map_err(|e| ProxyError::Internal(anyhow::anyhow!("spawn_blocking join: {}", e)))?
+    .map_err(ProxyError::Internal)?;
 
     let fl = match engine_result {
         EngineResult::Ok(r) => r,
         EngineResult::DbError(e) => {
-            return Err(ProxyError(anyhow::anyhow!("FastLane DB error: {}", e)));
+            return Err(ProxyError::Internal(anyhow::anyhow!("FastLane DB error: {}", e)));
         }
         EngineResult::SignError(e) => {
-            return Err(ProxyError(anyhow::anyhow!("FastLane sign error: {}", e)));
+            return Err(ProxyError::Internal(anyhow::anyhow!("FastLane sign error: {}", e)));
         }
     };
 
     let receipt_id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
+
+    // Build the financial payload FIRST so we can hash it before building ev and receipt.
+    // Hash proves what financial data was transmitted to the LLM.
+    let mut payload = serde_json::json!({
+        "category": category_name,
+        "total_spend_usd": fl.aggregate,
+        "row_count": fl.row_count,
+        "data_provenance": "ZEMTIK_FAST_LANE_ATTESTATION",
+        "raw_data_transmitted": false
+    });
+    if fl.row_count == 0 {
+        payload["note"] = serde_json::Value::String(
+            "No rows matched the query criteria.".to_owned()
+        );
+    }
+    let outgoing_hash = hex::encode(Sha256::digest(
+        serde_json::to_string(&payload).unwrap_or_default().as_bytes()
+    ));
 
     let ev = evidence::build_evidence_pack(
         &receipt_id,
@@ -359,6 +379,7 @@ async fn handle_fast_lane(
         &schema_config_hash,
         &timestamp,
         Some(intent_result.confidence),
+        Some(outgoing_hash.clone()),
     );
 
     // Insert receipt — lock synchronously, never hold std::sync::MutexGuard across .await
@@ -381,6 +402,7 @@ async fn handle_fast_lane(
                 proof_hash: None,
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent_result.confidence),
+                outgoing_prompt_hash: Some(outgoing_hash),
             },
         );
     }
@@ -392,20 +414,6 @@ async fn handle_fast_lane(
         &fl.attestation_hash[..fl.attestation_hash.len().min(8)],
         total_start.elapsed().as_secs_f64() * 1000.0,
     );
-
-    let mut payload = serde_json::json!({
-        "category": category_name,
-        "total_spend_usd": fl.aggregate,
-        "row_count": fl.row_count,
-        "data_provenance": "ZEMTIK_FAST_LANE_ATTESTATION",
-        "raw_data_transmitted": false,
-        "evidence": ev
-    });
-    if fl.row_count == 0 {
-        payload["note"] = serde_json::Value::String(
-            "No rows matched the query criteria.".to_owned()
-        );
-    }
 
     build_fast_lane_response(
         &mut body,
@@ -452,7 +460,7 @@ async fn build_fast_lane_response(
         "Here is a cryptographically attested financial summary:\n\n{}",
         serde_json::to_string_pretty(&payload)
             .context("serialize FastLane payload")
-            .map_err(ProxyError)?
+            .map_err(ProxyError::Internal)?
     );
 
     if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
@@ -474,16 +482,16 @@ async fn build_fast_lane_response(
         .send()
         .await
         .context("forward FastLane request to OpenAI")
-        .map_err(ProxyError)?;
+        .map_err(ProxyError::Internal)?;
 
     let resp_status = openai_resp.status();
     let mut resp_body: Value = openai_resp
         .json()
         .await
         .context("parse OpenAI response")
-        .map_err(ProxyError)?;
+        .map_err(ProxyError::Internal)?;
 
-    let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError(anyhow::Error::new(e)))?;
+    let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
     }
@@ -533,7 +541,15 @@ async fn handle_zk_slow_lane(
         rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone))
     })
     .await
-    .context("ZK blocking task panicked")??;
+    .context("ZK blocking task panicked")?
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("timed out") {
+            ProxyError::Timeout(msg)
+        } else {
+            ProxyError::Internal(e)
+        }
+    })?;
 
     println!(
         "[ZK] Verified {} spend = ${} ({:.2}s circuit, proof: {})",
@@ -564,6 +580,7 @@ async fn handle_zk_slow_lane(
                 proof_hash: zk.proof_hex.clone(),
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent.confidence),
+                outgoing_prompt_hash: Some(zk.outgoing_prompt_hash.clone()),
             },
         ) {
             Ok(()) => Some(br),
@@ -579,7 +596,7 @@ async fn handle_zk_slow_lane(
 
     let target_category_hash = db::poseidon_of_string(&intent.table)
         .map(|fr| db::fr_to_decimal(&fr))
-        .map_err(|e| ProxyError(anyhow::anyhow!(
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!(
             "cannot hash table key '{}' (key must be ≤93 bytes after lowercasing): {}",
             intent.table, e
         )))?;
@@ -601,7 +618,7 @@ async fn handle_zk_slow_lane(
         "Here is a cryptographically verified financial summary:\n\n{}",
         serde_json::to_string_pretty(&zk_payload)
             .context("serialize ZK payload")
-            .map_err(ProxyError)?
+            .map_err(ProxyError::Internal)?
     );
 
     println!(
@@ -635,14 +652,14 @@ async fn handle_zk_slow_lane(
         .send()
         .await
         .context("forward to OpenAI")
-        .map_err(ProxyError)?;
+        .map_err(ProxyError::Internal)?;
 
     let resp_status = openai_resp.status();
     let mut resp_body: Value = openai_resp
         .json()
         .await
         .context("parse OpenAI response")
-        .map_err(ProxyError)?;
+        .map_err(ProxyError::Internal)?;
 
     let receipt_id_ev = committed_bundle
         .map(|b| b.bundle_id.clone())
@@ -661,8 +678,9 @@ async fn handle_zk_slow_lane(
         &state.schema_config_hash,
         &timestamp_ev,
         Some(intent.confidence),
+        Some(zk.outgoing_prompt_hash.clone()),
     );
-    let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError(anyhow::Error::new(e)))?;
+    let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
     }
@@ -773,7 +791,7 @@ async fn handle_verify(
         let db_guard = state.receipts_db
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        receipts::get_receipt(&db_guard, &id).map_err(ProxyError)?
+        receipts::get_receipt(&db_guard, &id).map_err(ProxyError::Internal)?
     };
 
     match receipt {
@@ -986,6 +1004,21 @@ async fn run_zk_pipeline(
         None => (None, None),
     };
 
+    // Compute outgoing_prompt_hash: SHA-256 of the ZK payload that will be sent to LLM.
+    // Done here (not in handle_zk_slow_lane) because aggregate is only available inside
+    // run_zk_pipeline — the outer handler doesn't have it until ZkPipelineResult returns.
+    let zk_payload_for_hash = serde_json::json!({
+        "category": intent.category_name,
+        "total_spend_usd": aggregate,
+        "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
+        "raw_data_transmitted": false
+    });
+    let outgoing_prompt_hash = hex::encode(Sha256::digest(
+        serde_json::to_string(&zk_payload_for_hash)
+            .unwrap_or_default()
+            .as_bytes(),
+    ));
+
     // Generate bundle while run_dir is still present (guard cleans it up after)
     let bundle_result = if fully_verifiable {
         match bundle::generate_bundle(
@@ -995,6 +1028,7 @@ async fn run_zk_pipeline(
             &first_sig,
             Some(&request_hash),
             Some(&prompt_hash),
+            Some(&outgoing_prompt_hash),
             &run_dir,
             &config.circuit_dir,
             &config.receipts_dir,
@@ -1020,6 +1054,7 @@ async fn run_zk_pipeline(
         vk_hex,
         fully_verifiable,
         bundle_result,
+        outgoing_prompt_hash,
     })
 }
 
@@ -1038,29 +1073,49 @@ async fn handle_passthrough() -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Error type: convert anyhow::Error to a 500 JSON response
+// Error type: typed variants for 500 (Internal) and 504 (Timeout)
 // ---------------------------------------------------------------------------
 
-struct ProxyError(anyhow::Error);
+enum ProxyError {
+    Internal(anyhow::Error),
+    Timeout(String),
+}
 
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
-        eprintln!("[ZK] Pipeline error: {:?}", self.0);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": {
-                    "message": format!("Zemtik ZK pipeline error: {}", self.0),
-                    "type": "zemtik_pipeline_error"
-                }
-            })),
-        )
-            .into_response()
+        match self {
+            ProxyError::Timeout(msg) => {
+                eprintln!("[ZK] Timeout: {}", msg);
+                (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": msg,
+                            "type": "timeout"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+            ProxyError::Internal(e) => {
+                eprintln!("[ZK] Pipeline error: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!("Zemtik ZK pipeline error: {}", e),
+                            "type": "zemtik_pipeline_error"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
 impl From<anyhow::Error> for ProxyError {
     fn from(e: anyhow::Error) -> Self {
-        ProxyError(e)
+        ProxyError::Internal(e)
     }
 }
