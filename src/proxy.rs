@@ -1137,27 +1137,37 @@ async fn run_zk_pipeline(
 /// Health check endpoint. Probes Supabase connectivity when DB_BACKEND=supabase.
 /// For SQLite (local dev), always returns 200 — in-memory DB is always up.
 async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
-    if let (Some(url), Some(key)) = (
-        &state.config.supabase_url,
-        &state.config.supabase_service_key,
-    ) {
-        let probe_url = format!("{}/rest/v1/", url.trim_end_matches('/'));
-        let result = state
-            .http_client
-            .get(&probe_url)
-            .header("apikey", key.as_str())
-            .header("Authorization", format!("Bearer {}", key))
-            .send()
-            .await;
-        match result {
-            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 200 => (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})),
-            ),
-            _ => (
+    let backend = std::env::var("DB_BACKEND").unwrap_or_default();
+    if backend == "supabase" {
+        if let (Some(url), Some(key)) = (
+            &state.config.supabase_url,
+            &state.config.supabase_service_key,
+        ) {
+            let probe_url = format!("{}/rest/v1/", url.trim_end_matches('/'));
+            let result = state
+                .http_client
+                .get(&probe_url)
+                .header("apikey", key.as_str())
+                .header("Authorization", format!("Bearer {}", key))
+                .send()
+                .await;
+            // Any HTTP response (even 401/403) means the server is reachable.
+            // Only a network-level error (timeout, DNS failure) means unreachable.
+            match result {
+                Ok(_) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})),
+                ),
+                Err(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"status": "degraded", "reason": "db_unreachable"})),
+                ),
+            }
+        } else {
+            (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"status": "degraded", "reason": "db_unreachable"})),
-            ),
+            )
         }
     } else {
         (
