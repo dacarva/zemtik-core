@@ -449,7 +449,10 @@ async fn handle_fast_lane(
         map.insert("note".to_owned(), serde_json::json!(
             "This metric aggregates the entire table and does not support category-based filtering."
         ));
-    } else if fl.row_count == 0 {
+    } else if fl.row_count == 0 && fl.aggregate == 0 {
+        // Only emit "no rows matched" when BOTH row_count and aggregate are zero.
+        // Supabase path always returns row_count=0 (PostgREST aggregate API limitation);
+        // checking aggregate==0 avoids a false "no results" note on non-empty Supabase queries.
         map.insert("note".to_owned(), serde_json::json!("No rows matched the query criteria."));
     }
     let payload = serde_json::Value::Object(map);

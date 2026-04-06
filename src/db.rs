@@ -495,21 +495,26 @@ pub async fn query_aggregate_table(
 
     let field = value_col;
 
-    let n = resp_json
-        .first()
-        .and_then(|obj| obj.get(field))
-        .and_then(|v| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
-        })
-        .unwrap_or_else(|| {
-            eprintln!(
-                "[WARN] query_aggregate_table: missing or unparseable '{}' field \
-                 in PostgREST aggregate response",
+    // An empty array means zero rows matched — return Ok((0, 0)) explicitly.
+    // Any other parse failure (wrong field name, schema drift, RLS-filtered response)
+    // is a hard error: signing a coerced 0 would produce a false attestation.
+    let n = if resp_json.is_empty() {
+        0i64
+    } else {
+        resp_json
+            .first()
+            .and_then(|obj| obj.get(field))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })
+            .ok_or_else(|| anyhow::anyhow!(
+                "query_aggregate_table: missing or unparseable '{}' field in PostgREST response; \
+                 check that schema_config value_column matches the actual column name and \
+                 that PostgREST aggregate syntax is supported (requires PostgREST ≥ v9)",
                 field
-            );
-            0
-        });
+            ))?
+    };
 
     Ok((n, 0))
 }

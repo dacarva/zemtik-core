@@ -343,7 +343,9 @@ async fn query_aggregate_table_count_parse_response() {
 }
 
 #[tokio::test]
-async fn query_aggregate_table_missing_field_returns_zero() {
+async fn query_aggregate_table_missing_field_returns_err() {
+    // PostgREST returns a non-empty array but the expected field is absent.
+    // Signing a coerced 0 would produce a false attestation — must return Err.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/rest/v1/transactions"))
@@ -352,12 +354,12 @@ async fn query_aggregate_table_missing_field_returns_zero() {
         .await;
 
     let client = reqwest::Client::new();
-    let (val, _) = query_aggregate_table(
+    let result = query_aggregate_table(
         &client, &server.uri(), "key", "transactions",
         "amount", "timestamp", None, "any",
         &AggFn::Sum, 123, false, 0, 9999,
-    ).await.unwrap();
-    assert_eq!(val, 0, "missing field in PostgREST response should return 0");
+    ).await;
+    assert!(result.is_err(), "missing field in non-empty PostgREST response must return Err, not a silent 0");
 }
 
 #[tokio::test]
