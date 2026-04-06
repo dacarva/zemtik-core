@@ -358,6 +358,28 @@ pub fn aggregate_table(
     start_unix_secs: i64,
     end_unix_secs: i64,
 ) -> anyhow::Result<(i64, usize)> {
+    // Defense-in-depth: identifiers are validated at startup by validate_schema_config,
+    // but enforce here too so any future call-site that bypasses startup validation
+    // fails with a clear error in both debug and release builds.
+    anyhow::ensure!(
+        !table.is_empty() && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && table.len() <= 63,
+        "aggregate_table: unsafe table identifier '{}'", table
+    );
+    anyhow::ensure!(
+        !value_col.is_empty() && value_col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && value_col.len() <= 63,
+        "aggregate_table: unsafe value_col identifier '{}'", value_col
+    );
+    anyhow::ensure!(
+        !timestamp_col.is_empty() && timestamp_col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && timestamp_col.len() <= 63,
+        "aggregate_table: unsafe timestamp_col identifier '{}'", timestamp_col
+    );
+    if let Some(cc) = category_col {
+        anyhow::ensure!(
+            !cc.is_empty() && cc.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && cc.len() <= 63,
+            "aggregate_table: unsafe category_col identifier '{}'", cc
+        );
+    }
+
     let agg_expr = match agg_fn {
         crate::config::AggFn::Sum => format!("SUM({})", value_col),
         crate::config::AggFn::Count => format!("COUNT({})", value_col),
@@ -471,10 +493,7 @@ pub async fn query_aggregate_table(
         .await
         .context("parse PostgREST aggregate response")?;
 
-    let field = match agg_fn {
-        crate::config::AggFn::Sum => value_col,
-        crate::config::AggFn::Count => value_col,
-    };
+    let field = value_col;
 
     let n = resp_json
         .first()

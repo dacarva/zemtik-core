@@ -445,13 +445,12 @@ async fn handle_fast_lane(
     map.insert("row_count".to_owned(), serde_json::json!(fl.row_count));
     map.insert("data_provenance".to_owned(), serde_json::json!("ZEMTIK_FAST_LANE_ATTESTATION"));
     map.insert("raw_data_transmitted".to_owned(), serde_json::json!(false));
-    if fl.row_count == 0 {
-        map.insert("note".to_owned(), serde_json::json!("No rows matched the query criteria."));
-    }
     if table_config.category_column.is_none() {
         map.insert("note".to_owned(), serde_json::json!(
             "This metric aggregates the entire table and does not support category-based filtering."
         ));
+    } else if fl.row_count == 0 {
+        map.insert("note".to_owned(), serde_json::json!("No rows matched the query criteria."));
     }
     let payload = serde_json::Value::Object(map);
     let outgoing_hash = hex::encode(Sha256::digest(
@@ -480,7 +479,7 @@ async fn handle_fast_lane(
         let db_guard = state.receipts_db
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _ = receipts::insert_receipt(
+        if let Err(e) = receipts::insert_receipt(
             &db_guard,
             &receipts::Receipt {
                 id: receipt_id.clone(),
@@ -498,7 +497,9 @@ async fn handle_fast_lane(
                 outgoing_prompt_hash: Some(outgoing_hash),
                 signing_version: Some(2),
             },
-        );
+        ) {
+            eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
+        }
     }
 
     println!(

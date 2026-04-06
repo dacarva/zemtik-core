@@ -241,12 +241,23 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
         // Warn (non-blocking) if physical_table override is used outside Supabase.
         // SQLite always queries the 'transactions' table; physical_table only works on Supabase.
         if tc.physical_table.is_some()
-            && std::env::var("DB_BACKEND").unwrap_or_default() != "supabase"
+            && std::env::var("DB_BACKEND").unwrap_or_default().to_lowercase() != "supabase"
         {
             eprintln!(
                 "[WARN] schema_config: table '{}': physical_table override is Supabase-only — \
                  SQLite always uses 'transactions'. Requests to this table will fail at runtime \
                  if the physical table name differs.",
+                key
+            );
+        }
+
+        // Warn when skip_client_id_filter is set — this aggregates across ALL tenants in Supabase.
+        // Operator must explicitly acknowledge the cross-tenant scope.
+        if tc.skip_client_id_filter {
+            eprintln!(
+                "[WARN] schema_config: table '{}': skip_client_id_filter=true — queries will \
+                 aggregate across ALL client_ids in Supabase. Ensure this table is single-tenant \
+                 or intentionally global.",
                 key
             );
         }
@@ -436,7 +447,7 @@ pub fn load_from_sources(
         config.client_id = v.trim().parse::<i64>().context("parse ZEMTIK_CLIENT_ID")?;
     }
     if let Some(v) = env.get("DB_BACKEND") {
-        config.db_backend = v.trim().to_owned();
+        config.db_backend = v.trim().to_lowercase();
     }
     if let Some(v) = env.get("SUPABASE_URL") {
         config.supabase_url = Some(v.clone());
