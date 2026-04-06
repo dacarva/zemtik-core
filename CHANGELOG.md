@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-04-06
+
+### Added
+- **Universal FastLane engine** — any table in `schema_config.json` with `sensitivity: "low"` now routes through FastLane automatically. Previously only the hardcoded `aws_spend` table was supported. Add new tables by declaring them in the schema — no code changes required.
+- **Generic `aggregate_table()` and `query_aggregate_table()`** — SQLite and Supabase paths both accept `AggFn::Sum` or `AggFn::Count`, `value_column`, `timestamp_column`, and optional `category_column`. Any numeric table can be aggregated and attested.
+- **`AggFn` enum** — `schema_config.json` now accepts `"agg_fn": "SUM"` or `"agg_fn": "COUNT"` per table. COUNT tables return the number of matching rows; SUM tables return the aggregate value. COUNT + `sensitivity: "critical"` is rejected at startup (ZK circuit only supports SUM).
+- **New `TableConfig` fields** — `value_column`, `timestamp_column`, `category_column`, `agg_fn`, `metric_label`, `skip_client_id_filter`, `physical_table` (Supabase table name override). All column and table names are validated against `[a-zA-Z0-9_]` at startup.
+- **`attest_fast_lane()`** — new public function that signs a pre-computed `(aggregate, row_count)` pair. Separates the signing step from the DB query step, enabling the Supabase path to sign PostgREST results using the same attestation format as SQLite.
+- **`signing_version: 2`** — FastLane receipts now record `signing_version = 2` in the receipts DB, enabling future offline verifiers to distinguish v1 (category-only) from v2 (full TableConfig) attestation formats.
+- **`schema_config.example.json` updated** — includes a `new_hires` example table demonstrating COUNT aggregation with `skip_client_id_filter: true`.
+
+### Fixed
+- **FastLane respects `DB_BACKEND=sqlite` even when Supabase credentials are set** — previously, the proxy would route to Supabase FastLane whenever `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` were present, regardless of `DB_BACKEND`. Now only `DB_BACKEND=supabase` activates the Supabase path. This closes ISSUE-001 (regression where dev environments with Supabase creds set hit the Supabase backend unintentionally).
+- **`DB_BACKEND` value is now case-insensitive** — `DB_BACKEND=Supabase` and `DB_BACKEND=SUPABASE` are now treated the same as `DB_BACKEND=supabase`. Previously any case other than lowercase silently fell through to SQLite.
+- **`note` field no longer silently overwritten** — when `category_column` is `null` and `row_count == 0`, the "no category support" note takes priority over the "no rows matched" note. Previously the second `map.insert` would silently drop the first note.
+- **Failed receipt writes now logged** — if `receipts::insert_receipt` returns an error, the proxy logs `[WARN] FastLane: failed to write audit receipt` instead of silently discarding the error. Broken audit trails are now visible to operators.
+- **Identifier safety checks promoted to runtime** — column and table name guards in `aggregate_table()` use `anyhow::ensure!` instead of `debug_assert!`, so they run in both debug and release builds.
+- **`skip_client_id_filter` emits startup warning** — tables with `skip_client_id_filter: true` now log `[WARN]` at proxy startup, alerting operators that queries will aggregate across all tenants in Supabase.
+
 ## [0.6.0] - 2026-04-06
 
 ### Added
