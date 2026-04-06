@@ -114,7 +114,7 @@ Layered resolution order (later overrides earlier):
 
 1. Hardcoded defaults (`~/.zemtik/` subdirs: `circuit/`, `runs/`, `keys/`, `receipts/`, `receipts.db`, `zemtik.db`)
 2. YAML file (`~/.zemtik/config.yaml`)
-3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120))
+3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard))
 4. CLI flags (`--port`, `--circuit-dir`)
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end runs.
@@ -122,11 +122,11 @@ Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end
 ### Database backends
 
 - **SQLite** (default) — auto-seeded in-memory on first run; path `~/.zemtik/zemtik.db`
-- **Supabase** — set `DB_BACKEND=supabase`; schema in `supabase/migrations/`; auto-creates table if `SUPABASE_AUTO_CREATE_TABLE=1`
+- **Supabase** — set `DB_BACKEND=supabase`; schema in `supabase/migrations/`; set `SUPABASE_AUTO_CREATE_TABLE=1` to create the table on startup (default: `false`); set `SUPABASE_AUTO_SEED=1` to insert 500 demo rows (default: `false` — prevents accidental writes to client production databases)
 
 ### Release / CI
 
-GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin intent-eval --features eval`) before cross-compiling for `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin` on version tags (`v*`). Archives include binary + `install.sh` + `config.example.yaml`.
+GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin intent-eval --features eval`) before cross-compiling for `x86_64-linux`, `aarch64-darwin` on version tags (`v*`). Archives include binary + `install.sh` + `config.example.yaml`. (`aarch64-linux` and `x86_64-darwin` removed in v0.6.0 due to `ort-sys` ABI mismatch.)
 
 ## Key constraints and known gaps
 
@@ -134,7 +134,7 @@ GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin inten
 - `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json`. Tables must include `description` and `example_prompts` fields for the embedding backend.
 - FastLane always uses the in-memory seeded SQLite ledger (Supabase FastLane connector deferred to v2).
 - The ZK slow lane supports any table key via Poseidon BN254 hashing (Sprint 2). No code change needed — just add the table to `schema_config.json` with `"sensitivity": "critical"`.
-- `bb verify` has a configurable timeout (`ZEMTIK_VERIFY_TIMEOUT_SECS`, default 120s); returns HTTP 504 on expiry. Known gap: the `bb` child process is abandoned (not killed) on timeout — see `TODOS.md` "Kill abandoned bb on timeout".
+- `bb verify` has a configurable timeout (`ZEMTIK_VERIFY_TIMEOUT_SECS`, default 120s); returns HTTP 504 on expiry. On timeout, the `bb` child process is killed and reaped (fixed in v0.6.0).
 - `--no-verify` hook bypass and force-push to main are never acceptable.
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).
 - EmbeddingBackend downloads BGE-small-en model (~130MB) on first proxy start to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip. First start can take 30–120s.

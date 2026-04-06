@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.5.2** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout.
+**Scope note:** This document is aligned with **v0.6.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults.
 
 ---
 
@@ -301,7 +301,7 @@ FastLane provides cryptographic attestation over the aggregate path, not a succi
 
 5. **Public inputs sidecar:** Human-readable metadata in bundles is not separately committed inside the circuit (documented in verifier UX); rely on `bb verify` for proof / VK / binary public inputs.
 
-6. **`bb verify` process cleanup:** `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120s) bounds how long the proxy waits for `bb verify`. A timeout returns HTTP 504 to the client, but the `bb` child process is abandoned rather than killed — orphaned processes can accumulate under load. See `TODOS.md` "Kill abandoned bb on timeout" for the fix. (Resolved: unbounded wait prior to v0.5.2.)
+6. **`bb verify` process cleanup:** `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120s) bounds how long the proxy waits for `bb verify`. A timeout returns HTTP 504 and kills and reaps the `bb` child process (fixed in v0.6.0 via `poll_child_with_timeout`). (Resolved: unbounded wait prior to v0.5.2; orphaned process prior to v0.6.0.)
 
 7. **Universal category hash (Sprint 2):** The circuit uses a Poseidon BN254 hash of the table key string instead of a hardcoded integer code. Any table defined in `schema_config.json` can run the ZK slow lane without a code change. The hash is computed by `poseidon_of_string()` in `db.rs` and verified cross-language against Noir `bn254::hash_3`.
 

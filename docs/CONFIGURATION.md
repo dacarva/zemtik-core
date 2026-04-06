@@ -35,8 +35,16 @@ You can mix layers freely. Most deployments use only `.env` + `schema_config.jso
 | `SUPABASE_URL` | — | `https://your-project.supabase.co` | Required when `DB_BACKEND=supabase`. |
 | `SUPABASE_SERVICE_KEY` | — | Supabase service-role JWT | Required when `DB_BACKEND=supabase`. |
 | `DATABASE_URL` | — | PostgreSQL connection string | Required for DDL (table creation) via direct Postgres when `DB_BACKEND=supabase`. |
-| `SUPABASE_AUTO_CREATE_TABLE` | `1` | `0`, `1` | When `1`, creates the `transactions` table via direct Postgres on startup if it doesn't exist. Set to `0` if the table already exists. |
-| `SUPABASE_AUTO_SEED` | `1` | `0`, `1` | When `1`, inserts the 500 demo transactions on startup. Set to `0` on subsequent runs or in production. |
+| `SUPABASE_AUTO_CREATE_TABLE` | `0` | `0`, `1` | When `1`, creates the `transactions` table via direct Postgres on startup if it doesn't exist. Default is `0` — prevents accidental DDL against a client production database. Set to `1` for local dev. |
+| `SUPABASE_AUTO_SEED` | `0` | `0`, `1` | When `1`, inserts 500 demo transactions on startup. Default is `0` — prevents demo rows from being silently inserted into a client production database. Set to `1` for local dev. |
+
+### Proxy server (v0.6.0+)
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_BIND_ADDR` | `127.0.0.1:4000` | `host:port` | Address the proxy listens on. Set to `0.0.0.0:4000` to expose on all interfaces (requires auth middleware — see TODOS). |
+| `ZEMTIK_CORS_ORIGINS` | `http://localhost:4000` | Comma-separated URLs or `*` | Allowed CORS origins. Use `*` for wildcard (mixes with specific origins — wildcard takes precedence). |
+| `ZEMTIK_CLIENT_ID` | `123` | integer | Default client ID for DB filtering. Overridden per-table by `client_id` in `schema_config.json`. |
 
 ### Intent engine
 
@@ -49,7 +57,7 @@ You can mix layers freely. Most deployments use only `.env` + `schema_config.jso
 
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
-| `ZEMTIK_VERIFY_TIMEOUT_SECS` | `120` | positive integer | Seconds the proxy waits for `bb verify` before returning HTTP 504. Note: the `bb` child process is abandoned (not killed) on timeout — see `TODOS.md`. Only configurable via env var; the YAML knob is not yet wired in v0.5.x. |
+| `ZEMTIK_VERIFY_TIMEOUT_SECS` | `120` | positive integer | Seconds the proxy waits for `bb verify` before returning HTTP 504. On timeout, the `bb` child process is killed and reaped (v0.6.0+). |
 
 ### Runtime paths
 
