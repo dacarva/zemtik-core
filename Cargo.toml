@@ -1,6 +1,6 @@
 [package]
 name = "zemtik"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
@@ -37,6 +37,7 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 clap = { version = "4", features = ["derive"] }
+urlencoding = "2"
 fastembed = { version = "5", optional = true }
 
 [features]

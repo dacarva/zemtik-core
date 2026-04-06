@@ -23,6 +23,8 @@ pub struct Receipt {
     /// SHA-256 of the JSON payload sent to the LLM (Rust-layer commitment).
     /// None for legacy rows (pre-v3) or CLI pipeline rows.
     pub outgoing_prompt_hash: Option<String>,
+    /// FastLane attestation payload version: None or 1 = pre-v0.7.0; 2 = descriptor-bound.
+    pub signing_version: Option<u8>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -104,6 +106,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v3")?;
     }
 
+    if version < 4 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN signing_version INTEGER DEFAULT NULL;
+             PRAGMA user_version = 4;
+             COMMIT;",
+        )
+        .context("apply migration v4")?;
+    }
+
     Ok(())
 }
 
@@ -113,8 +125,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
         "INSERT INTO receipts
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
-             data_exfiltrated, intent_confidence, outgoing_prompt_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -129,6 +141,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.data_exfiltrated,
             r.intent_confidence,
             r.outgoing_prompt_hash,
+            r.signing_version.map(|v| v as i64),
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -165,13 +178,15 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     proof_hash,
                     COALESCE(data_exfiltrated, 0),
                     intent_confidence,
-                    outgoing_prompt_hash
+                    outgoing_prompt_hash,
+                    signing_version
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
 
     let rows = stmt
         .query_map([], |row| {
+            let sv: Option<i64> = row.get(13)?;
             Ok(Receipt {
                 id: row.get(0)?,
                 bundle_path: row.get(1)?,
@@ -186,6 +201,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 data_exfiltrated: row.get(10)?,
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
+                signing_version: sv.map(|v| v as u8),
             })
         })
         .context("query receipts")?;
@@ -204,13 +220,15 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     proof_hash,
                     COALESCE(data_exfiltrated, 0),
                     intent_confidence,
-                    outgoing_prompt_hash
+                    outgoing_prompt_hash,
+                    signing_version
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
 
     let mut rows = stmt
         .query_map(rusqlite::params![id], |row| {
+            let sv: Option<i64> = row.get(13)?;
             Ok(Receipt {
                 id: row.get(0)?,
                 bundle_path: row.get(1)?,
@@ -225,6 +243,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 data_exfiltrated: row.get(10)?,
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
+                signing_version: sv.map(|v| v as u8),
             })
         })
         .context("query receipt")?;

@@ -233,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                         data_exfiltrated: 0,
                         intent_confidence: None,  // CLI pipeline has no intent extraction
                         outgoing_prompt_hash: None, // CLI pipeline: hash computed from query_openai result
+                        signing_version: None,
                     },
                 )?;
                 Some(br)
@@ -261,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
     let ai_result = openai::query_openai(
         aggregate,
         &params.category_name,
+        "total_spend_usd",
         "2024-01-01",
         "2024-03-31",
         app_config.openai_api_key.as_deref(),

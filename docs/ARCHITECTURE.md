@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.6.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults.
+**Scope note:** This document is aligned with **v0.7.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults. v0.7.0 adds the universal FastLane engine: any table in `schema_config.json` with `"sensitivity": "low"` automatically routes through FastLane; `AggFn` enum (SUM/COUNT); new `TableConfig` fields (`value_column`, `timestamp_column`, `category_column`, `agg_fn`, `metric_label`, `skip_client_id_filter`, `physical_table`); `attest_fast_lane()` public API; `signing_version: 2`; and fixes ISSUE-001 (`DB_BACKEND=sqlite` ignored when Supabase creds were set).
 
 ---
 
@@ -101,7 +101,7 @@ POST /v1/chat/completions (user prompt)
       └── RegexBackend (ZEMTIK_INTENT_BACKEND=regex or embed init failure):
             keyword / substring matching against schema
   → Routing (router.rs: sensitivity from schema_config.json)
-      ├── FastLane: DB sum (SQLite or Supabase) → BabyJubJub attestation → EvidencePack → OpenAI
+      ├── FastLane: DB aggregate — SUM or COUNT (SQLite or Supabase) → BabyJubJub attestation → EvidencePack → OpenAI
       └── ZK SlowLane (critical tables or unknown table): full batch ZK pipeline → OpenAI
 ```
 
@@ -121,9 +121,9 @@ POST /v1/chat/completions (user prompt)
 | `intent_embed.rs` | `EmbeddingBackend`, schema index, cosine match |
 | `time_parser.rs` | `DeterministicTimeParser` (quarters, FY, months, relative, YTD, etc.) |
 | `router.rs` | `FastLane` vs `ZkSlowLane` from table sensitivity |
-| `engine_fast.rs` | FastLane SUM + attestation |
+| `engine_fast.rs` | FastLane: generic `aggregate_table()` (SUM or COUNT) → `attest_fast_lane()` (`signing_version: 2`) |
 | `evidence.rs` | `EvidencePack` for both engines |
-| `db.rs` | SQLite / Supabase, seeding, signing, `sum_by_category`, category codes for circuit |
+| `db.rs` | SQLite / Supabase, seeding, signing, `aggregate_table()` / `query_aggregate_table()` (generic SUM/COUNT; `sum_by_category` deprecated v0.7.0), category codes for circuit |
 | `prover.rs` | `nargo` / `bb` subprocess pipeline |
 | `verify.rs` / `bundle.rs` | Bundle ZIP + offline verification |
 | `openai.rs` | Chat Completions client |
@@ -157,7 +157,7 @@ Each table declares sensitivity (e.g. `critical` vs `low`). **Critical** (and un
 
 ### 4. FastLane (`engine_fast.rs`)
 
-Computes `SUM(amount)` for the resolved category and time window against the **demo in-memory SQLite ledger** (same seed data as the CLI demo). Produces a BabyJubJub attestation over the result; **no UltraHonk proof**. Fully concurrent; does not hold the global ZK `pipeline_lock`.
+Computes `SUM(value_column)` or `COUNT(value_column)` (controlled by `AggFn` in `TableConfig`) for the resolved category and time window. Works against both the **in-memory SQLite ledger** (`DB_BACKEND=sqlite`) and **Supabase PostgREST** (`DB_BACKEND=supabase`). The generic `aggregate_table()` / `query_aggregate_table()` functions accept any table defined in `schema_config.json` with `"sensitivity": "low"` — no code change required to add tables. `attest_fast_lane()` signs the `(aggregate, row_count)` pair with BabyJubJub EdDSA (`signing_version: 2`); **no UltraHonk proof**. Fully concurrent; does not hold the global ZK `pipeline_lock`.
 
 ### 5. The Bank Ledger (`src/db.rs`)
 
@@ -255,12 +255,15 @@ The `category_name` values must match the keys you declare in `schema_config.jso
 
 ```sql
 -- FastLane (aggregate only — no rows ever leave the DB layer):
+-- Query shape is controlled by TableConfig: agg_fn (SUM/COUNT), value_column,
+-- timestamp_column, category_column, and skip_client_id_filter.
+-- Example for a SUM table with category and client_id filters:
 SELECT SUM(amount), COUNT(*)
 FROM   transactions
-WHERE  category_name = $1          -- matched to schema_config.json key
+WHERE  category_name = $1          -- only when category_column is set
   AND  timestamp     >= $2         -- UNIX seconds from DeterministicTimeParser
   AND  timestamp     <= $3
-  AND  client_id     = $4;         -- from ZEMTIK_CLIENT_ID (default 123)
+  AND  client_id     = $4;         -- omitted when skip_client_id_filter=true
 
 -- ZK SlowLane (fetches rows for private-witness construction):
 SELECT amount, category_name, timestamp
@@ -289,7 +292,9 @@ The proxy receives `POST /v1/chat/completions` with `"content": "What is the tot
 decide_route(&intent, &schema) // → Route::FastLane
 ```
 
-**3. Database query** (`src/db.rs::sum_by_category`)
+**3. Database query** (`src/db.rs::aggregate_table`)
+
+The query is built dynamically from `TableConfig` (`value_column`, `timestamp_column`, `category_column`, `agg_fn`). For a SUM table with a category column this looks like:
 
 ```sql
 SELECT SUM(amount), COUNT(*)
@@ -300,6 +305,8 @@ WHERE  category_name = 'marketing'
   AND  client_id = 123;
 -- → (41200000, 47)   -- $412,000.00 in cents; 47 matching rows
 ```
+
+For a COUNT table with `skip_client_id_filter: true` and no `category_column` (e.g. `new_hires`), the query omits those filters and uses `COUNT(employee_id)` instead.
 
 Individual rows, `user_name`, and `description` are **never fetched**.
 
@@ -550,7 +557,7 @@ FastLane provides cryptographic attestation over the aggregate path, not a succi
 
 7. **Universal category hash (Sprint 2):** The circuit uses a Poseidon BN254 hash of the table key string instead of a hardcoded integer code. Any table defined in `schema_config.json` can run the ZK slow lane without a code change. The hash is computed by `poseidon_of_string()` in `db.rs` and verified cross-language against Noir `bn254::hash_3`.
 
-8. **FastLane data source:** FastLane supports two backends. With `DB_BACKEND=sqlite` (default), it queries the in-memory seeded SQLite ledger. With `DB_BACKEND=supabase` (and `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` set), it queries PostgREST and signs the aggregate — added in v0.6.0.
+8. **FastLane data source:** FastLane supports two backends. With `DB_BACKEND=sqlite` (default), it queries the in-memory seeded SQLite ledger via `aggregate_table()`. With `DB_BACKEND=supabase` (and `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` set), it queries PostgREST via `query_aggregate_table()` and signs the aggregate. The Supabase path is now fully generic (SUM/COUNT, any table) as of v0.7.0. Note: `DB_BACKEND=supabase` must be set explicitly — having Supabase credentials without this env var keeps the SQLite path active (ISSUE-001 fix, v0.7.0).
 
 9. **Embedding model:** First proxy start may download ~130MB ONNX to `~/.zemtik/models/`; air-gapped deploys can set `ZEMTIK_INTENT_BACKEND=regex`.
 

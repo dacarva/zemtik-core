@@ -36,6 +36,7 @@ fn sample_receipt(id: &str) -> Receipt {
         data_exfiltrated: 0,
         intent_confidence: None,
         outgoing_prompt_hash: None,
+        signing_version: None,
     }
 }
 
@@ -89,7 +90,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "expected migration to reach version 3");
+    assert_eq!(version, 4, "expected migration to reach version 4");
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "migration should be idempotent at version 3");
+    assert_eq!(version, 4, "migration should be idempotent at version 4");
 }
 
 #[test]
@@ -146,7 +147,7 @@ fn test_migration_v2_to_v3() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 3, "v2→v3 migration must bump to version 3");
+    assert_eq!(version_after, 4, "v2→v4 migration must bump to version 4");
 
     // Verify the column exists
     let col_count: i64 = conn

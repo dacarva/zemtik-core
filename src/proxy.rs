@@ -350,22 +350,30 @@ async fn handle_fast_lane(
     let client_id = effective_client_id;
     let table = intent_result.table.clone();
 
-    let db_backend = std::env::var("DB_BACKEND").unwrap_or_default();
-    let engine_result: EngineResult = if db_backend.eq_ignore_ascii_case("supabase") {
-        let (url, svc_key) = match (&state.config.supabase_url, &state.config.supabase_service_key) {
-            (Some(u), Some(k)) => (u, k),
-            _ => return Err(ProxyError::Internal(anyhow::anyhow!(
-                "DB_BACKEND=supabase but SUPABASE_URL or SUPABASE_SERVICE_KEY not set"
-            ))),
-        };
-        // Supabase path: query PostgREST, then sign the aggregate
-        let (aggregate, row_count) = db::query_sum_by_category(
+    // Resolve TableConfig for this table (routing guarantees it exists in schema).
+    let schema = state.config.schema_config.as_ref()
+        .ok_or_else(|| ProxyError::Internal(anyhow::anyhow!("schema_config missing in FastLane")))?;
+    let table_config = schema.tables.get(&table).cloned()
+        .ok_or_else(|| ProxyError::Internal(anyhow::anyhow!("routing bug: table '{}' not in schema", table)))?;
+    let metric_label = table_config.metric_label.clone();
+
+    let engine_result: EngineResult = if state.config.use_supabase_fast_lane() {
+        let url = state.config.supabase_url.as_ref().unwrap();
+        let svc_key = state.config.supabase_service_key.as_ref().unwrap();
+        // Supabase path: query PostgREST with generic aggregate, then sign the result.
+        let physical_table = table_config.resolved_table(&table).to_owned();
+        let (aggregate, row_count) = db::query_aggregate_table(
             &state.http_client,
             url,
             svc_key,
-            &table,
+            &physical_table,
+            &table_config.value_column,
+            &table_config.timestamp_column,
+            table_config.category_column.as_deref(),
             &category_name,
+            &table_config.agg_fn,
             client_id,
+            table_config.skip_client_id_filter,
             start,
             end,
         )
@@ -374,11 +382,17 @@ async fn handle_fast_lane(
 
         let key_bytes2 = key_bytes.clone();
         let category_name2 = category_name.clone();
+        let table_key2 = table.clone();
+        let table_config2 = table_config.clone();
         tokio::task::spawn_blocking(move || {
             let signing_key = db::PrivateKey::import(key_bytes2)
                 .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
             Ok::<EngineResult, anyhow::Error>(
-                engine_fast::attest_fast_lane(&signing_key, &category_name2, aggregate, row_count, start, end)
+                engine_fast::attest_fast_lane(
+                    &signing_key, client_id, &table_key2, &table_config2,
+                    &category_name2, aggregate, row_count, start, end,
+                    chrono::Utc::now().timestamp(),
+                )
             )
         })
         .await
@@ -386,10 +400,10 @@ async fn handle_fast_lane(
         .map_err(ProxyError::Internal)?
     } else {
         // SQLite path (local dev / demo mode): in-memory ledger with seeded data.
-        // ledger_db is always initialized at startup regardless of DB_BACKEND;
-        // in Supabase mode this branch is never reached.
         let state2 = Arc::clone(&state);
         let category_name_blocking = category_name.clone();
+        let table_key_blocking = table.clone();
+        let table_config_blocking = table_config.clone(); // clone for 'static bound
         tokio::task::spawn_blocking(move || {
             let guard = state2.ledger_db
                 .lock()
@@ -397,7 +411,11 @@ async fn handle_fast_lane(
             let signing_key = db::PrivateKey::import(key_bytes)
                 .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
             Ok::<EngineResult, anyhow::Error>(
-                engine_fast::run_fast_lane(&guard, &signing_key, client_id, &category_name_blocking, start, end)
+                engine_fast::run_fast_lane(
+                    &guard, &signing_key, client_id,
+                    &table_key_blocking, table_config_blocking,
+                    &category_name_blocking, start, end,
+                )
             )
         })
         .await
@@ -418,20 +436,26 @@ async fn handle_fast_lane(
     let receipt_id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
 
-    // Build the financial payload FIRST so we can hash it before building ev and receipt.
+    // Build the financial payload: fixed "aggregate" key + "metric_label" field.
     // Hash proves what financial data was transmitted to the LLM.
-    let mut payload = serde_json::json!({
-        "category": category_name,
-        "total_spend_usd": fl.aggregate,
-        "row_count": fl.row_count,
-        "data_provenance": "ZEMTIK_FAST_LANE_ATTESTATION",
-        "raw_data_transmitted": false
-    });
-    if fl.row_count == 0 {
-        payload["note"] = serde_json::Value::String(
-            "No rows matched the query criteria.".to_owned()
-        );
+    let mut map = serde_json::Map::new();
+    map.insert("category".to_owned(), serde_json::json!(category_name));
+    map.insert("aggregate".to_owned(), serde_json::json!(fl.aggregate));
+    map.insert("metric_label".to_owned(), serde_json::json!(metric_label));
+    map.insert("row_count".to_owned(), serde_json::json!(fl.row_count));
+    map.insert("data_provenance".to_owned(), serde_json::json!("ZEMTIK_FAST_LANE_ATTESTATION"));
+    map.insert("raw_data_transmitted".to_owned(), serde_json::json!(false));
+    if table_config.category_column.is_none() {
+        map.insert("note".to_owned(), serde_json::json!(
+            "This metric aggregates the entire table and does not support category-based filtering."
+        ));
+    } else if fl.row_count == 0 && fl.aggregate == 0 {
+        // Only emit "no rows matched" when BOTH row_count and aggregate are zero.
+        // Supabase path always returns row_count=0 (PostgREST aggregate API limitation);
+        // checking aggregate==0 avoids a false "no results" note on non-empty Supabase queries.
+        map.insert("note".to_owned(), serde_json::json!("No rows matched the query criteria."));
     }
+    let payload = serde_json::Value::Object(map);
     let outgoing_hash = hex::encode(Sha256::digest(
         serde_json::to_string(&payload)
             .context("serialize payload for outgoing hash")
@@ -458,7 +482,7 @@ async fn handle_fast_lane(
         let db_guard = state.receipts_db
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _ = receipts::insert_receipt(
+        if let Err(e) = receipts::insert_receipt(
             &db_guard,
             &receipts::Receipt {
                 id: receipt_id.clone(),
@@ -474,8 +498,11 @@ async fn handle_fast_lane(
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent_result.confidence),
                 outgoing_prompt_hash: Some(outgoing_hash),
+                signing_version: Some(2),
             },
-        );
+        ) {
+            eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
+        }
     }
 
     println!(
@@ -653,6 +680,7 @@ async fn handle_zk_slow_lane(
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent.confidence),
                 outgoing_prompt_hash: zk.outgoing_prompt_hash.clone(),
+                signing_version: None,
             },
         ) {
             Ok(()) => Some(br),

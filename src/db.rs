@@ -231,6 +231,9 @@ fn init_sqlite() -> anyhow::Result<DbBackend> {
 ///
 /// Returns `(sum, count)`. Both are 0 when no rows match.
 /// Returns `Err(SumOverflow)` if the SQLite aggregate is negative (overflow guard).
+///
+/// Deprecated: use `aggregate_table` instead (table-agnostic, supports COUNT).
+#[deprecated(since = "0.7.0", note = "use aggregate_table instead")]
 pub fn sum_by_category(
     conn: &Connection,
     client_id: i64,
@@ -258,6 +261,9 @@ pub fn sum_by_category(
 /// The `amount` column is read as `i64` (integer minor units — no f64 to avoid
 /// precision loss on large aggregates). Null amounts are skipped with a warning.
 /// Returns `(sum, row_count)`.
+///
+/// Deprecated: use `query_aggregate_table` instead (table-agnostic, supports COUNT, no pagination required).
+#[deprecated(since = "0.7.0", note = "use query_aggregate_table instead")]
 pub async fn query_sum_by_category(
     client: &reqwest::Client,
     url: &str,
@@ -329,6 +335,192 @@ pub async fn query_sum_by_category(
     }
 
     Ok((total, row_count))
+}
+
+/// Generic aggregate query on an SQLite connection.
+///
+/// Builds `SELECT {agg_expr}({value_col}), COUNT(*) FROM {table}` with optional
+/// category and mandatory client_id filters. All column/table names must be
+/// validated via `is_safe_identifier` before calling (enforced by `validate_schema_config`
+/// at proxy startup).
+///
+/// Returns `(aggregate, row_count)`. Negative SUM → `Err` (overflow guard).
+/// COUNT always returns a non-negative result.
+pub fn aggregate_table(
+    conn: &Connection,
+    table: &str,
+    value_col: &str,
+    timestamp_col: &str,
+    category_col: Option<&str>,
+    category_value: &str,
+    agg_fn: &crate::config::AggFn,
+    client_id: i64,
+    skip_client_id_filter: bool,
+    start_unix_secs: i64,
+    end_unix_secs: i64,
+) -> anyhow::Result<(i64, usize)> {
+    // Defense-in-depth: identifiers are validated at startup by validate_schema_config,
+    // but enforce here too so any future call-site that bypasses startup validation
+    // fails with a clear error in both debug and release builds.
+    fn safe_ident(s: &str) -> bool {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_') && s.len() <= 63
+    }
+    anyhow::ensure!(safe_ident(table), "aggregate_table: unsafe table identifier '{}'", table);
+    anyhow::ensure!(safe_ident(value_col), "aggregate_table: unsafe value_col identifier '{}'", value_col);
+    anyhow::ensure!(safe_ident(timestamp_col), "aggregate_table: unsafe timestamp_col identifier '{}'", timestamp_col);
+    if let Some(cc) = category_col {
+        anyhow::ensure!(safe_ident(cc), "aggregate_table: unsafe category_col identifier '{}'", cc);
+    }
+
+    let agg_expr = match agg_fn {
+        crate::config::AggFn::Sum => format!("SUM({})", value_col),
+        crate::config::AggFn::Count => format!("COUNT({})", value_col),
+    };
+
+    // Build SQL and execute based on category and client_id filter presence.
+    let (agg_val, count): (Option<i64>, i64) = match (category_col, skip_client_id_filter) {
+        (Some(cat_col), false) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {cat_col} = ?1 AND {ts_col} >= ?2 AND {ts_col} <= ?3 AND client_id = ?4",
+                agg = agg_expr, table = table, cat_col = cat_col, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![category_value, start_unix_secs, end_unix_secs, client_id],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+        (Some(cat_col), true) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {cat_col} = ?1 AND {ts_col} >= ?2 AND {ts_col} <= ?3",
+                agg = agg_expr, table = table, cat_col = cat_col, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![category_value, start_unix_secs, end_unix_secs],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+        (None, false) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {ts_col} >= ?1 AND {ts_col} <= ?2 AND client_id = ?3",
+                agg = agg_expr, table = table, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![start_unix_secs, end_unix_secs, client_id],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+        (None, true) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {ts_col} >= ?1 AND {ts_col} <= ?2",
+                agg = agg_expr, table = table, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![start_unix_secs, end_unix_secs],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+    };
+
+    Ok((agg_val.unwrap_or(0), count as usize))
+}
+
+/// Generic aggregate query against a Supabase/PostgREST endpoint.
+///
+/// Uses PostgREST ≥ v9 aggregate syntax (single HTTP call, no pagination).
+/// `category_value` is URL-encoded before insertion. `skip_client_id_filter`
+/// omits the `client_id=eq.{X}` query param (for tables without a client_id column).
+///
+/// Returns `(aggregate, 0)` — row_count is not available from PostgREST aggregate response.
+pub async fn query_aggregate_table(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    table: &str,
+    value_col: &str,
+    timestamp_col: &str,
+    category_col: Option<&str>,
+    category_value: &str,
+    agg_fn: &crate::config::AggFn,
+    client_id: i64,
+    skip_client_id_filter: bool,
+    start_unix_secs: i64,
+    end_unix_secs: i64,
+) -> anyhow::Result<(i64, usize)> {
+    let base = url.trim_end_matches('/');
+
+    let agg_expr = match agg_fn {
+        crate::config::AggFn::Sum => format!("{}:sum({})", value_col, value_col),
+        crate::config::AggFn::Count => format!("{}:{}.count()", value_col, value_col),
+    };
+
+    let mut endpoint = format!(
+        "{}/rest/v1/{}?select={}",
+        base, table, agg_expr
+    );
+
+    if !skip_client_id_filter {
+        endpoint.push_str(&format!("&client_id=eq.{}", client_id));
+    }
+    endpoint.push_str(&format!(
+        "&{}=gte.{}&{}=lte.{}",
+        timestamp_col, start_unix_secs, timestamp_col, end_unix_secs
+    ));
+    if let Some(cat_col) = category_col {
+        let encoded = urlencoding::encode(category_value);
+        endpoint.push_str(&format!("&{}=eq.{}", cat_col, encoded));
+    }
+
+    let resp = client
+        .get(&endpoint)
+        .header("apikey", key)
+        .header("Authorization", format!("Bearer {}", key))
+        .send()
+        .await
+        .context("PostgREST query_aggregate_table request")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!(
+            "PostgREST returned {} for aggregate query on table '{}'",
+            status,
+            table
+        );
+    }
+
+    let resp_json: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .context("parse PostgREST aggregate response")?;
+
+    let field = value_col;
+
+    // An empty array means zero rows matched — return Ok((0, 0)) explicitly.
+    // Any other parse failure (wrong field name, schema drift, RLS-filtered response)
+    // is a hard error: signing a coerced 0 would produce a false attestation.
+    let n = if resp_json.is_empty() {
+        0i64
+    } else {
+        resp_json
+            .first()
+            .and_then(|obj| obj.get(field))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })
+            .ok_or_else(|| anyhow::anyhow!(
+                "query_aggregate_table: missing or unparseable '{}' field in PostgREST response; \
+                 check that schema_config value_column matches the actual column name and \
+                 that PostgREST aggregate syntax is supported (requires PostgREST ≥ v9)",
+                field
+            ))?
+    };
+
+    Ok((n, 0))
 }
 
 fn seed_sqlite(conn: &Connection) -> anyhow::Result<()> {

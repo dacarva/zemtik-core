@@ -15,6 +15,7 @@ async fn test_query_openai_body_read_failure() {
     let result = query_openai(
         1000,
         "aws_spend",
+        "total_spend_usd",
         "2024-01-01",
         "2024-03-31",
         Some("test-api-key"),
@@ -44,6 +45,7 @@ async fn test_query_openai_error_includes_status() {
     let result = query_openai(
         500,
         "aws_spend",
+        "total_spend_usd",
         "2024-01-01",
         "2024-03-31",
         Some("test-api-key"),

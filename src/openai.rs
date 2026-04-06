@@ -68,6 +68,7 @@ struct Usage {
 pub async fn query_openai(
     aggregate: u64,
     category_name: &str,
+    metric_label: &str,
     start_date: &str,
     end_date: &str,
     config_api_key: Option<&str>,
@@ -86,7 +87,8 @@ pub async fn query_openai(
     // This is the ONLY data transmitted — no raw rows, no client PII.
     let zk_payload = serde_json::json!({
         "category": category_name,
-        "total_spend_usd": aggregate,
+        "aggregate": aggregate,
+        "metric_label": metric_label,
         "period_start": start_date,
         "period_end": end_date,
         "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
