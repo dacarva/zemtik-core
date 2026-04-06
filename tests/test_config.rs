@@ -204,6 +204,14 @@ fn cors_origins_wildcard() {
 }
 
 #[test]
+fn cors_origins_empty_env_preserves_default() {
+    let mut env = HashMap::new();
+    env.insert("ZEMTIK_CORS_ORIGINS".to_owned(), "".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.cors_origins, vec!["http://localhost:4000"]);
+}
+
+#[test]
 fn bind_addr_from_env_zemtik_bind_addr() {
     let mut env = HashMap::new();
     env.insert("ZEMTIK_BIND_ADDR".to_owned(), "0.0.0.0:8080".to_owned());

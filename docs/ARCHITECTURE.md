@@ -101,7 +101,7 @@ POST /v1/chat/completions (user prompt)
       └── RegexBackend (ZEMTIK_INTENT_BACKEND=regex or embed init failure):
             keyword / substring matching against schema
   → Routing (router.rs: sensitivity from schema_config.json)
-      ├── FastLane: in-memory SQLite sum → BabyJubJub attestation → EvidencePack → OpenAI
+      ├── FastLane: DB sum (SQLite or Supabase) → BabyJubJub attestation → EvidencePack → OpenAI
       └── ZK SlowLane (critical tables or unknown table): full batch ZK pipeline → OpenAI
 ```
 
@@ -163,7 +163,7 @@ Computes `SUM(amount)` for the resolved category and time window against the **d
 
 `DB_BACKEND` selects storage:
 
-- **`sqlite`** (default): in-memory SQLite for development, FastLane, and CLI demo.
+- **`sqlite`** (default): in-memory SQLite for development and CLI demo. FastLane uses this in local/dev mode.
 - **`supabase`**: PostgreSQL via PostgREST + direct Postgres for DDL.
 
 Production expectation: a read-only adapter to the bank’s real ledger.
@@ -305,7 +305,7 @@ FastLane provides cryptographic attestation over the aggregate path, not a succi
 
 7. **Universal category hash (Sprint 2):** The circuit uses a Poseidon BN254 hash of the table key string instead of a hardcoded integer code. Any table defined in `schema_config.json` can run the ZK slow lane without a code change. The hash is computed by `poseidon_of_string()` in `db.rs` and verified cross-language against Noir `bn254::hash_3`.
 
-8. **FastLane data source:** FastLane uses the in-memory seeded SQLite ledger, not Supabase (see `CHANGELOG` / `CLAUDE.md`).
+8. **FastLane data source:** FastLane supports two backends. With `DB_BACKEND=sqlite` (default), it queries the in-memory seeded SQLite ledger. With `DB_BACKEND=supabase` (and `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` set), it queries PostgREST and signs the aggregate — added in v0.6.0.
 
 9. **Embedding model:** First proxy start may download ~130MB ONNX to `~/.zemtik/models/`; air-gapped deploys can set `ZEMTIK_INTENT_BACKEND=regex`.
 

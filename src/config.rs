@@ -269,11 +269,14 @@ pub fn load_from_sources(
         config.supabase_service_key = Some(v.clone());
     }
     if let Some(v) = env.get("ZEMTIK_CORS_ORIGINS") {
-        config.cors_origins = v
+        let parsed: Vec<String> = v
             .split(',')
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
+        if !parsed.is_empty() {
+            config.cors_origins = parsed;
+        }
     }
 
     // Layer 4: CLI flags
