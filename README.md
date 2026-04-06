@@ -50,6 +50,26 @@ The raw transaction rows are **private witnesses** inside the ZK circuit. The ve
 
 ---
 
+## Where Zemtik Applies
+
+Zemtik addresses a specific problem: **your data contains rows you cannot send to an LLM, but your business needs answers from those rows.** The pattern recurs across industries wherever regulation, privilege, or competitive sensitivity governs data residency.
+
+| Industry | Regulation | What stays private | FastLane or ZK |
+|----------|-----------|-------------------|----------------|
+| **Healthcare** | HIPAA §164.502 | Patient identifiers, individual claim amounts | ZK — PHI in any row |
+| **Legal** | Attorney-client privilege | Matter IDs, attorney-client assignments | ZK — reveals client relationships |
+| **Insurance** | GDPR Art. 9, CCPA | Policy holder IDs, individual payouts | ZK — special category data |
+| **E-commerce** | CCPA, PCI DSS | Customer IDs, purchase history, payment data | FastLane — aggregates are non-sensitive |
+| **Government / Defense** | FAR, FedRAMP | Contractor identities, program funding | ZK — may be classified |
+| **Pharma / Biotech** | SEC Reg S-K (MNPI) | Trial IDs, per-compound pipeline spend | ZK — material non-public |
+| **Fintech / Crypto** | MiCA, FATF Travel Rule | Wallet addresses, transaction counterparties | ZK — Travel Rule compliance |
+
+In every case the integration is the same: map your table's columns in `schema_config.json`, point Zemtik at a PostgREST endpoint, and send natural-language queries. The proxy returns a cryptographically attested aggregate. Zero raw rows cross the perimeter.
+
+> **Full integration guides for all seven industries** — including real SQL schemas, complete `schema_config.json` entries, and column mapping for common database patterns — are in [docs/INDUSTRY_USE_CASES.md](docs/INDUSTRY_USE_CASES.md).
+
+---
+
 ## v1 Capability Boundary
 
 Before reading further, understand what Zemtik v1 does **not** do:
@@ -316,6 +336,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md) — Full component breakdown, data flow, cryptographic security properties
+- [Industry Use Cases](docs/INDUSTRY_USE_CASES.md) — End-to-end integration examples for healthcare, legal, insurance, e-commerce, government, pharma, and fintech
 - [Intent Engine](docs/INTENT_ENGINE.md) — How embedding-based routing and the time parser work
 - [Supported Queries](docs/SUPPORTED_QUERIES.md) — v1 query contract: time expressions, table matching, error reference
 - [Configuration](docs/CONFIGURATION.md) — All config fields, env vars, schema_config.json format
