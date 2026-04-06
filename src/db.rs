@@ -277,7 +277,7 @@ pub async fn query_sum_by_category(
     loop {
         let end_idx = offset + page_size - 1;
         let endpoint = format!(
-            "{}/rest/v1/{}?category_name=eq.{}&client_id=eq.{}&timestamp=gte.{}&timestamp=lte.{}&select=amount",
+            "{}/rest/v1/{}?category_name=eq.{}&client_id=eq.{}&timestamp=gte.{}&timestamp=lte.{}&select=amount&order=id",
             base, table, category_name, client_id, start_unix_secs, end_unix_secs
         );
 
@@ -316,7 +316,9 @@ pub async fn query_sum_by_category(
                     eprintln!("[WARN] query_sum_by_category: skipping row with null/unparseable amount");
                     0
                 });
-            total = total.checked_add(amount).unwrap_or(total);
+            total = total.checked_add(amount).ok_or_else(|| {
+                anyhow::anyhow!("query_sum_by_category: i64 sum overflow — amounts too large for safe aggregation")
+            })?;
         }
         row_count += page_len;
 
@@ -896,52 +898,43 @@ mod supabase_query_tests {
 #[cfg(test)]
 mod auto_flag_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate env vars to avoid parallel-test races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn auto_seed_default_is_false_when_unset() {
+    fn auto_seed_and_create_table_defaults_and_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // Default: unset → false (opt-in, not opt-out)
         std::env::remove_var("SUPABASE_AUTO_SEED");
         assert!(!supabase_auto_seed_enabled(), "must be opt-in — default must be false");
-    }
-
-    #[test]
-    fn auto_seed_enabled_for_truthy_values() {
-        for val in &["1", "true", "yes", "on", "TRUE", "YES"] {
-            std::env::set_var("SUPABASE_AUTO_SEED", val);
-            assert!(supabase_auto_seed_enabled(), "expected true for '{}'", val);
-        }
-        std::env::remove_var("SUPABASE_AUTO_SEED");
-    }
-
-    #[test]
-    fn auto_seed_disabled_for_falsy_and_empty() {
-        for val in &["0", "false", "no", "off", "", "random"] {
-            std::env::set_var("SUPABASE_AUTO_SEED", val);
-            assert!(!supabase_auto_seed_enabled(), "expected false for '{}'", val);
-        }
-        std::env::remove_var("SUPABASE_AUTO_SEED");
-    }
-
-    #[test]
-    fn auto_create_table_default_is_false_when_unset() {
         std::env::remove_var("SUPABASE_AUTO_CREATE_TABLE");
         assert!(!supabase_auto_create_table_enabled(), "must be opt-in — default must be false");
-    }
 
-    #[test]
-    fn auto_create_table_enabled_for_truthy_values() {
+        // Truthy values → true
+        for val in &["1", "true", "yes", "on", "TRUE", "YES"] {
+            std::env::set_var("SUPABASE_AUTO_SEED", val);
+            assert!(supabase_auto_seed_enabled(), "expected true for SUPABASE_AUTO_SEED='{}'", val);
+        }
         for val in &["1", "true", "yes", "on"] {
             std::env::set_var("SUPABASE_AUTO_CREATE_TABLE", val);
-            assert!(supabase_auto_create_table_enabled(), "expected true for '{}'", val);
+            assert!(supabase_auto_create_table_enabled(), "expected true for SUPABASE_AUTO_CREATE_TABLE='{}'", val);
         }
-        std::env::remove_var("SUPABASE_AUTO_CREATE_TABLE");
-    }
 
-    #[test]
-    fn auto_create_table_disabled_for_falsy() {
+        // Falsy values → false
+        for val in &["0", "false", "no", "off", "", "random"] {
+            std::env::set_var("SUPABASE_AUTO_SEED", val);
+            assert!(!supabase_auto_seed_enabled(), "expected false for SUPABASE_AUTO_SEED='{}'", val);
+        }
         for val in &["0", "false", "no", "off", ""] {
             std::env::set_var("SUPABASE_AUTO_CREATE_TABLE", val);
-            assert!(!supabase_auto_create_table_enabled(), "expected false for '{}'", val);
+            assert!(!supabase_auto_create_table_enabled(), "expected false for SUPABASE_AUTO_CREATE_TABLE='{}'", val);
         }
+
+        // Cleanup
+        std::env::remove_var("SUPABASE_AUTO_SEED");
         std::env::remove_var("SUPABASE_AUTO_CREATE_TABLE");
     }
 }
