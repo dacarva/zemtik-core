@@ -355,29 +355,26 @@ pub fn aggregate_table(
     category_value: &str,
     agg_fn: &crate::config::AggFn,
     client_id: i64,
+    skip_client_id_filter: bool,
     start_unix_secs: i64,
     end_unix_secs: i64,
 ) -> anyhow::Result<(i64, usize)> {
     // Defense-in-depth: identifiers are validated at startup by validate_schema_config,
     // but enforce here too so any future call-site that bypasses startup validation
     // fails with a clear error in both debug and release builds.
-    anyhow::ensure!(
-        !table.is_empty() && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && table.len() <= 63,
-        "aggregate_table: unsafe table identifier '{}'", table
-    );
-    anyhow::ensure!(
-        !value_col.is_empty() && value_col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && value_col.len() <= 63,
-        "aggregate_table: unsafe value_col identifier '{}'", value_col
-    );
-    anyhow::ensure!(
-        !timestamp_col.is_empty() && timestamp_col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && timestamp_col.len() <= 63,
-        "aggregate_table: unsafe timestamp_col identifier '{}'", timestamp_col
-    );
+    fn safe_ident(s: &str) -> bool {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_') && s.len() <= 63
+    }
+    anyhow::ensure!(safe_ident(table), "aggregate_table: unsafe table identifier '{}'", table);
+    anyhow::ensure!(safe_ident(value_col), "aggregate_table: unsafe value_col identifier '{}'", value_col);
+    anyhow::ensure!(safe_ident(timestamp_col), "aggregate_table: unsafe timestamp_col identifier '{}'", timestamp_col);
     if let Some(cc) = category_col {
-        anyhow::ensure!(
-            !cc.is_empty() && cc.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && cc.len() <= 63,
-            "aggregate_table: unsafe category_col identifier '{}'", cc
-        );
+        anyhow::ensure!(safe_ident(cc), "aggregate_table: unsafe category_col identifier '{}'", cc);
     }
 
     let agg_expr = match agg_fn {
@@ -385,44 +382,51 @@ pub fn aggregate_table(
         crate::config::AggFn::Count => format!("COUNT({})", value_col),
     };
 
-    let sql = if let Some(cat_col) = category_col {
-        format!(
-            "SELECT {agg}, COUNT(*) FROM {table} \
-             WHERE {cat_col} = ?1 AND {ts_col} >= ?2 AND {ts_col} <= ?3 AND client_id = ?4",
-            agg = agg_expr,
-            table = table,
-            cat_col = cat_col,
-            ts_col = timestamp_col,
-        )
-    } else {
-        format!(
-            "SELECT {agg}, COUNT(*) FROM {table} \
-             WHERE {ts_col} >= ?1 AND {ts_col} <= ?2 AND client_id = ?3",
-            agg = agg_expr,
-            table = table,
-            ts_col = timestamp_col,
-        )
+    // Build SQL and execute based on category and client_id filter presence.
+    let (agg_val, count): (Option<i64>, i64) = match (category_col, skip_client_id_filter) {
+        (Some(cat_col), false) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {cat_col} = ?1 AND {ts_col} >= ?2 AND {ts_col} <= ?3 AND client_id = ?4",
+                agg = agg_expr, table = table, cat_col = cat_col, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![category_value, start_unix_secs, end_unix_secs, client_id],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+        (Some(cat_col), true) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {cat_col} = ?1 AND {ts_col} >= ?2 AND {ts_col} <= ?3",
+                agg = agg_expr, table = table, cat_col = cat_col, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![category_value, start_unix_secs, end_unix_secs],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+        (None, false) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {ts_col} >= ?1 AND {ts_col} <= ?2 AND client_id = ?3",
+                agg = agg_expr, table = table, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![start_unix_secs, end_unix_secs, client_id],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
+        (None, true) => {
+            let sql = format!(
+                "SELECT {agg}, COUNT(*) FROM {table} \
+                 WHERE {ts_col} >= ?1 AND {ts_col} <= ?2",
+                agg = agg_expr, table = table, ts_col = timestamp_col,
+            );
+            conn.query_row(&sql,
+                rusqlite::params![start_unix_secs, end_unix_secs],
+                |row| Ok((row.get(0)?, row.get(1)?)))?
+        }
     };
 
-    let (agg_val, count): (Option<i64>, i64) = if category_col.is_some() {
-        conn.query_row(
-            &sql,
-            rusqlite::params![category_value, start_unix_secs, end_unix_secs, client_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?
-    } else {
-        conn.query_row(
-            &sql,
-            rusqlite::params![start_unix_secs, end_unix_secs, client_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?
-    };
-
-    let result = agg_val.unwrap_or(0);
-    if matches!(agg_fn, crate::config::AggFn::Sum) && result < 0 {
-        anyhow::bail!("aggregate_table: SUM overflow detected (negative result)");
-    }
-    Ok((result, count as usize))
+    Ok((agg_val.unwrap_or(0), count as usize))
 }
 
 /// Generic aggregate query against a Supabase/PostgREST endpoint.

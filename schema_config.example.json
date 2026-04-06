@@ -79,6 +79,13 @@
       "sensitivity": "low",
       "aliases": ["travel", "T&E"],
       "description": "Employee travel and expense reimbursements, including trips, lodging, meals, client entertainment, and expense reports.",
+      "physical_table": "transactions",
+      "value_column": "amount",
+      "timestamp_column": "timestamp",
+      "category_column": "category_name",
+      "agg_fn": "SUM",
+      "metric_label": "travel_expense_usd",
+      "skip_client_id_filter": false,
       "example_prompts": [
         "What was our travel and expense spend last quarter?",
         "Show me T&E costs for 2024",

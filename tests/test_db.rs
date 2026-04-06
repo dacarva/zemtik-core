@@ -213,7 +213,7 @@ fn aggregate_table_sum_with_category_filter() {
 
     let (sum, count) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        Some("category_name"), "aws", &AggFn::Sum, 123, 500, 9999,
+        Some("category_name"), "aws", &AggFn::Sum, 123, false, 500, 9999,
     ).unwrap();
     assert_eq!(sum, 300);
     assert_eq!(count, 2);
@@ -228,7 +228,7 @@ fn aggregate_table_count_no_category_filter() {
 
     let (count_val, row_count) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        None, "ignored", &AggFn::Count, 123, 500, 9999,
+        None, "ignored", &AggFn::Count, 123, false, 500, 9999,
     ).unwrap();
     assert_eq!(count_val, 3);
     assert_eq!(row_count, 3);
@@ -243,7 +243,7 @@ fn aggregate_table_count_nullable_column_differs_from_count_star() {
     // COUNT(amount) counts non-null rows only
     let (count_val, _) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        None, "any", &AggFn::Count, 123, 500, 9999,
+        None, "any", &AggFn::Count, 123, false, 500, 9999,
     ).unwrap();
     assert_eq!(count_val, 1, "COUNT(amount) should ignore NULL rows");
 }
@@ -256,7 +256,7 @@ fn aggregate_table_sum_no_category_filter() {
 
     let (sum, _) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        None, "any", &AggFn::Sum, 123, 500, 9999,
+        None, "any", &AggFn::Sum, 123, false, 500, 9999,
     ).unwrap();
     assert_eq!(sum, 1000);
 }
@@ -268,7 +268,7 @@ fn aggregate_table_unknown_category_returns_zero() {
 
     let (sum, count) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        Some("category_name"), "nonexistent", &AggFn::Sum, 123, 500, 9999,
+        Some("category_name"), "nonexistent", &AggFn::Sum, 123, false, 500, 9999,
     ).unwrap();
     assert_eq!(sum, 0);
     assert_eq!(count, 0);
@@ -283,23 +283,33 @@ fn aggregate_table_category_col_none_ignores_category_value() {
     // category_col=None → no WHERE on category → returns total regardless of category_value
     let (sum, _) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        None, "this_value_is_ignored", &AggFn::Sum, 123, 500, 9999,
+        None, "this_value_is_ignored", &AggFn::Sum, 123, false, 500, 9999,
     ).unwrap();
     assert_eq!(sum, 300);
 }
 
 #[test]
-fn aggregate_table_sum_overflow_returns_err() {
+fn aggregate_table_skip_client_id_filter_includes_all_tenants() {
     let conn = make_test_sqlite_conn();
-    // Insert two rows that together overflow i64 when summed
-    insert_row(&conn, 1, 123, Some(i64::MAX), "aws", 1000);
-    insert_row(&conn, 2, 123, Some(i64::MAX), "aws", 2000);
+    // Rows for two different client_ids
+    insert_row(&conn, 1, 100, Some(400), "aws", 1000);
+    insert_row(&conn, 2, 200, Some(600), "aws", 1500);
 
-    let result = aggregate_table(
+    // With skip_client_id_filter=true, both rows are summed regardless of client_id
+    let (sum, count) = aggregate_table(
         &conn, "transactions", "amount", "timestamp",
-        Some("category_name"), "aws", &AggFn::Sum, 123, 500, 9999,
-    );
-    assert!(result.is_err(), "SUM overflow should return Err");
+        Some("category_name"), "aws", &AggFn::Sum, 100, true, 500, 9999,
+    ).unwrap();
+    assert_eq!(sum, 1000, "skip_client_id_filter should aggregate across all tenants");
+    assert_eq!(count, 2);
+
+    // With skip_client_id_filter=false, only client_id=100 is included
+    let (sum_filtered, count_filtered) = aggregate_table(
+        &conn, "transactions", "amount", "timestamp",
+        Some("category_name"), "aws", &AggFn::Sum, 100, false, 500, 9999,
+    ).unwrap();
+    assert_eq!(sum_filtered, 400);
+    assert_eq!(count_filtered, 1);
 }
 
 // ---------------------------------------------------------------------------

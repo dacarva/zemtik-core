@@ -76,13 +76,14 @@ pub fn attest_fast_lane(
         Err(e) => return EngineResult::SignError(format!("{}", e)),
     };
 
-    // attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
-    let sig_bytes = format!("{}{}{}", sig.r_b8.x, sig.r_b8.y, sig.s);
+    // attestation_hash = SHA-256(sig_r8_x || ":" || sig_r8_y || ":" || sig_s)
+    // Colon separators prevent decimal-string collisions (e.g. x=1,y=23 vs x=12,y=3).
+    let sig_bytes = format!("{}:{}:{}", sig.r_b8.x, sig.r_b8.y, sig.s);
     let attestation_hash = hex::encode(Sha256::digest(sig_bytes.as_bytes()));
 
-    // key_id = SHA-256(pub_key_x || pub_key_y)
+    // key_id = SHA-256(pub_key_x || ":" || pub_key_y)
     let pub_key = signing_key.public();
-    let key_material = format!("{}{}", pub_key.x, pub_key.y);
+    let key_material = format!("{}:{}", pub_key.x, pub_key.y);
     let key_id = hex::encode(Sha256::digest(key_material.as_bytes()));
 
     EngineResult::Ok(FastLaneResult {
@@ -118,6 +119,7 @@ pub fn run_fast_lane(
         category_name,
         &table_config.agg_fn,
         client_id,
+        table_config.skip_client_id_filter,
         start_unix_secs,
         end_unix_secs,
     ) {

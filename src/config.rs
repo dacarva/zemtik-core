@@ -55,9 +55,12 @@ fn default_metric_label() -> String { "total_spend_usd".to_owned() }
 /// or underscore only, max 63 chars. Column/table names from schema_config are
 /// server-controlled, but this defends against misconfiguration.
 fn is_safe_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && s.len() <= 63
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_') && s.len() <= 63
 }
 
 #[derive(Debug, Deserialize, Clone)]
