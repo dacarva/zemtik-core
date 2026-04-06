@@ -42,12 +42,8 @@
 - `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120) controls the timeout. Proxy returns HTTP 504 on expiry.
 - **Known gap:** `bb` is abandoned (not killed) on timeout — see "Kill abandoned bb on timeout" P3 item below.
 
-### Kill abandoned `bb` on timeout (DoS hardening)
-- **What:** Switch from `Command::output()` (blocking) to `Child` + `child.kill()` so the `bb` process is actually killed when the timeout fires, not just abandoned.
-- **Why:** The current timeout returns 504 to the client but leaves the `bb` child process running indefinitely. Under load, repeated timed-out ZK requests stack orphaned `bb` processes + temp directories, eventually exhausting process table and disk. Flagged by adversarial review (v0.5.2, two models).
-- **How to apply:** Use `Command::spawn()` → `Child`. On timeout, call `child.kill().ok()` and `child.wait().ok()`. Clean up temp dirs only after the child exits.
-- **Effort:** S (human ~2h) → S (CC+gstack ~15min)
-- **Priority:** P3 (current timeout mitigates deadlock; kill is a hardening step)
+### ~~Kill abandoned `bb` on timeout (DoS hardening)~~ ✓ DONE (v0.6.0, 2026-04-06)
+- `poll_child_with_timeout` in `prover.rs` kills and reaps `bb` on timeout. Applied to both `verify_proof` (prover.rs) and `verify_bundle` (verify.rs). **Completed:** v0.6.0 (2026-04-06)
 
 ### Integration tests for bb-dependent paths
 - **What:** Integration tests for `verify_bundle` happy path, `generate_bundle`, and `run_verify_cli` that require the `bb` binary.
@@ -255,6 +251,30 @@
 - **How to apply:** `TableConfig { ..., table_name: Option<String> }`. In `query_sum_by_category`, use `table_config.table_name.as_deref().unwrap_or(schema_key)` as the PostgREST table name.
 - **Effort:** XS (human: ~30min / CC: ~10min)
 - **Priority:** P3 — v0.6.0 pilots can name their Supabase table to match the schema key. Add before second client if table naming flexibility is needed.
+- **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+
+### /health endpoint: Supabase probe DoS and timing oracle (P2, before non-localhost deploy)
+- **What:** Rate-limit `GET /health` and move the Supabase liveness probe to a background ticker. The current `/health` fires a live PostgREST request on every call — unauthenticated (per TODOS P2 auth middleware TODO), enabling DoS via sustained polling that exhausts Supabase rate limits.
+- **Why:** Found by Claude adversarial review (v0.6.0 pre-landing). Any LAN attacker can exhaust Supabase API quota by looping `GET /health`. Also provides a timing oracle for Supabase key validity. For `127.0.0.1` deployments the attack surface is minimal.
+- **How to apply:** A) Add a background health-check task (tokio interval) that caches the last probe result. Return the cached result instantly. B) Rate-limit to 1 req/sec per IP. Full fix requires auth middleware.
+- **Effort:** S (human: ~1h / CC: ~15min)
+- **Priority:** P2 — low risk for localhost-only deployments; required before `ZEMTIK_BIND_ADDR=0.0.0.0`.
+- **Depends on:** Proxy auth middleware TODO.
+
+### ZK slow lane re-initializes DB on every request (P2)
+- **What:** `run_zk_pipeline` calls `db::init_db()` on every ZK slow lane request (proxy.rs:~1004). `init_db()` conditionally runs `ensure_supabase_table()` DDL and seeds 500 rows. Two concurrent ZK requests can double-seed (race between `supabase_is_empty` check and insertion). Even with `SUPABASE_AUTO_SEED=0`, calling `init_db()` per request is wasteful.
+- **Why:** Found by Claude adversarial review (v0.6.0 pre-landing). Concurrent ZK requests on a fresh Supabase table can double-seed data.
+- **How to apply:** Move DB initialization to `ProxyState` startup. Pass the initialized `DbBackend` through `Arc<ProxyState>`. Already done for `ledger_db` (SQLite), extend to Supabase backend.
+- **Effort:** M (human: ~2h / CC: ~20min)
+- **Priority:** P2 — low risk with `SUPABASE_AUTO_SEED=0` (new default), but the per-request `init_db` is still an unnecessary overhead.
+- **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+
+### init_supabase bypasses AppConfig (P3)
+- **What:** `init_supabase()` and `ensure_supabase_table()` in `db.rs` read `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` directly from `std::env::var`, bypassing the layered `AppConfig`. If a user sets these in `config.yaml`, the proxy's intent/routing path (which reads from `AppConfig`) works correctly, but `init_supabase` at startup still requires the env vars.
+- **Why:** Found by Claude adversarial review (v0.6.0 pre-landing). The two code paths can diverge: YAML config works for queries but startup fails if env vars are absent.
+- **How to apply:** Pass `AppConfig` (or at minimum `supabase_url: Option<String>`, `supabase_service_key: Option<String>`) into `init_db()` / `init_supabase()`.
+- **Effort:** S (human: ~1h / CC: ~15min)
+- **Priority:** P3 — affects only users who set Supabase credentials via YAML (not common; env vars are the documented path).
 - **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
 
 ### Restore aarch64-linux-gnu and x86_64-apple-darwin CI targets (P3)

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-04-06
+
+### Added
+- **Supabase FastLane connector** — `query_sum_by_category` queries PostgREST with stable pagination (`order=id`) and handles all page sizes, string amounts, and null amounts. Enables Supabase as the aggregation backend in the ZK slow lane.
+- **Configurable bind address** — `ZEMTIK_BIND_ADDR` env var (default `127.0.0.1:4000`) allows the proxy to bind to any address. The startup message reflects the actual listening address.
+- **Configurable CORS origins** — `ZEMTIK_CORS_ORIGINS` env var (comma-separated; `*` for wildcard) replaces the hardcoded localhost-only CORS policy. Mixing `*` with specific origins uses the wildcard policy.
+- **Multi-client support** — `ZEMTIK_CLIENT_ID` env var (default `123`) and per-table `client_id` override in `schema_config.json` enable multi-tenant Supabase deployments.
+- **`/health` endpoint** — `GET /health` returns `{"status":"ok","version":"..."}` and probes Supabase connectivity when `SUPABASE_URL` is configured.
+- **MessageContent normalization** — proxy now handles both plain-string `content` and the content-parts array format sent by openai-python v1.x and other modern SDKs.
+
+### Fixed
+- **`bb` process kill on timeout** — `verify_proof` and `bb verify` offline now kill and reap the `bb` child process on timeout instead of abandoning it. Eliminates zombie processes and resource leaks after timeout.
+- **Supabase auto-seed/DDL now opt-in** — `SUPABASE_AUTO_CREATE_TABLE` and `SUPABASE_AUTO_SEED` default to `false` (previously `true`). Set to `1` explicitly for local dev. Prevents demo rows from being silently inserted into client production databases.
+- **Supabase pagination sum overflow** — aggregate overflow now returns a hard error instead of silently dropping amounts (was `checked_add.unwrap_or(old_value)`).
+- **CORS wildcard race** — CORS wildcard (`*`) correctly activates even when mixed with specific origins in `ZEMTIK_CORS_ORIGINS`. Previously required the vec to be exactly `["*"]`.
+- **Empty prompt rejection** — requests with `null`, missing, or empty `content` fields now return HTTP 400 instead of silently routing to the expensive ZK slow lane.
+- **Release matrix** — removed `aarch64-unknown-linux-gnu` and `x86_64-apple-darwin` from CI cross-compilation (broken by `ort-sys@2.0.0-rc.11` ABI mismatch). `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu` remain.
+
 ## [0.5.2] - 2026-04-05
 
 ### Added
