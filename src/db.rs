@@ -455,7 +455,7 @@ pub async fn query_aggregate_table(
 
     let agg_expr = match agg_fn {
         crate::config::AggFn::Sum => format!("{}:sum({})", value_col, value_col),
-        crate::config::AggFn::Count => format!("{}:count()", value_col),
+        crate::config::AggFn::Count => format!("{}:{}.count()", value_col, value_col),
     };
 
     let mut endpoint = format!(

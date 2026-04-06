@@ -143,3 +143,4 @@ GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin inten
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).
 - EmbeddingBackend downloads BGE-small-en model (~130MB) on first proxy start to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip. First start can take 30–120s.
 - `IntentBackend` trait: `index_schema(&mut self, schema)` called once at startup; `match_prompt(&self, prompt, k)` returns sorted `Vec<(table_key, score)>`. Add new backends by implementing this trait.
+- **Testing model:** All curl examples, test payloads, and end-to-end tests use `gpt-5.4-nano` (hardcoded default in `src/openai.rs`). Do NOT use `gpt-4o` or other model names in test commands — they won't match the proxy fallback and will pass through unmodified.
