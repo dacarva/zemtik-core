@@ -6,7 +6,7 @@ Every time a company queries an LLM with internal data, it creates a **shadow co
 
 Zemtik solves this at the infrastructure layer: **compute the answer locally inside a Zero-Knowledge circuit, prove the computation was honest, and send only the proven number to the model.** Zero raw rows ever leave the perimeter.
 
-> **POC status (v0.6.1):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.7.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -58,7 +58,7 @@ Before reading further, understand what Zemtik v1 does **not** do:
 |---|---|
 | Connect to arbitrary Postgres directly | Not supported — requires Supabase/PostgREST in front of your DB |
 | ZK-prove queries with > 500 matching rows | Not supported — circuit is fixed at 500 rows (10 batches × 50) |
-| COUNT, AVG, multi-table JOINs, GROUP BY | Not supported — SUM with category + time window only |
+| COUNT (FastLane), AVG, multi-table JOINs, GROUP BY | COUNT is supported on FastLane (`"agg_fn": "COUNT"` in `schema_config.json`); AVG, JOINs, and GROUP BY require new ZK circuit variants |
 | Sub-second ZK proofs | Not supported — local CPU proving takes ~17s (GPU/FPGA required at scale) |
 | Eliminate need to trust the Zemtik process | Not possible — the binary reads the signing key and constructs witnesses |
 
@@ -210,9 +210,9 @@ zemtik-core/
 │   ├── intent_embed.rs   # EmbeddingBackend: fastembed BGE-small-en ONNX, cosine similarity
 │   ├── time_parser.rs    # DeterministicTimeParser: Q/H/FY/month/relative/YTD → Unix range
 │   ├── router.rs         # Routing decision (schema_config sensitivity → FastLane or ZK)
-│   ├── engine_fast.rs    # FastLane: DB sum → BabyJubJub attestation (sub-50ms)
+│   ├── engine_fast.rs    # FastLane: generic aggregate (SUM/COUNT) → BabyJubJub attestation (sub-50ms)
 │   ├── evidence.rs       # EvidencePack builder for both engine paths
-│   ├── db.rs             # DB backend (SQLite / Supabase) + BabyJubJub KMS + sum_by_category
+│   ├── db.rs             # DB backend (SQLite / Supabase) + BabyJubJub KMS + aggregate_table
 │   ├── prover.rs         # nargo / bb subprocess pipeline
 │   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs          # Audit record writer
@@ -289,7 +289,7 @@ bb verify -p proof -k vk
 - **No raw Postgres connector** — `DB_BACKEND` supports `sqlite` (demo) and `supabase` (PostgREST). Connecting an arbitrary Postgres database requires PostgREST deployed in front of it. A native `sqlx` connector (`DB_BACKEND=postgres`) is planned for v2.
 - **File-based signing key** — `~/.zemtik/keys/bank_sk` is the BabyJubJub private key. A compromised file produces validly-signed but fraudulent proofs. Production deployments must use an HSM or KMS.
 - **ZK proof generation blocked** — `bb prove` fails on the current circuit due to an incompatibility between `eddsa v0.1.3` and Barretenberg v3+/v4+ BigField operations. `nargo execute` validates all constraints successfully. The blocker is in the `eddsa` Noir library, not in Zemtik's circuit logic — unblocked when the library is updated.
-- **Single query type** — `SUM(amount) WHERE category AND time_range`. COUNT, AVG, GROUP BY, and multi-table JOINs require new circuit variants.
+- **FastLane query types** — FastLane supports `SUM` and `COUNT` via `"agg_fn"` in `schema_config.json`. AVG, GROUP BY, and multi-table JOINs require new ZK circuit variants and are not supported.
 - **CLI pipeline is hardcoded** — 500 transactions, client 123, `aws_spend`, Q1 2024. Proxy mode supports natural-language queries against tables in `schema_config.json`.
 - **Local CPU proving** — ~17s per query. Sub-second latency requires GPU/FPGA hardware on-prem (remote proving exposes the private witness — see [docs/SCALING.md](docs/SCALING.md)).
 

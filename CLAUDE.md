@@ -75,7 +75,7 @@ POST /v1/chat/completions (user prompt)
       │     → unrecognized time token → Err(TimeRangeAmbiguous) → ZK SlowLane
       └── RegexBackend (fallback if model unavailable): keyword/.contains() matching
   → Routing decision (router.rs — schema_config.json sensitivity)
-      ├── FastLane (low sensitivity): DB sum → BabyJubJub attestation → EvidencePack
+      ├── FastLane (low sensitivity): DB aggregate (SUM or COUNT) → BabyJubJub attestation → EvidencePack
       └── ZK SlowLane (critical sensitivity):
             Raw Transactions (private witnesses, never leave the host)
               → BabyJubJub EdDSA signing (per batch of 50)
@@ -95,14 +95,14 @@ POST /v1/chat/completions (user prompt)
 | `intent_embed.rs` | `EmbeddingBackend` (fastembed + BGE-small-en ONNX, CPU-only); schema index builder; cosine similarity |
 | `time_parser.rs` | `DeterministicTimeParser` — Q/H/FY/MMM/relative/YTD patterns; unrecognized → `TimeRangeAmbiguous` |
 | `router.rs` | Routing decision: `schema_config.json` sensitivity → `FastLane` or `ZkSlowLane` |
-| `engine_fast.rs` | FastLane: DB SUM → BabyJubJub attestation (no ZK, fully concurrent) |
+| `engine_fast.rs` | FastLane: generic `aggregate_table()` (SUM or COUNT) → BabyJubJub attestation `attest_fast_lane()` (no ZK, fully concurrent); `signing_version: 2` |
 | `evidence.rs` | Builds `EvidencePack` for both engine paths (attestation_hash or proof_hash) |
-| `db.rs` | DB abstraction (SQLite + Supabase); transaction seeding; EdDSA signing; `sum_by_category` |
+| `db.rs` | DB abstraction (SQLite + Supabase); transaction seeding; EdDSA signing; `aggregate_table()` / `query_aggregate_table()` (generic SUM/COUNT; `sum_by_category` deprecated since v0.7.0) |
 | `prover.rs` | Subprocess management for `nargo compile`, `nargo execute`, `bb generate` |
 | `verify.rs` | Proof bundle extraction + `bb verify` invocation |
 | `bundle.rs` | ZIP bundle creation for portable proofs |
 | `openai.rs` | OpenAI Chat Completions API client |
-| `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json` |
+| `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json`; `AggFn` enum (SUM/COUNT); identifier validation; `use_supabase_fast_lane()` |
 | `receipts.rs` | SQLite receipts ledger (CRUD + v3 migration: adds `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
@@ -136,7 +136,7 @@ GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin inten
 
 - CLI pipeline query is hardcoded (500 txs, client 123, `aws_spend`, Q1 2024). Proxy mode supports natural-language queries via `schema_config.json`-defined tables.
 - `schema_config.json` required in proxy mode — copy `schema_config.example.json` to `~/.zemtik/schema_config.json`. Tables must include `description` and `example_prompts` fields for the embedding backend.
-- FastLane always uses the in-memory seeded SQLite ledger (Supabase FastLane connector deferred to v2).
+- FastLane supports both `DB_BACKEND=sqlite` (in-memory seeded ledger) and `DB_BACKEND=supabase` (PostgREST). The Supabase path uses the generic `query_aggregate_table()` introduced in v0.7.0. `DB_BACKEND=supabase` must be set explicitly — Supabase credentials alone do not activate the Supabase path (ISSUE-001 fix).
 - The ZK slow lane supports any table key via Poseidon BN254 hashing (Sprint 2). No code change needed — just add the table to `schema_config.json` with `"sensitivity": "critical"`.
 - `bb verify` has a configurable timeout (`ZEMTIK_VERIFY_TIMEOUT_SECS`, default 120s); returns HTTP 504 on expiry. On timeout, the `bb` child process is killed and reaped (fixed in v0.6.0).
 - `--no-verify` hook bypass and force-push to main are never acceptable.
