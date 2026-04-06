@@ -22,6 +22,10 @@ Key routing rules:
 - Write Rust code → invoke rust-best-practices
 - Write zk circuits in Noir - → invoke noir-idioms
 
+## Testing conventions
+
+Write tests in the `tests/` directory, not inline in `src/`. Inline `#[cfg(test)]` modules are only acceptable when tests must access private functions or types that cannot be exposed. In all other cases, add tests to the appropriate `tests/test_<module>.rs` file (or create one if it doesn't exist). New test files follow the naming convention `test_<module>.rs` and import via `use zemtik::<module>::<item>`.
+
 ## Commands
 
 ```bash

@@ -357,31 +357,3 @@ pub fn read_proof_artifacts(run_dir: &Path) -> anyhow::Result<Option<(String, St
     Ok(Some((hex::encode(&proof_bytes), hex::encode(&vk_bytes))))
 }
 
-#[cfg(test)]
-mod poll_child_tests {
-    use super::*;
-
-    #[test]
-    fn kill_on_timeout_kills_and_returns_err() {
-        let mut child = Command::new("sleep")
-            .arg("5")
-            .spawn()
-            .expect("spawn sleep");
-        let result = poll_child_with_timeout(&mut child, 1);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("timed out"), "expected 'timed out' in: {}", msg);
-        // Process should be reaped — try_wait returns Some (not None/zombie)
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "child should be reaped after kill+wait"
-        );
-    }
-
-    #[test]
-    fn success_path_returns_exit_status() {
-        let mut child = Command::new("true").spawn().expect("spawn true");
-        let status = poll_child_with_timeout(&mut child, 5).expect("should succeed");
-        assert!(status.success());
-    }
-}

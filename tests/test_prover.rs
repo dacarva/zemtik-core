@@ -1,6 +1,7 @@
+use std::process::Command;
 use tempfile::TempDir;
 use zemtik::db::BATCH_SIZE;
-use zemtik::prover::{generate_batched_prover_toml, hex_output_to_u64, read_proof_artifacts};
+use zemtik::prover::{generate_batched_prover_toml, hex_output_to_u64, poll_child_with_timeout, read_proof_artifacts};
 use zemtik::types::{QueryParams, SignatureData, Transaction};
 
 fn dummy_sig() -> SignatureData {
@@ -89,4 +90,27 @@ fn read_proof_artifacts_returns_none_when_files_absent() {
     let dir = TempDir::new().unwrap();
     let result = read_proof_artifacts(dir.path()).unwrap();
     assert!(result.is_none());
+}
+
+#[test]
+fn kill_on_timeout_kills_and_returns_err() {
+    let mut child = Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawn sleep");
+    let result = poll_child_with_timeout(&mut child, 1);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("timed out"), "expected 'timed out' in: {}", msg);
+    assert!(
+        child.try_wait().unwrap().is_some(),
+        "child should be reaped after kill+wait"
+    );
+}
+
+#[test]
+fn success_path_returns_exit_status() {
+    let mut child = Command::new("true").spawn().expect("spawn true");
+    let status = poll_child_with_timeout(&mut child, 5).expect("should succeed");
+    assert!(status.success());
 }

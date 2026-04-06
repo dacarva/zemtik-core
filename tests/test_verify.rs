@@ -1,8 +1,44 @@
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
+use zemtik::prover::read_verify_timeout;
 use zip::write::SimpleFileOptions;
+
+// Serialize all env-var tests — parallel mutation of the same var is racy.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn test_verify_timeout_env_parsing_default() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+    assert_eq!(read_verify_timeout(), 120);
+}
+
+#[test]
+fn test_verify_timeout_env_parsing_custom() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "60");
+    assert_eq!(read_verify_timeout(), 60);
+    std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+}
+
+#[test]
+fn test_verify_timeout_env_parsing_zero() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "0");
+    assert_eq!(read_verify_timeout(), 120);
+    std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+}
+
+#[test]
+fn test_verify_timeout_env_parsing_invalid() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("ZEMTIK_VERIFY_TIMEOUT_SECS", "notanumber");
+    assert_eq!(read_verify_timeout(), 120);
+    std::env::remove_var("ZEMTIK_VERIFY_TIMEOUT_SECS");
+}
 
 /// Regression: ISSUE-001 — zip-slip path traversal en verify_bundle
 /// Found by /qa on 2026-03-26

@@ -7,6 +7,10 @@ fn default_cli() -> CliArgs {
     CliArgs::default()
 }
 
+fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
 #[test]
 fn defaults_when_yaml_missing() {
     let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
@@ -215,8 +219,70 @@ fn bind_addr_default_uses_proxy_port() {
 
 #[test]
 fn bind_addr_follows_proxy_port_env() {
-    let mut env = HashMap::new();
-    env.insert("ZEMTIK_PROXY_PORT".to_owned(), "9999".to_owned());
-    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    let mut env_map = HashMap::new();
+    env_map.insert("ZEMTIK_PROXY_PORT".to_owned(), "9999".to_owned());
+    let config = load_from_sources(None, &env_map, &default_cli()).unwrap();
     assert_eq!(config.bind_addr, "127.0.0.1:9999");
+}
+
+#[test]
+fn bind_addr_from_proxy_port_yaml() {
+    let yaml = "proxy_port: 8080\n";
+    let config = load_from_sources(Some(yaml), &env(&[]), &default_cli()).unwrap();
+    assert_eq!(config.bind_addr, "127.0.0.1:8080");
+}
+
+#[test]
+fn bind_addr_env_wins_over_yaml_proxy_port() {
+    let yaml = "proxy_port: 8080\n";
+    let config = load_from_sources(Some(yaml), &env(&[("ZEMTIK_BIND_ADDR", "0.0.0.0:4000")]), &default_cli()).unwrap();
+    assert_eq!(config.bind_addr, "0.0.0.0:4000");
+}
+
+#[test]
+fn cors_origins_trims_whitespace() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_CORS_ORIGINS", " http://a.com , http://b.com ")]), &default_cli()).unwrap();
+    assert_eq!(config.cors_origins, vec!["http://a.com", "http://b.com"]);
+}
+
+#[test]
+fn cors_origins_default() {
+    let config = load_from_sources(None, &env(&[]), &default_cli()).unwrap();
+    assert_eq!(config.cors_origins, vec!["http://localhost:4000"]);
+}
+
+#[test]
+fn client_id_invalid_env_returns_err() {
+    let result = load_from_sources(None, &env(&[("ZEMTIK_CLIENT_ID", "not_a_number")]), &default_cli());
+    assert!(result.is_err());
+}
+
+#[test]
+fn table_config_with_client_id_deserializes() {
+    let json = r#"{"sensitivity":"critical","description":"test","example_prompts":["foo"],"client_id":1001}"#;
+    let tc: TableConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(tc.client_id, Some(1001i64));
+}
+
+#[test]
+fn table_config_without_client_id_is_none() {
+    let json = r#"{"sensitivity":"critical","description":"test","example_prompts":["foo"]}"#;
+    let tc: TableConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(tc.client_id, None);
+}
+
+#[test]
+fn effective_client_id_uses_table_override() {
+    let table_client_id: Option<i64> = Some(1001);
+    let global_client_id: i64 = 123;
+    let effective = table_client_id.unwrap_or(global_client_id);
+    assert_eq!(effective, 1001);
+}
+
+#[test]
+fn effective_client_id_falls_back_to_global() {
+    let table_client_id: Option<i64> = None;
+    let global_client_id: i64 = 123;
+    let effective = table_client_id.unwrap_or(global_client_id);
+    assert_eq!(effective, 123);
 }
