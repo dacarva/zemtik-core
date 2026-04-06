@@ -302,6 +302,20 @@ pub struct AppConfig {
     /// Supabase service role key. Env: SUPABASE_SERVICE_KEY.
     #[serde(skip)]
     pub supabase_service_key: Option<String>,
+    /// Resolved DB backend ("sqlite" or "supabase"). Populated from DB_BACKEND env var.
+    #[serde(skip)]
+    pub db_backend: String,
+}
+
+impl AppConfig {
+    /// Returns true only when DB_BACKEND=supabase AND both credentials are present.
+    /// Having credentials alone does not activate the Supabase FastLane path —
+    /// the operator must explicitly opt in via DB_BACKEND=supabase.
+    pub fn use_supabase_fast_lane(&self) -> bool {
+        self.db_backend == "supabase"
+            && self.supabase_url.is_some()
+            && self.supabase_service_key.is_some()
+    }
 }
 
 impl Default for AppConfig {
@@ -328,6 +342,7 @@ impl Default for AppConfig {
             client_id: 123,
             supabase_url: None,
             supabase_service_key: None,
+            db_backend: "sqlite".to_owned(),
         }
     }
 }
@@ -419,6 +434,9 @@ pub fn load_from_sources(
     }
     if let Some(v) = env.get("ZEMTIK_CLIENT_ID") {
         config.client_id = v.trim().parse::<i64>().context("parse ZEMTIK_CLIENT_ID")?;
+    }
+    if let Some(v) = env.get("DB_BACKEND") {
+        config.db_backend = v.trim().to_owned();
     }
     if let Some(v) = env.get("SUPABASE_URL") {
         config.supabase_url = Some(v.clone());

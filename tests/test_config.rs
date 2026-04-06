@@ -416,3 +416,44 @@ fn table_config_agg_fn_lowercase_rejected() {
     let result: Result<TableConfig, _> = serde_json::from_str(json);
     assert!(result.is_err(), "lowercase 'sum' should be rejected — uppercase required");
 }
+
+// Regression: ISSUE-001 — FastLane used Supabase path even when DB_BACKEND=sqlite
+// Found by /qa on 2026-04-06
+// Report: .gstack/qa-reports/qa-report-zemtik-proxy-2026-04-06.md
+#[test]
+fn use_supabase_fast_lane_false_when_db_backend_sqlite_despite_credentials() {
+    let mut env = HashMap::new();
+    env.insert("DB_BACKEND".to_owned(), "sqlite".to_owned());
+    env.insert("SUPABASE_URL".to_owned(), "https://proj.supabase.co".to_owned());
+    env.insert("SUPABASE_SERVICE_KEY".to_owned(), "secret-key".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert!(
+        !config.use_supabase_fast_lane(),
+        "DB_BACKEND=sqlite must prevent Supabase FastLane even when credentials are present"
+    );
+}
+
+#[test]
+fn use_supabase_fast_lane_true_only_when_db_backend_supabase_and_creds_set() {
+    let mut env = HashMap::new();
+    env.insert("DB_BACKEND".to_owned(), "supabase".to_owned());
+    env.insert("SUPABASE_URL".to_owned(), "https://proj.supabase.co".to_owned());
+    env.insert("SUPABASE_SERVICE_KEY".to_owned(), "secret-key".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert!(
+        config.use_supabase_fast_lane(),
+        "DB_BACKEND=supabase with both credentials should enable Supabase FastLane"
+    );
+}
+
+#[test]
+fn use_supabase_fast_lane_false_when_missing_service_key() {
+    let mut env = HashMap::new();
+    env.insert("DB_BACKEND".to_owned(), "supabase".to_owned());
+    env.insert("SUPABASE_URL".to_owned(), "https://proj.supabase.co".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert!(
+        !config.use_supabase_fast_lane(),
+        "DB_BACKEND=supabase without service key must not activate Supabase FastLane"
+    );
+}
