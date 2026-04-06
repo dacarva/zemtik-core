@@ -350,10 +350,14 @@ async fn handle_fast_lane(
     let client_id = effective_client_id;
     let table = intent_result.table.clone();
 
-    let engine_result: EngineResult = if let (Some(url), Some(svc_key)) = (
-        &state.config.supabase_url,
-        &state.config.supabase_service_key,
-    ) {
+    let db_backend = std::env::var("DB_BACKEND").unwrap_or_default();
+    let engine_result: EngineResult = if db_backend.eq_ignore_ascii_case("supabase") {
+        let (url, svc_key) = match (&state.config.supabase_url, &state.config.supabase_service_key) {
+            (Some(u), Some(k)) => (u, k),
+            _ => return Err(ProxyError::Internal(anyhow::anyhow!(
+                "DB_BACKEND=supabase but SUPABASE_URL or SUPABASE_SERVICE_KEY not set"
+            ))),
+        };
         // Supabase path: query PostgREST, then sign the aggregate
         let (aggregate, row_count) = db::query_sum_by_category(
             &state.http_client,
