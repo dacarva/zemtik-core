@@ -147,7 +147,10 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         intent_backend,
     });
 
-    let cors = if config.cors_origins == ["*"] {
+    // If any configured origin is "*", use the wildcard policy.
+    // Mixing "*" with specific origins (e.g. "*, https://app") is unsupported —
+    // the "*" takes precedence so callers don't get surprising no-CORS responses.
+    let cors = if config.cors_origins.iter().any(|o| o == "*") {
         CorsLayer::new()
             .allow_origin(tower_http::cors::Any)
             .allow_methods(tower_http::cors::Any)
@@ -184,12 +187,12 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         "[PROXY] Intercepts POST /v1/chat/completions → ZK pipeline → forwards to OpenAI"
     );
     println!(
-        "[PROXY] Point your app to http://localhost:{} instead of api.openai.com",
-        config.proxy_port
+        "[PROXY] Point your app to http://{} instead of api.openai.com",
+        addr
     );
     println!(
-        "[PROXY] Verify receipts at http://localhost:{}/verify/<bundle-id>",
-        config.proxy_port
+        "[PROXY] Verify receipts at http://{}/verify/<bundle-id>",
+        addr
     );
     println!();
 
@@ -247,6 +250,14 @@ async fn handle_chat_completions(
                 .unwrap_or_default()
         })
         .unwrap_or_default();
+
+    // Reject empty prompts early — an empty string silently triggers the expensive
+    // ZK slow lane (intent returns NoTableIdentified → ZK fallback). Return 400 instead.
+    if prompt.trim().is_empty() {
+        return Err(ProxyError::BadRequest(
+            "user message content is empty or unreadable — ensure the last message has role 'user' with non-empty text content".to_owned(),
+        ));
+    }
 
     // Extract intent using SchemaConfig
     let schema = state.config.schema_config.as_ref().ok_or_else(|| {
@@ -1177,11 +1188,24 @@ async fn handle_passthrough() -> impl IntoResponse {
 enum ProxyError {
     Internal(anyhow::Error),
     Timeout(String),
+    BadRequest(String),
 }
 
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
         match self {
+            ProxyError::BadRequest(msg) => {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": msg,
+                            "type": "invalid_request_error"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
             ProxyError::Timeout(msg) => {
                 eprintln!("[ZK] Timeout: {}", msg);
                 (
