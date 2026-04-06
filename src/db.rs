@@ -894,6 +894,59 @@ mod supabase_query_tests {
 }
 
 #[cfg(test)]
+mod auto_flag_tests {
+    use super::*;
+
+    #[test]
+    fn auto_seed_default_is_false_when_unset() {
+        std::env::remove_var("SUPABASE_AUTO_SEED");
+        assert!(!supabase_auto_seed_enabled(), "must be opt-in — default must be false");
+    }
+
+    #[test]
+    fn auto_seed_enabled_for_truthy_values() {
+        for val in &["1", "true", "yes", "on", "TRUE", "YES"] {
+            std::env::set_var("SUPABASE_AUTO_SEED", val);
+            assert!(supabase_auto_seed_enabled(), "expected true for '{}'", val);
+        }
+        std::env::remove_var("SUPABASE_AUTO_SEED");
+    }
+
+    #[test]
+    fn auto_seed_disabled_for_falsy_and_empty() {
+        for val in &["0", "false", "no", "off", "", "random"] {
+            std::env::set_var("SUPABASE_AUTO_SEED", val);
+            assert!(!supabase_auto_seed_enabled(), "expected false for '{}'", val);
+        }
+        std::env::remove_var("SUPABASE_AUTO_SEED");
+    }
+
+    #[test]
+    fn auto_create_table_default_is_false_when_unset() {
+        std::env::remove_var("SUPABASE_AUTO_CREATE_TABLE");
+        assert!(!supabase_auto_create_table_enabled(), "must be opt-in — default must be false");
+    }
+
+    #[test]
+    fn auto_create_table_enabled_for_truthy_values() {
+        for val in &["1", "true", "yes", "on"] {
+            std::env::set_var("SUPABASE_AUTO_CREATE_TABLE", val);
+            assert!(supabase_auto_create_table_enabled(), "expected true for '{}'", val);
+        }
+        std::env::remove_var("SUPABASE_AUTO_CREATE_TABLE");
+    }
+
+    #[test]
+    fn auto_create_table_disabled_for_falsy() {
+        for val in &["0", "false", "no", "off", ""] {
+            std::env::set_var("SUPABASE_AUTO_CREATE_TABLE", val);
+            assert!(!supabase_auto_create_table_enabled(), "expected false for '{}'", val);
+        }
+        std::env::remove_var("SUPABASE_AUTO_CREATE_TABLE");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

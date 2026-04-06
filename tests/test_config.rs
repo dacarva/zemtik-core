@@ -158,3 +158,65 @@ fn default_intent_confidence_threshold() {
     let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
     assert!((config.intent_confidence_threshold - 0.65).abs() < 0.001);
 }
+
+#[test]
+fn client_id_env_var() {
+    let mut env = HashMap::new();
+    env.insert("ZEMTIK_CLIENT_ID".to_owned(), "999".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.client_id, 999);
+}
+
+#[test]
+fn client_id_default_is_123() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert_eq!(config.client_id, 123);
+}
+
+#[test]
+fn supabase_url_and_key_env_vars() {
+    let mut env = HashMap::new();
+    env.insert("SUPABASE_URL".to_owned(), "https://proj.supabase.co".to_owned());
+    env.insert("SUPABASE_SERVICE_KEY".to_owned(), "secret-key".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.supabase_url.as_deref(), Some("https://proj.supabase.co"));
+    assert_eq!(config.supabase_service_key.as_deref(), Some("secret-key"));
+}
+
+#[test]
+fn cors_origins_comma_split() {
+    let mut env = HashMap::new();
+    env.insert("ZEMTIK_CORS_ORIGINS".to_owned(), "http://app.example.com,https://app.example.com".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.cors_origins, vec!["http://app.example.com", "https://app.example.com"]);
+}
+
+#[test]
+fn cors_origins_wildcard() {
+    let mut env = HashMap::new();
+    env.insert("ZEMTIK_CORS_ORIGINS".to_owned(), "*".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.cors_origins, vec!["*"]);
+}
+
+#[test]
+fn bind_addr_from_env_zemtik_bind_addr() {
+    let mut env = HashMap::new();
+    env.insert("ZEMTIK_BIND_ADDR".to_owned(), "0.0.0.0:8080".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.bind_addr, "0.0.0.0:8080");
+}
+
+#[test]
+fn bind_addr_default_uses_proxy_port() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert_eq!(config.bind_addr, "127.0.0.1:4000");
+}
+
+#[test]
+fn bind_addr_follows_proxy_port_env() {
+    let mut env = HashMap::new();
+    env.insert("ZEMTIK_PROXY_PORT".to_owned(), "9999".to_owned());
+    let config = load_from_sources(None, &env, &default_cli()).unwrap();
+    assert_eq!(config.bind_addr, "127.0.0.1:9999");
+}
