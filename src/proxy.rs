@@ -357,10 +357,13 @@ async fn handle_fast_lane(
         .ok_or_else(|| ProxyError::Internal(anyhow::anyhow!("routing bug: table '{}' not in schema", table)))?;
     let metric_label = table_config.metric_label.clone();
 
-    let engine_result: EngineResult = if let (Some(url), Some(svc_key)) = (
-        &state.config.supabase_url,
-        &state.config.supabase_service_key,
-    ) {
+    let use_supabase = std::env::var("DB_BACKEND").unwrap_or_default() == "supabase"
+        && state.config.supabase_url.is_some()
+        && state.config.supabase_service_key.is_some();
+
+    let engine_result: EngineResult = if use_supabase {
+        let url = state.config.supabase_url.as_ref().unwrap();
+        let svc_key = state.config.supabase_service_key.as_ref().unwrap();
         // Supabase path: query PostgREST with generic aggregate, then sign the result.
         let physical_table = table_config.resolved_table(&table).to_owned();
         let (aggregate, row_count) = db::query_aggregate_table(
