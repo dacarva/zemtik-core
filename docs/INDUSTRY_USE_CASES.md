@@ -8,7 +8,7 @@
 
 Every example in this document follows the same integration pattern:
 
-1. Point Zemtik at your existing table (via `physical_table` in `schema_config.json`)
+1. Point Zemtik at your existing table (via `physical_table` in `schema_config.json` — Supabase/PostgREST backend only; the SQLite demo ledger always uses the built-in `transactions` table regardless of this setting)
 2. Map your column names (`value_column`, `timestamp_column`, `category_column`)
 3. Choose sensitivity (`"low"` for FastLane attestation, `"critical"` for ZK proof)
 4. Send natural-language queries — Zemtik returns only the cryptographically attested aggregate
@@ -578,7 +578,7 @@ All seven examples follow the same five-step process:
 
 | Your table | Zemtik parameter | Notes |
 |-----------|-----------------|-------|
-| The table name | `physical_table` | Any table visible to PostgREST |
+| The table name | `physical_table` | Any table visible to PostgREST (Supabase backend only; ignored on SQLite) |
 | The column to aggregate | `value_column` | Must be numeric for SUM; any non-null column for COUNT |
 | The column for time filtering | `timestamp_column` | Must be UNIX epoch seconds (BIGINT) |
 | The column for category filtering | `category_column` | Set to `null` to aggregate the whole table |
@@ -611,7 +611,7 @@ Zemtik expects `timestamp_column` to contain UNIX epoch seconds as a `BIGINT`. M
 | Non-sensitive operational data (order count, contract count) | `"low"` — FastLane attestation, < 50ms |
 | Public-facing metrics | `"low"` — FastLane attestation |
 
-When in doubt, use `"critical"`. The ZK proof is slower (~17s) but provides a mathematical guarantee. FastLane provides a BabyJubJub EdDSA attestation — cryptographically binding, but not a succinct proof.
+When in doubt, use `"critical"`. The ZK proof is slower (~17s) but provides a mathematical guarantee. FastLane provides a BabyJubJub EdDSA attestation — cryptographically binding, but not a succinct proof. **Exception:** `agg_fn: "COUNT"` cannot be paired with `sensitivity: "critical"` — the ZK circuit only handles SUM over BN254 field elements. For COUNT-based tables, use `sensitivity: "low"` (FastLane attestation).
 
 ### Step 5 — Write example prompts
 
