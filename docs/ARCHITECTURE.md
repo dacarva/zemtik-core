@@ -223,6 +223,251 @@ In all cases, individual transaction amounts, timestamps, and client identifiers
 
 ---
 
+---
+
+## Data Ingestion & Aggregation: From SQL to Zero-Knowledge
+
+This section walks through exactly what happens when Zemtik processes a real query against a real database — from the SQL schema through to the payload sent to the LLM. No magic.
+
+### Step 0: Schema Conformance
+
+v1 requires your table to expose five columns with these exact names and types. Additional columns (PII, metadata, signatures) are harmlessly ignored.
+
+```sql
+-- Your enterprise table. Zemtik only touches the five columns below.
+CREATE TABLE transactions (
+    id            BIGINT PRIMARY KEY,
+    client_id     BIGINT        NOT NULL,  -- tenant / cost-centre identifier
+    amount        BIGINT        NOT NULL,  -- integer currency units (e.g. USD cents)
+    category_name VARCHAR(93)   NOT NULL,  -- must match a key in schema_config.json
+    timestamp     BIGINT        NOT NULL,  -- UNIX epoch seconds
+
+    -- Everything below is ignored by Zemtik's query — it never appears in SELECT
+    user_name     TEXT,                    -- PII: never read, never signed, never sent
+    description   TEXT,                    -- free-text: same
+    db_signature  TEXT                     -- your own DB-level integrity field: same
+);
+```
+
+The `category_name` values must match the keys you declare in `schema_config.json`. Zemtik converts each key to a BN254 field element via `poseidon_of_string(key)` — trim + lowercase → three 31-byte chunks → `bn254::hash_3`. The Noir circuit receives this hash as a public input and uses it to filter rows without ever seeing the string itself.
+
+**The only SQL Zemtik executes is:**
+
+```sql
+-- FastLane (aggregate only — no rows ever leave the DB layer):
+SELECT SUM(amount), COUNT(*)
+FROM   transactions
+WHERE  category_name = $1          -- matched to schema_config.json key
+  AND  timestamp     >= $2         -- UNIX seconds from DeterministicTimeParser
+  AND  timestamp     <= $3
+  AND  client_id     = $4;         -- from ZEMTIK_CLIENT_ID (default 123)
+
+-- ZK SlowLane (fetches rows for private-witness construction):
+SELECT amount, category_name, timestamp
+FROM   transactions
+WHERE  client_id = $1
+ORDER  BY id
+LIMIT  500;                        -- hard limit: circuit accepts exactly 500 rows
+```
+
+### Step 1 (Fast Lane) — "What is the total marketing spend last quarter?"
+
+Concretely, this is what executes at each layer.
+
+**1. Intent extraction** (`src/intent.rs`, `src/intent_embed.rs`)
+
+The proxy receives `POST /v1/chat/completions` with `"content": "What is the total marketing spend last quarter?"`.
+
+- EmbeddingBackend encodes the prompt via BGE-small-en ONNX and runs cosine similarity over the schema index.
+- `DeterministicTimeParser` (`src/time_parser.rs`) extracts `"last quarter"` → Q4 2025 → `(1727740800, 1735689599)` Unix seconds.
+- Returns: `IntentResult { table: "marketing", time_range: (1727740800, 1735689599), confidence: 0.89 }`
+
+**2. Routing** (`src/router.rs`)
+
+```rust
+// schema_config.json: "marketing": { "sensitivity": "low", ... }
+decide_route(&intent, &schema) // → Route::FastLane
+```
+
+**3. Database query** (`src/db.rs::sum_by_category`)
+
+```sql
+SELECT SUM(amount), COUNT(*)
+FROM   transactions
+WHERE  category_name = 'marketing'
+  AND  timestamp >= 1727740800
+  AND  timestamp <= 1735689599
+  AND  client_id = 123;
+-- → (41200000, 47)   -- $412,000.00 in cents; 47 matching rows
+```
+
+Individual rows, `user_name`, and `description` are **never fetched**.
+
+**4. Attestation** (`src/engine_fast.rs::attest_fast_lane`)
+
+```
+SHA-256("marketing" || 1727740800_le || 1735689599_le || 41200000_le || 47_le || now_le)
+  → 32-byte payload hash
+
+BabyJubJub EdDSA sign(bank_sk, payload_hash)
+  → (sig_r8_x, sig_r8_y, sig_s)
+
+attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
+```
+
+**5. OpenAI payload (what actually crosses the perimeter)**
+
+```json
+{
+  "role": "user",
+  "content": "The verified aggregate for marketing (Q4 2025) is $412,000.\nEvidence: { \"engine\": \"fastlane\", \"aggregate\": 412000, \"row_count\": 47, \"data_exfiltrated\": 0, \"attestation_hash\": \"a3f9...\" }"
+}
+```
+
+What is **not** in the payload: no `user_name`, no individual transaction amounts, no timestamps, no account identifiers.
+
+Total latency: **< 50 ms**.
+
+---
+
+### Step 2 (ZK Slow Lane) — "What is the total payroll this quarter?"
+
+**1. Intent + routing**
+
+Same extraction as above. `schema_config.json` has `"payroll": { "sensitivity": "critical" }`.
+
+```rust
+decide_route(&intent, &schema) // → Route::ZkSlowLane
+```
+
+**2. Fetch private witnesses** (`src/db.rs::query_transactions`)
+
+```sql
+SELECT amount, category_name, timestamp
+FROM   transactions
+WHERE  client_id = 123
+ORDER  BY id
+LIMIT  500;
+-- Returns up to 500 rows — the hard circuit limit.
+-- If your query window contains > 500 rows the pipeline will error.
+-- See SCALING.md for the production multi-batch path.
+```
+
+Rows stay **inside the Rust process** as in-memory structs. They are private witnesses — never written to disk, never sent over the network.
+
+**3. Category hash** (`src/db.rs::poseidon_of_string`)
+
+```
+"payroll"
+  → trim + lowercase → b"payroll" (7 bytes)
+  → zero-pad to 3 × 31-byte chunks: [chunk0=b"payroll\x00...", chunk1=0, chunk2=0]
+  → bn254::hash_3([chunk0, chunk1, chunk2])
+  → Field(0x1d3f...)   ← target_category_hash (PUBLIC input to circuit)
+```
+
+**4. Batch signing** — 500 rows → 10 batches of 50 (`src/db.rs::sign_transaction_batches`)
+
+For each batch:
+
+```
+L1: hash_3([amount_i, category_hash_i, timestamp_i])  × 50 rows
+L2: hash_5([L1[0..4]]),  hash_5([L1[5..9]]),  …       × 10
+L3: hash_5([L2[0..4]]),  hash_5([L2[5..9]])            × 2
+L4: hash_2([L3[0], L3[1]])                             → batch_commitment
+
+sig = EdDSA_sign(bank_sk, batch_commitment)
+    → (sig_s, sig_r8_x, sig_r8_y)
+```
+
+**5. Witness file** (`src/prover.rs::generate_batched_prover_toml`) — written to a temp run directory, never persisted to `~/.zemtik/`
+
+```toml
+# Public inputs — visible to the verifier
+target_category_hash = "8029374..."
+start_time           = "1735689600"
+end_time             = "1743465599"
+bank_pub_key_x       = "11559732..."
+bank_pub_key_y       = "17671386..."
+
+# Private inputs — hidden from the verifier, never leave the process
+[[batches]]
+sig_s    = "2819374..."
+sig_r8_x = "9182736..."
+sig_r8_y = "1029384..."
+
+[[batches.transactions]]
+amount    = "12500000"    # $125,000.00 in cents
+category  = "8029374..."  # poseidon_of_string("payroll") — same as target
+timestamp = "1735689601"
+
+[[batches.transactions]]
+amount    = "7500000"     # $75,000.00
+category  = "8029374..."
+timestamp = "1735689602"
+# ... 48 more rows in this batch; 9 more batches follow
+```
+
+**6. Noir circuit** (`circuit/src/main.nr`)
+
+For each of the 10 batches, `process_batch()`:
+
+1. Rebuilds the identical 4-level Poseidon commitment tree from the private transaction rows.
+2. Runs `assert(eddsa_verify(bank_pub_key_x, bank_pub_key_y, sig_s, sig_r8_x, sig_r8_y, batch_commitment))`. If the data was tampered with, this assertion fails and no valid witness exists.
+3. Accumulates a branchless masked sum:
+   ```noir
+   total += if (tx.category == target_category_hash)
+               & (tx.timestamp >= start_time)
+               & (tx.timestamp <= end_time)
+            { tx.amount as Field } else { 0 };
+   ```
+
+`main()` sums the 10 partial aggregates and returns a single public `Field`.
+
+**7. Proof generation**
+
+```bash
+nargo execute   # constraint check + witness; returns aggregate as hex
+bb prove        # UltraHonk proof (728k gates, ~17s on CPU)
+bb verify       # local soundness check before forwarding to OpenAI
+```
+
+**8. OpenAI payload (what actually crosses the perimeter)**
+
+```json
+{
+  "role": "user",
+  "content": "The ZK-verified aggregate for payroll (Q1 2025) is $4,250,000.\nEvidence: { \"engine\": \"zk_slowlane\", \"aggregate\": 4250000, \"data_exfiltrated\": 0, \"proof_hash\": \"7c3a...\" }"
+}
+```
+
+**What the verifier (and OpenAI) learns:** the aggregate ($4,250,000), the category name, the time range, and the proof hash. **What stays private:** every individual payroll amount, every employee's `user_name`, every transaction timestamp, the batch signatures, and the private key.
+
+---
+
+### Step 3: Database Connectivity — What "Supabase" Actually Means
+
+Zemtik v1 supports two `DB_BACKEND` values:
+
+| `DB_BACKEND` | What it connects to | Use case |
+|---|---|---|
+| `sqlite` (default) | In-memory SQLite seeded with 500 demo rows | Local development, CLI demo |
+| `supabase` | Your PostgreSQL via PostgREST REST API | Integration testing, early production |
+
+**`DB_BACKEND=supabase` is not a raw Postgres connection.** It speaks the PostgREST HTTP protocol. Required env vars:
+
+```bash
+SUPABASE_URL=https://your-project.supabase.co   # PostgREST base URL
+SUPABASE_SERVICE_KEY=eyJhbGci...                # Service-role JWT (Supabase dashboard → Settings → API)
+```
+
+If you are running your own Postgres (not Supabase), you need PostgREST deployed in front of it. The Zemtik Rust process never opens a raw Postgres socket in v1.
+
+**Schema conformance:** The five required columns (`id`, `client_id`, `amount`, `category_name`, `timestamp`) must exist with those exact names. Zemtik does not do schema introspection or column aliasing. If your table uses `category_code` instead of `category_name`, you must add the column or rename it before connecting.
+
+> **Roadmap:** A native `sqlx`-based Postgres connector (`DB_BACKEND=postgres`) that accepts a `DATABASE_URL` and a column-mapping config is planned for v2. Until then, self-hosted PostgREST is the integration path for non-Supabase deployments.
+
+---
+
 ## Data Flow: CLI Pipeline (Default `cargo run`)
 
 ```

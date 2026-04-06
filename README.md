@@ -1,16 +1,18 @@
 # Zemtik
 
-> ZK middleware that eliminates enterprise data exfiltration to AI systems.
+> A Rust proxy that intercepts LLM prompts, queries your local database, computes an aggregate inside a Zero-Knowledge circuit, and sends only the proven number to the model. Zero raw rows leave the perimeter.
 
 Every time a company queries an LLM with internal data, it creates a **shadow copy** of proprietary records on third-party infrastructure. For financial institutions, healthcare providers, and defense contractors, this isn't a policy problem—it's a legal one. Raw transaction rows, patient records, or classified queries cannot leave the enterprise perimeter.
 
 Zemtik solves this at the infrastructure layer: **compute the answer locally inside a Zero-Knowledge circuit, prove the computation was honest, and send only the proven number to the model.** Zero raw rows ever leave the perimeter.
 
+> **POC status (v0.6.1):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+
 ---
 
 ## How It Works
 
-Zemtik runs as a local proxy on `localhost:4000`. Point your application at it instead of `api.openai.com`—no code changes required.
+Zemtik runs as a local proxy on `localhost:4000`. Point your application at it instead of `api.openai.com` — the HTTP interface is OpenAI-compatible, so no client-side code changes are required. Server-side setup requires a conforming database schema and `schema_config.json` (see [Getting Started](docs/GETTING_STARTED.md)).
 
 ```
 Your Application
@@ -22,9 +24,9 @@ Your Application
 │                  Zemtik Proxy (localhost:4000)               │
 │                                                             │
 │  ┌──────────────┐    sign     ┌───────────────────────┐    │
-│  │  Transaction │ ──────────► │  Bank KMS (Mock)       │    │
-│  │  DB (SQLite  │             │  BabyJubJub EdDSA      │    │
-│  │  or Supabase)│             │  Poseidon hash tree    │    │
+│  │  Transaction │ ──────────► │  Zemtik KMS            │    │
+│  │  DB (SQLite  │             │  (file key, see note)  │    │
+│  │  or Supabase)│             │  BabyJubJub EdDSA      │    │
 │  └──────────────┘             └───────────┬───────────┘    │
 │          │ raw rows (private witness)      │ signature       │
 │          └─────────────────┬──────────────┘                 │
@@ -44,6 +46,22 @@ Your Application
 
 The raw transaction rows are **private witnesses** inside the ZK circuit. The verifier—and OpenAI—sees only the cryptographically proven aggregate.
 
+> **KMS note:** `~/.zemtik/keys/bank_sk` is a 32-byte file (mode 0600) that acts as the BabyJubJub signing key. The ZK circuit's soundness guarantee — `assert(eddsa_verify(...))` — holds only if this key is genuinely controlled by the institution. A compromised file means a compromised attestation. Production deployments must replace this with an HSM or KMS (v2 roadmap).
+
+---
+
+## v1 Capability Boundary
+
+Before reading further, understand what Zemtik v1 does **not** do:
+
+| Capability | v1 status |
+|---|---|
+| Connect to arbitrary Postgres directly | Not supported — requires Supabase/PostgREST in front of your DB |
+| ZK-prove queries with > 500 matching rows | Not supported — circuit is fixed at 500 rows (10 batches × 50) |
+| COUNT, AVG, multi-table JOINs, GROUP BY | Not supported — SUM with category + time window only |
+| Sub-second ZK proofs | Not supported — local CPU proving takes ~17s (GPU/FPGA required at scale) |
+| Eliminate need to trust the Zemtik process | Not possible — the binary reads the signing key and constructs witnesses |
+
 ---
 
 ## Measured Performance
@@ -52,7 +70,7 @@ Numbers from a real run (`audit/2026-03-25T17-46-43Z.json`), not projections:
 
 | Metric | Value |
 |--------|-------|
-| Transactions processed | 500 (10 batches × 50) |
+| Transactions processed | 500 (10 batches × 50) — **hard circuit limit; queries matching > 500 rows will error** |
 | Circuit execution | 2.4s |
 | Full pipeline (DB → proof → AI response) | ~20s |
 | Proof scheme | UltraHonk (Barretenberg v4) |
@@ -153,11 +171,11 @@ Zemtik intercepts the request, runs the full ZK pipeline against the transaction
 
 ## How the ZK Proof Works
 
-**Step 1 — Bank KMS signs each batch.** The bank's BabyJubJub private key signs a Poseidon Merkle commitment to each 50-transaction batch. This ties the raw data to a cryptographic identity—any tampering with the data invalidates the signature.
+**Step 1 — Zemtik KMS signs each batch.** The BabyJubJub private key at `~/.zemtik/keys/bank_sk` signs a Poseidon Merkle commitment to each 50-transaction batch. This ties the raw data to a cryptographic identity — any tampering with the data invalidates the signature.
 
-**Step 2 — Noir circuit verifies signatures and aggregates.** The circuit receives the raw transactions as *private witnesses* (hidden from the verifier). It reconstructs the Poseidon commitment tree, verifies the EdDSA signature with `assert(eddsa_verify(...))`, and computes `SUM(amount) WHERE category = AWS AND timestamp IN [Q1_start, Q1_end]`. If any assertion fails, no valid witness exists and no proof can be generated—a dishonest prover cannot forge a valid proof.
+**Step 2 — Noir circuit verifies signatures and aggregates.** The circuit receives the raw transactions as *private witnesses* (hidden from the verifier). It reconstructs the Poseidon commitment tree, verifies the EdDSA signature with `assert(eddsa_verify(...))`, and computes `SUM(amount) WHERE category = AWS AND timestamp IN [Q1_start, Q1_end]`. If any assertion fails, no valid witness exists and no proof can be generated — a dishonest prover cannot forge a valid proof.
 
-**Step 3 — UltraHonk proof generation.** Barretenberg generates a succinct proof over the circuit (728,283 gates). The proof reveals nothing about individual transaction amounts, timestamps, or client identifiers. The verifier learns only: "the holder of the bank private key signed this dataset, and the AWS spend in Q1 was $2,805,600."
+**Step 3 — UltraHonk proof generation.** Barretenberg generates a succinct proof over the circuit (728,283 gates). The proof reveals nothing about individual transaction amounts, timestamps, or client identifiers. The verifier learns only: "the holder of the signing key signed this dataset, and the AWS spend in Q1 was $2,805,600."
 
 The payload sent to OpenAI contains exactly three data fields:
 
@@ -168,6 +186,16 @@ The payload sent to OpenAI contains exactly three data fields:
   "data_provenance": "ZEMTIK_VALID_ZK_PROOF"
 }
 ```
+
+### Trust Model
+
+The ZK proof provides a mathematical guarantee that **if** the signing key is legitimate and **if** the circuit's public inputs are correct, then the aggregate is valid. It does **not** eliminate the need to trust:
+
+1. **The Zemtik binary itself** — it reads the signing key, constructs witnesses from raw rows, and controls what gets signed.
+2. **The key file** (`~/.zemtik/keys/bank_sk`) — anyone who reads this file can produce valid proofs for arbitrary data. Production requires an HSM.
+3. **The database query results** — Zemtik trusts that the DB returns the correct rows; it does not verify DB-level integrity independently.
+
+In plain terms: Zemtik stops data from reaching the LLM, but the institution must still trust Zemtik's own code and key management.
 
 ---
 
@@ -257,11 +285,13 @@ bb verify -p proof -k vk
 
 ## Known Limitations (POC)
 
-- **CLI pipeline query is hardcoded** — 500 transactions, client 123, `aws_spend`, Q1 2024. Proxy mode supports natural-language queries against tables defined in `schema_config.json`.
-- **FastLane uses demo data** — FastLane always reads from the in-memory seeded SQLite ledger. Supabase FastLane connector is deferred to v2.
-- **Circuit category mapping** — Since Sprint 2, the ZK slow lane supports any table key via Poseidon BN254 hashing. No code change is needed to add new tables — just add them to `schema_config.json` with `"sensitivity": "critical"`.
-- **Single query type** — `SUM(amount) WHERE category AND time_range`. COUNT, AVG, and multi-dimensional filters require new circuit variants.
-- **Proving infrastructure** — The current setup uses local CPU proving. For sub-second proofs at scale, GPU/FPGA hardware is required—and it must remain on-prem (remote proving exposes the private witness).
+- **Hard 500-row circuit limit** — The ZK circuit is compiled with `TX_COUNT=50` and `BATCH_COUNT=10` (500 rows total). Any query whose time window matches more than 500 rows will error. Changing the limit requires recompiling the circuit. See [docs/SCALING.md](docs/SCALING.md) for the multi-batch production path.
+- **No raw Postgres connector** — `DB_BACKEND` supports `sqlite` (demo) and `supabase` (PostgREST). Connecting an arbitrary Postgres database requires PostgREST deployed in front of it. A native `sqlx` connector (`DB_BACKEND=postgres`) is planned for v2.
+- **File-based signing key** — `~/.zemtik/keys/bank_sk` is the BabyJubJub private key. A compromised file produces validly-signed but fraudulent proofs. Production deployments must use an HSM or KMS.
+- **ZK proof generation blocked** — `bb prove` fails on the current circuit due to an incompatibility between `eddsa v0.1.3` and Barretenberg v3+/v4+ BigField operations. `nargo execute` validates all constraints successfully. The blocker is in the `eddsa` Noir library, not in Zemtik's circuit logic — unblocked when the library is updated.
+- **Single query type** — `SUM(amount) WHERE category AND time_range`. COUNT, AVG, GROUP BY, and multi-table JOINs require new circuit variants.
+- **CLI pipeline is hardcoded** — 500 transactions, client 123, `aws_spend`, Q1 2024. Proxy mode supports natural-language queries against tables in `schema_config.json`.
+- **Local CPU proving** — ~17s per query. Sub-second latency requires GPU/FPGA hardware on-prem (remote proving exposes the private witness — see [docs/SCALING.md](docs/SCALING.md)).
 
 See [docs/SCALING.md](docs/SCALING.md) for the full production path.
 
