@@ -29,7 +29,38 @@ pub struct SchemaConfig {
     pub tables: HashMap<String, TableConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+/// Aggregation function for FastLane queries. Uppercase required in JSON: "SUM" or "COUNT".
+#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum AggFn {
+    #[default]
+    Sum,
+    Count,
+}
+
+impl AggFn {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AggFn::Sum => "SUM",
+            AggFn::Count => "COUNT",
+        }
+    }
+}
+
+fn default_value_column() -> String { "amount".to_owned() }
+fn default_timestamp_column() -> String { "timestamp".to_owned() }
+fn default_metric_label() -> String { "total_spend_usd".to_owned() }
+
+/// Returns true if `s` is a safe SQL/JSON identifier: non-empty, ASCII alphanumeric
+/// or underscore only, max 63 chars. Column/table names from schema_config are
+/// server-controlled, but this defends against misconfiguration.
+fn is_safe_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.len() <= 63
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct TableConfig {
     pub sensitivity: String,
     pub aliases: Option<Vec<String>>,
@@ -44,6 +75,69 @@ pub struct TableConfig {
     /// belongs to a different end client.
     #[serde(default)]
     pub client_id: Option<i64>,
+
+    // --- FastLane engine fields (all optional, backward-compatible) ---
+
+    /// Physical table name in the DB. None → falls back to the schema_config key.
+    /// NOTE: physical_table override only applies to the Supabase path.
+    /// The in-memory SQLite ledger always uses the 'transactions' table.
+    #[serde(default)]
+    pub physical_table: Option<String>,
+
+    /// Column to aggregate (SUM) or count non-nulls from (COUNT).
+    /// Defaults to "amount". For COUNT tables, use a non-nullable column (PK or equivalent).
+    #[serde(default = "default_value_column")]
+    pub value_column: String,
+
+    /// Column for Unix-seconds timestamp filtering. Defaults to "timestamp".
+    #[serde(default = "default_timestamp_column")]
+    pub timestamp_column: String,
+
+    /// Column for category filtering within the physical table.
+    /// None → no category filter (aggregate entire table).
+    #[serde(default)]
+    pub category_column: Option<String>,
+
+    /// Aggregation function: "SUM" (default) or "COUNT". Uppercase required.
+    #[serde(default)]
+    pub agg_fn: AggFn,
+
+    /// Label for the aggregate metric in the OpenAI payload. Defaults to "total_spend_usd".
+    /// Must match [a-zA-Z0-9_] — used as a JSON field value for the LLM.
+    #[serde(default = "default_metric_label")]
+    pub metric_label: String,
+
+    /// When true, omit the client_id filter from Supabase queries.
+    /// Use for tables without a client_id column (e.g., single-tenant HR tables).
+    /// WARNING: setting this on a multi-tenant table exposes all tenants' data.
+    #[serde(default)]
+    pub skip_client_id_filter: bool,
+}
+
+impl Default for TableConfig {
+    fn default() -> Self {
+        TableConfig {
+            sensitivity: String::new(),
+            aliases: None,
+            description: String::new(),
+            example_prompts: Vec::new(),
+            client_id: None,
+            physical_table: None,
+            value_column: default_value_column(),
+            timestamp_column: default_timestamp_column(),
+            category_column: None,
+            agg_fn: AggFn::Sum,
+            metric_label: default_metric_label(),
+            skip_client_id_filter: false,
+        }
+    }
+}
+
+impl TableConfig {
+    /// Returns the physical table name: physical_table override if set, otherwise the schema key.
+    pub fn resolved_table<'a>(&'a self, key: &'a str) -> &'a str {
+        self.physical_table.as_deref().unwrap_or(key)
+    }
 }
 
 /// Load a schema_config.json file. Returns `(config, sha256_hex_of_file_bytes)`.
@@ -91,6 +185,70 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
                     key
                 );
             }
+        }
+
+        // Validate identifier safety for FastLane engine fields
+        if !is_safe_identifier(&tc.value_column) {
+            anyhow::bail!(
+                "schema_config: table '{}': invalid value_column '{}'  \
+                 (must match [a-zA-Z0-9_], max 63 chars)",
+                key, tc.value_column
+            );
+        }
+        if !is_safe_identifier(&tc.timestamp_column) {
+            anyhow::bail!(
+                "schema_config: table '{}': invalid timestamp_column '{}' \
+                 (must match [a-zA-Z0-9_], max 63 chars)",
+                key, tc.timestamp_column
+            );
+        }
+        if let Some(ref cat_col) = tc.category_column {
+            if !is_safe_identifier(cat_col) {
+                anyhow::bail!(
+                    "schema_config: table '{}': invalid category_column '{}' \
+                     (must match [a-zA-Z0-9_], max 63 chars)",
+                    key, cat_col
+                );
+            }
+        }
+        if let Some(ref phys) = tc.physical_table {
+            if !is_safe_identifier(phys) {
+                anyhow::bail!(
+                    "schema_config: table '{}': invalid physical_table '{}' \
+                     (must match [a-zA-Z0-9_], max 63 chars)",
+                    key, phys
+                );
+            }
+        }
+        if !is_safe_identifier(&tc.metric_label) {
+            anyhow::bail!(
+                "schema_config: table '{}': invalid metric_label '{}' \
+                 (must match [a-zA-Z0-9_], max 63 chars)",
+                key, tc.metric_label
+            );
+        }
+
+        // COUNT + critical is not supported: the ZK circuit only handles SUM of BN254 field elements.
+        if tc.agg_fn == AggFn::Count && tc.sensitivity == "critical" {
+            anyhow::bail!(
+                "schema_config: table '{}': COUNT aggregation with sensitivity=critical is not \
+                 supported. The ZK circuit only handles SUM. Use sensitivity=low for COUNT tables \
+                 (FastLane-attested only) or use SUM with sensitivity=critical.",
+                key
+            );
+        }
+
+        // Warn (non-blocking) if physical_table override is used outside Supabase.
+        // SQLite always queries the 'transactions' table; physical_table only works on Supabase.
+        if tc.physical_table.is_some()
+            && std::env::var("DB_BACKEND").unwrap_or_default() != "supabase"
+        {
+            eprintln!(
+                "[WARN] schema_config: table '{}': physical_table override is Supabase-only — \
+                 SQLite always uses 'transactions'. Requests to this table will fail at runtime \
+                 if the physical table name differs.",
+                key
+            );
         }
     }
     Ok(())

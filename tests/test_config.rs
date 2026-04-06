@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use zemtik::config::{load_from_sources, validate_schema_config, AppConfig, CliArgs, Command, SchemaConfig, TableConfig};
+use zemtik::config::{load_from_sources, validate_schema_config, AggFn, AppConfig, CliArgs, Command, SchemaConfig, TableConfig};
 
 fn default_cli() -> CliArgs {
     CliArgs::default()
@@ -293,4 +293,126 @@ fn effective_client_id_falls_back_to_global() {
     let global_client_id: i64 = 123;
     let effective = table_client_id.unwrap_or(global_client_id);
     assert_eq!(effective, 123);
+}
+
+// ---------------------------------------------------------------------------
+// Universal FastLane engine — new TableConfig fields (v0.7.0)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn table_config_new_fields_deserialize() {
+    let json = r#"{
+        "sensitivity": "low",
+        "physical_table": "employees",
+        "value_column": "employee_id",
+        "timestamp_column": "hire_date",
+        "category_column": "department",
+        "agg_fn": "COUNT",
+        "metric_label": "new_hires",
+        "skip_client_id_filter": true
+    }"#;
+    let tc: TableConfig = serde_json::from_str(json).expect("deserialize should succeed");
+    assert_eq!(tc.physical_table.as_deref(), Some("employees"));
+    assert_eq!(tc.value_column, "employee_id");
+    assert_eq!(tc.timestamp_column, "hire_date");
+    assert_eq!(tc.category_column.as_deref(), Some("department"));
+    assert_eq!(tc.agg_fn, AggFn::Count);
+    assert_eq!(tc.metric_label, "new_hires");
+    assert!(tc.skip_client_id_filter);
+}
+
+#[test]
+fn table_config_defaults_applied() {
+    let json = r#"{"sensitivity": "low"}"#;
+    let tc: TableConfig = serde_json::from_str(json).expect("deserialize should succeed");
+    assert_eq!(tc.value_column, "amount");
+    assert_eq!(tc.timestamp_column, "timestamp");
+    assert_eq!(tc.metric_label, "total_spend_usd");
+    assert_eq!(tc.agg_fn, AggFn::Sum);
+    assert!(!tc.skip_client_id_filter);
+    assert!(tc.physical_table.is_none());
+    assert!(tc.category_column.is_none());
+}
+
+#[test]
+fn validate_rejects_invalid_value_column() {
+    let mut tables = HashMap::new();
+    tables.insert(
+        "bad_table".to_owned(),
+        TableConfig {
+            sensitivity: "low".to_owned(),
+            value_column: "amount; DROP TABLE".to_owned(),
+            ..Default::default()
+        },
+    );
+    let schema = SchemaConfig { fiscal_year_offset_months: 0, tables };
+    let result = validate_schema_config(&schema, false);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("value_column"));
+}
+
+#[test]
+fn validate_rejects_invalid_physical_table() {
+    let mut tables = HashMap::new();
+    tables.insert(
+        "bad_table".to_owned(),
+        TableConfig {
+            sensitivity: "low".to_owned(),
+            physical_table: Some("foo bar".to_owned()), // space not allowed
+            ..Default::default()
+        },
+    );
+    let schema = SchemaConfig { fiscal_year_offset_months: 0, tables };
+    let result = validate_schema_config(&schema, false);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("physical_table"));
+}
+
+#[test]
+fn resolved_table_falls_back_to_key() {
+    let tc = TableConfig { sensitivity: "low".to_owned(), ..Default::default() };
+    assert_eq!(tc.resolved_table("aws_spend"), "aws_spend");
+}
+
+#[test]
+fn resolved_table_uses_override() {
+    let tc = TableConfig {
+        sensitivity: "low".to_owned(),
+        physical_table: Some("transactions".to_owned()),
+        ..Default::default()
+    };
+    assert_eq!(tc.resolved_table("aws_spend"), "transactions");
+}
+
+#[test]
+fn validate_rejects_count_with_critical_sensitivity() {
+    let mut tables = HashMap::new();
+    tables.insert(
+        "bad_table".to_owned(),
+        TableConfig {
+            sensitivity: "critical".to_owned(),
+            agg_fn: AggFn::Count,
+            ..Default::default()
+        },
+    );
+    let schema = SchemaConfig { fiscal_year_offset_months: 0, tables };
+    let result = validate_schema_config(&schema, false);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("COUNT"), "error should mention COUNT");
+    assert!(msg.contains("critical"), "error should mention critical");
+}
+
+#[test]
+fn table_config_skip_client_id_filter_defaults_false() {
+    let json = r#"{"sensitivity": "low"}"#;
+    let tc: TableConfig = serde_json::from_str(json).expect("deserialize");
+    assert!(!tc.skip_client_id_filter);
+}
+
+#[test]
+fn table_config_agg_fn_lowercase_rejected() {
+    let json = r#"{"sensitivity": "low", "agg_fn": "sum"}"#;
+    let result: Result<TableConfig, _> = serde_json::from_str(json);
+    assert!(result.is_err(), "lowercase 'sum' should be rejected — uppercase required");
 }

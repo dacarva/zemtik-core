@@ -273,6 +273,7 @@ pub enum Route {
 }
 
 /// Result of the FastLane engine.
+#[derive(Debug)]
 pub struct FastLaneResult {
     pub aggregate: i64,
     pub row_count: usize,
@@ -288,6 +289,7 @@ pub struct FastLaneResult {
 ///
 /// `EmptyResult` has been removed: zero-row results now return `Ok(FastLaneResult)`
 /// with `row_count == 0` so the receipt is cryptographically signed.
+#[derive(Debug)]
 pub enum EngineResult {
     Ok(FastLaneResult),
     DbError(String),

@@ -37,6 +37,7 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 clap = { version = "4", features = ["derive"] }
+urlencoding = "2"
 fastembed = { version = "5", optional = true }
 
 [features]

@@ -284,3 +284,66 @@
 - **Effort:** M (human: ~1 day / CC: ~30min) for Option A; S for Option C.
 - **Priority:** P3 — no active CDO/accounting pilot uses Intel Mac or aarch64-Linux.
 - **Depends on:** v0.6.0 merged.
+
+---
+
+## P2 — FastLane verifier path (added by /plan-ceo-review 2026-04-06)
+
+### FastLane attestation signature storage + offline verifier
+
+- **What:** Store BabyJubJub signature bytes (`sig.r_b8.x`, `sig.r_b8.y`, `sig.s`) in `receipts.db`
+  alongside `attestation_hash`. Add `zemtik verify-fastlane <receipt_id>` CLI command that
+  re-derives the payload from stored receipt fields and verifies the signature against the stored
+  public key.
+- **Why:** Currently, FastLane receipts store only `attestation_hash` — the hash of the signature
+  bytes. An auditor cannot verify the signature without the original bytes. The claim "auditor can
+  verify how it was computed" is incomplete until the raw signature is stored. Detected by Codex
+  outside voice during /plan-ceo-review (2026-04-06) on feat/universal-fast-engine.
+- **Pros:** Makes the FastLane attestation fully auditable, on par with ZK bundle verification.
+  Required for enterprise compliance use cases (e.g., SOC 2 evidence chain).
+- **Cons:** receipts.db schema change (add 3 columns). Requires v3 migration in `receipts.rs`.
+  Adds `verify-fastlane` as a 3rd CLI subcommand (migrate arg parsing to clap first — see P3).
+- **Context:** The `signing_version: 2` field added in feat/universal-fast-engine enables the
+  verifier to distinguish old (v1) from new (v2) receipt formats. Build the verifier against v2.
+- **Effort:** S (human) → S (CC+gstack)
+- **Priority:** P2 — blocking for enterprise audit compliance pitch
+- **Depends on:** feat/universal-fast-engine merged (signing_version: 2 format)
+
+---
+
+## P3 — Intent subcategory extraction (added by /plan-ceo-review 2026-04-06)
+
+### Intent engine: extract subcategory value from prompt
+
+- **What:** Extend `IntentResult` to carry an optional `category_value: Option<String>` separate
+  from `category_name` (the table key). When present, use `category_value` as the filter value
+  for `category_column` instead of the table key.
+- **Why:** Currently `category_name = table_key` always (e.g., "aws_spend"). A user asking
+  "AWS spend on EC2" or "headcount for Engineering department" cannot get subcategory results —
+  the intent engine has no mechanism to extract "EC2" or "Engineering" from the prompt.
+  Detected during /plan-ceo-review (2026-04-06) cross-referencing intent.rs:182-189.
+- **Pros:** Enables rich subcategory filtering without code changes — only prompt + schema_config.
+  Unlocks the full power of `category_column` as designed.
+- **Cons:** Requires training data or LLM-assisted extraction in the intent engine. Complex
+  disambiguation (is "for Engineering" a category or a recipient?). Embedding approach may not
+  generalize without per-table example subcategory values in schema_config.json.
+- **Context:** `category_column` in TableConfig already supports this at the DB layer — the gap
+  is purely in the intent extraction layer.
+- **Effort:** L (human) → M (CC+gstack)
+- **Priority:** P3 — non-blocking, ZK universalization is higher priority
+- **Depends on:** feat/universal-fast-engine merged
+
+---
+
+## P4 — category_column=null → explicit HTTP 400 when prompt implies category filtering (added by /plan-eng-review 2026-04-06)
+
+### Fail-secure response when category filtering is unsupported
+
+- **What:** When `category_column: null` and the user prompt implies category-level filtering (e.g., "AWS spend on EC2"), return HTTP 400 with a clear error instead of silently returning the whole-table aggregate + LLM note.
+- **Why:** Currently the system silently falls back to a whole-table aggregate and relies on a payload note to prevent the LLM from hallucinating category precision. This is the wrong failure mode — an auditor-grade system should reject unsupported queries explicitly, not let them through with a warning. Detected during /plan-eng-review (2026-04-06) via Codex outside voice (Issue #5).
+- **Pros:** Makes the system fail-secure. No ambiguity about what the query returned. Prevents misleading receipts where the attestation says "category: new_hires" but the data is the entire table.
+- **Cons:** Requires the intent engine to detect whether a prompt implies subcategory filtering (separate from P3). Cannot be implemented until P3 (intent subcategory extraction) is complete — without knowing whether the user asked for a category vs the whole table, we cannot distinguish "how many new hires?" (whole table fine) from "how many hires in Engineering?" (would need subcategory filter).
+- **Context:** The payload note approach (current) is acceptable for the CDO pilot. The 400 approach is the production-grade behavior. Build after P3 is shipped.
+- **Effort:** S (human) → S (CC+gstack) — 1 proxy.rs check + 1 test
+- **Priority:** P4 — non-blocking, requires P3
+- **Depends on:** P3 (intent subcategory extraction) merged

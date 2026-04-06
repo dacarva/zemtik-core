@@ -5,6 +5,13 @@
       "sensitivity": "low",
       "aliases": ["AWS", "amazon", "cloud spend"],
       "description": "AWS cloud infrastructure costs by service and region, including EC2, S3, CloudFront, and egress fees.",
+      "physical_table": "transactions",
+      "value_column": "amount",
+      "timestamp_column": "timestamp",
+      "category_column": "category_name",
+      "agg_fn": "SUM",
+      "metric_label": "total_spend_usd",
+      "skip_client_id_filter": false,
       "example_prompts": [
         "What was our total AWS spend last quarter?",
         "Show me cloud costs for Q1 2024",
@@ -105,6 +112,24 @@
         "How much did we spend on mergers and acquisitions in Q1 2025?",
         "What is the total deal value for our M&A activity this year?",
         "Give me a summary of merger transaction costs"
+      ]
+    },
+    "new_hires": {
+      "sensitivity": "low",
+      "description": "Count of new employee hires within a time period.",
+      "physical_table": "employees",
+      "value_column": "employee_id",
+      "timestamp_column": "hire_date",
+      "category_column": null,
+      "agg_fn": "COUNT",
+      "metric_label": "new_hires",
+      "skip_client_id_filter": true,
+      "example_prompts": [
+        "How many people were hired this quarter?",
+        "What is our new hire count in Q1 2024?",
+        "Show me total hires for 2024",
+        "How many employees joined us last quarter?",
+        "What is our headcount growth this year?"
       ]
     }
   }
