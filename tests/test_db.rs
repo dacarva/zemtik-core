@@ -1,7 +1,7 @@
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zemtik::config::AggFn;
-use zemtik::db::{aggregate_table, compute_tx_commitment, fr_to_decimal, query_aggregate_table, query_sum_by_category, BATCH_SIZE, Q1_START};
+use zemtik::db::{aggregate_table, compute_tx_commitment, fr_to_decimal, poseidon_of_string, query_aggregate_table, query_sum_by_category, DbBackend, BATCH_SIZE, DUMMY_CATEGORY, MAX_ZK_TX_COUNT, Q1_START};
 use zemtik::types::Transaction;
 
 fn make_rows(n: usize, amount: i64) -> serde_json::Value {
@@ -399,5 +399,88 @@ async fn query_aggregate_table_skip_client_id_filter_omits_param() {
         !url_str.contains("client_id"),
         "URL should not contain client_id when skip_client_id_filter=true, got: {}",
         url_str
+    );
+}
+
+// ---------------------------------------------------------------------------
+// query_transactions — padding behaviour (SQLite path)
+// ---------------------------------------------------------------------------
+
+fn make_sqlite_with_rows(n: usize) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE transactions (
+            id INTEGER PRIMARY KEY,
+            client_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            category INTEGER NOT NULL,
+            category_name TEXT NOT NULL,
+            timestamp INTEGER NOT NULL
+        );",
+    )
+    .unwrap();
+    for i in 0..n {
+        conn.execute(
+            "INSERT INTO transactions (id, client_id, amount, category, category_name, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![i as i64 + 1, 123i64, 100i64, 2i64, "aws_spend", 1_700_000_000i64 + i as i64],
+        )
+        .unwrap();
+    }
+    conn
+}
+
+#[tokio::test]
+async fn test_query_transactions_pads_to_500() {
+    let conn = make_sqlite_with_rows(3);
+    let backend = DbBackend::Sqlite(conn);
+    let result = zemtik::db::query_transactions(&backend, 123).await.unwrap();
+
+    assert_eq!(result.actual_row_count, 3, "actual_row_count should be 3 (pre-padding)");
+    assert_eq!(result.transactions.len(), MAX_ZK_TX_COUNT, "transactions should be padded to {}", MAX_ZK_TX_COUNT);
+    assert_eq!(
+        result.transactions[3].category_name, DUMMY_CATEGORY,
+        "4th transaction (index 3) should be a dummy sentinel"
+    );
+    assert_eq!(result.transactions[MAX_ZK_TX_COUNT - 1].amount, 0, "last dummy transaction should have amount=0");
+}
+
+#[tokio::test]
+async fn test_query_transactions_fails_over_500() {
+    let conn = make_sqlite_with_rows(501);
+    let backend = DbBackend::Sqlite(conn);
+    let result = zemtik::db::query_transactions(&backend, 123).await;
+
+    assert!(result.is_err(), "501 rows should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("501") || err.contains("too many") || err.contains("Too many"),
+        "error should mention the row count, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_dummy_sentinel_excluded_by_predicate() {
+    // The dummy category Poseidon hash should not match any real category
+    let dummy_hash = poseidon_of_string(DUMMY_CATEGORY).unwrap();
+    let aws_hash = poseidon_of_string("aws_spend").unwrap();
+    let payroll_hash = poseidon_of_string("payroll").unwrap();
+    let travel_hash = poseidon_of_string("travel").unwrap();
+
+    assert_ne!(
+        fr_to_decimal(&dummy_hash),
+        fr_to_decimal(&aws_hash),
+        "dummy hash must not match aws_spend"
+    );
+    assert_ne!(
+        fr_to_decimal(&dummy_hash),
+        fr_to_decimal(&payroll_hash),
+        "dummy hash must not match payroll"
+    );
+    assert_ne!(
+        fr_to_decimal(&dummy_hash),
+        fr_to_decimal(&travel_hash),
+        "dummy hash must not match travel"
     );
 }

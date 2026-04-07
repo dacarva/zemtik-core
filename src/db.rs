@@ -7,12 +7,13 @@ use poseidon_rs::Poseidon;
 use rusqlite::Connection;
 use serde::Deserialize;
 
-use crate::types::{SignatureData, Transaction};
+use crate::types::{SignatureData, Transaction, TransactionBatch};
 
 // Category codes matching the Noir circuit's public inputs.
 pub const CAT_PAYROLL: u64 = 1;
 pub const CAT_AWS: u64 = 2;
 pub const CAT_COFFEE: u64 = 3;
+pub const CAT_DEAL_SIZE: u64 = 4;
 
 /// Compute the Poseidon BN254 hash of a table name string.
 ///
@@ -100,6 +101,7 @@ fn category_name(cat: u64) -> &'static str {
         CAT_PAYROLL => "payroll",
         CAT_AWS => "aws_spend",
         CAT_COFFEE => "travel",
+        CAT_DEAL_SIZE => "deal_size",
         _ => "unknown",
     }
 }
@@ -142,17 +144,64 @@ pub async fn init_db() -> anyhow::Result<DbBackend> {
     }
 }
 
-/// Fetch all transactions for a given client, ordered by id.
+/// Maximum number of transactions supported by the ZK SlowLane circuit
+/// (BATCH_COUNT=10 × BATCH_SIZE=50 = 500).
+pub const MAX_ZK_TX_COUNT: usize = BATCH_SIZE * 10;
+
+/// Sentinel category name used for dummy padding transactions.
+/// Its Poseidon hash never matches any real category because
+/// the '__' prefix is not a valid table key (validated at startup).
+pub const DUMMY_CATEGORY: &str = "__zemtik_dummy__";
+
+/// Fetch transactions for a given client and pad to exactly MAX_ZK_TX_COUNT (500).
+///
+/// - N == MAX_ZK_TX_COUNT: pass through unchanged.
+/// - N < MAX_ZK_TX_COUNT: pad with dummy sentinel transactions (amount=0, timestamp=0,
+///   category_name="__zemtik_dummy__"). Dummies are excluded naturally by the
+///   circuit predicate filter since their Poseidon hash never matches any real category.
+/// - N > MAX_ZK_TX_COUNT: hard-fail — the circuit requires exactly 500 transactions.
+///   Future fix: parametric circuit (P1-1 in ZK_SLOWLANE_SPEC.md).
 pub async fn query_transactions(
     backend: &DbBackend,
     client_id: i64,
-) -> anyhow::Result<Vec<Transaction>> {
-    match backend {
-        DbBackend::Sqlite(conn) => query_sqlite(conn, client_id),
+) -> anyhow::Result<TransactionBatch> {
+    let mut txns = match backend {
+        DbBackend::Sqlite(conn) => query_sqlite(conn, client_id)?,
         DbBackend::Supabase { url, key, client } => {
-            query_supabase(client, url, key, client_id).await
+            query_supabase(client, url, key, client_id).await?
+        }
+    };
+
+    let actual_row_count = txns.len();
+
+    if actual_row_count > MAX_ZK_TX_COUNT {
+        anyhow::bail!(
+            "Too many matching rows (N={}); ZK SlowLane supports up to {} transactions per query. \
+             Narrow the time range or set sensitivity to 'low' to use FastLane instead.",
+            actual_row_count,
+            MAX_ZK_TX_COUNT
+        );
+    }
+
+    // Pad with dummy sentinel transactions to reach exactly MAX_ZK_TX_COUNT.
+    if actual_row_count < MAX_ZK_TX_COUNT {
+        let padding_count = MAX_ZK_TX_COUNT - actual_row_count;
+        for _ in 0..padding_count {
+            txns.push(Transaction {
+                id: 0,
+                client_id: 0,
+                amount: 0,
+                category: 0,
+                category_name: DUMMY_CATEGORY.to_owned(),
+                timestamp: 0,
+            });
         }
     }
+
+    Ok(TransactionBatch {
+        transactions: txns,
+        actual_row_count,
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -165,10 +214,11 @@ fn generate_seed_transactions() -> Vec<Transaction> {
     let day = 86_400u64;
     (0..500u64)
         .map(|i| {
-            let (category, base_amount) = match i % 3 {
+            let (category, base_amount) = match i % 4 {
                 0 => (CAT_PAYROLL, 45_000u64),
                 1 => (CAT_AWS, 8_500u64),
-                _ => (CAT_COFFEE, 250u64),
+                2 => (CAT_COFFEE, 250u64),
+                _ => (CAT_DEAL_SIZE, 12_000u64),
             };
             Transaction {
                 id: i as i64 + 1,

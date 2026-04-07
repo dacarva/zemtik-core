@@ -1,8 +1,0 @@
-[package]
-name = "zemtik_circuit"
-type = "bin"
-authors = ["Zemtik"]
-
-[dependencies]
-eddsa = { path = "../vendor/eddsa" }
-poseidon = { tag = "v0.2.6", git = "https://github.com/noir-lang/poseidon" }

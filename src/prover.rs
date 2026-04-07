@@ -7,8 +7,28 @@ use std::{
 use anyhow::Context;
 use uuid::Uuid;
 
+use crate::config::AggFn;
 use crate::db::{fr_to_decimal, poseidon_of_string, BATCH_SIZE};
 use crate::types::{QueryParams, SignatureData, Transaction};
+
+/// Return the circuit sub-directory for the given aggregation function.
+///
+/// Mini-circuit layout under the base circuit directory:
+///   base/sum/   ← SUM circuit (refactored from original circuit/)
+///   base/count/ ← COUNT circuit (1-line change from sum)
+///
+/// Panics for AggFn::Avg — AVG is composite (SUM + COUNT run sequentially) and
+/// never calls the prover directly; the caller must decompose it first.
+pub fn circuit_dir_for(agg_fn: &AggFn, base: &Path) -> PathBuf {
+    match agg_fn {
+        AggFn::Sum => base.join("sum"),
+        AggFn::Count => base.join("count"),
+        AggFn::Avg => panic!(
+            "circuit_dir_for called with AggFn::Avg — AVG is composite; \
+             run SUM and COUNT pipelines separately"
+        ),
+    }
+}
 
 /// Serialize the batched circuit inputs to `circuit_dir/Prover.toml`.
 pub fn generate_batched_prover_toml(
@@ -51,60 +71,61 @@ pub fn generate_batched_prover_toml(
     Ok(())
 }
 
-/// Validate that `circuit_dir` has the files nargo needs to compile and execute.
+/// Validate that `circuit_dir` has the mini-circuit layout nargo needs.
+///
+/// Expects: `circuit_dir/sum/`, `circuit_dir/count/`, and `circuit_dir/lib/`
+/// each with their own `Nargo.toml` and `src/main.nr` (or `src/lib.nr`).
 ///
 /// Called at startup so failures surface immediately with a clear remediation message
 /// instead of mid-pipeline as an opaque "No such file or directory" error.
 pub fn validate_circuit_dir(circuit_dir: &Path) -> anyhow::Result<()> {
-    let nargo_toml = circuit_dir.join("Nargo.toml");
-    anyhow::ensure!(
-        nargo_toml.exists(),
-        "Circuit directory '{}' is missing Nargo.toml.\n\
-         Run install.sh from the repo root, or copy manually:\n\
-         cp -r circuit/. {} && mkdir -p {}/vendor && cp -r vendor/. {}/vendor/",
-        circuit_dir.display(),
-        circuit_dir.display(),
-        circuit_dir.parent().unwrap_or(circuit_dir).display(),
-        circuit_dir.parent().unwrap_or(circuit_dir).display()
-    );
+    for sub in &["sum", "count"] {
+        let sub_dir = circuit_dir.join(sub);
+        let nargo_toml = sub_dir.join("Nargo.toml");
+        anyhow::ensure!(
+            nargo_toml.exists(),
+            "Circuit sub-directory '{}/{}' is missing Nargo.toml.\n\
+             Run install.sh from the repo root, or copy manually:\n\
+             cp -r circuit/. {}",
+            circuit_dir.display(),
+            sub,
+            circuit_dir.display()
+        );
+        let main_nr = sub_dir.join("src/main.nr");
+        anyhow::ensure!(
+            main_nr.exists(),
+            "Circuit sub-directory '{}/{}' is missing src/main.nr.\n\
+             Run install.sh from the repo root, or copy manually:\n\
+             cp -r circuit/. {}",
+            circuit_dir.display(),
+            sub,
+            circuit_dir.display()
+        );
+    }
 
-    let main_nr = circuit_dir.join("src/main.nr");
+    let lib_nargo = circuit_dir.join("lib/Nargo.toml");
     anyhow::ensure!(
-        main_nr.exists(),
-        "Circuit directory '{}' is missing src/main.nr.\n\
+        lib_nargo.exists(),
+        "Shared library '{}' is missing.\n\
          Run install.sh from the repo root, or copy manually:\n\
          cp -r circuit/. {}",
-        circuit_dir.display(),
+        lib_nargo.display(),
         circuit_dir.display()
     );
 
-    // Nargo.toml references eddsa as `path = "../vendor/eddsa"` — relative to circuit_dir.
-    let vendor_eddsa = circuit_dir.join("../vendor/eddsa/Nargo.toml");
-    anyhow::ensure!(
-        vendor_eddsa.exists(),
-        "Vendor dependency missing at '{}'.\n\
-         Nargo.toml expects ../vendor/eddsa relative to the circuit directory.\n\
-         Run install.sh from the repo root, or copy manually:\n\
-         mkdir -p {}/vendor && cp -r vendor/. {}/vendor/",
-        vendor_eddsa.display(),
-        circuit_dir.parent().unwrap_or(circuit_dir).display(),
-        circuit_dir.parent().unwrap_or(circuit_dir).display()
-    );
-
-    // If a compiled circuit artifact exists, validate that its ABI matches what this
-    // binary expects. A mismatch means the installed circuit is from a different version
-    // (e.g. a stale main-branch artifact). Catching this at startup prevents a cryptic
-    // mid-pipeline nargo error like "Expected argument X, but none was found".
-    let circuit_json = circuit_dir.join("target/zemtik_circuit.json");
-    if circuit_json.exists() {
-        validate_circuit_abi(&circuit_json).with_context(|| {
-            format!(
-                "Compiled circuit at '{}' is incompatible with this binary.\n\
-                 Re-run install.sh from the repo root to update the installed circuit:\n\
-                 ./install.sh",
-                circuit_json.display()
-            )
-        })?;
+    // Validate ABI of any pre-compiled artifacts.
+    for sub in &["sum", "count"] {
+        let circuit_json = circuit_dir.join(sub).join("target/zemtik_circuit.json");
+        if circuit_json.exists() {
+            validate_circuit_abi(&circuit_json).with_context(|| {
+                format!(
+                    "Compiled circuit at '{}' is incompatible with this binary.\n\
+                     Re-run install.sh from the repo root to update the installed circuit:\n\
+                     ./install.sh",
+                    circuit_json.display()
+                )
+            })?;
+        }
     }
 
     Ok(())

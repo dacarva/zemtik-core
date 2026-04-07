@@ -37,6 +37,7 @@ fn sample_receipt(id: &str) -> Receipt {
         intent_confidence: None,
         outgoing_prompt_hash: None,
         signing_version: None,
+        actual_row_count: None,
     }
 }
 

@@ -82,10 +82,12 @@ async fn main() -> anyhow::Result<()> {
     let db_start = Instant::now();
     let backend = db::init_db().await?;
     print!("[DB] Initializing {} ledger... ", backend.label());
-    let txns = db::query_transactions(&backend, 123).await?;
+    let batch = db::query_transactions(&backend, 123).await?;
+    let txns = batch.transactions;
     anyhow::ensure!(
-        txns.len() == 500,
-        "Expected exactly 500 transactions, got {}. The circuit requires 10 batches of 50.",
+        txns.len() == db::MAX_ZK_TX_COUNT,
+        "Expected exactly {} transactions, got {}. The circuit requires 10 batches of 50.",
+        db::MAX_ZK_TX_COUNT,
         txns.len()
     );
     let batch_count = txns.len() / db::BATCH_SIZE;
@@ -211,6 +213,8 @@ async fn main() -> anyhow::Result<()> {
             &run_dir,
             &app_config.circuit_dir,
             &app_config.receipts_dir,
+            "SUM", // CLI pipeline is hardcoded SUM
+            None,  // actual_row_count: CLI pipeline uses exactly 500 seeded rows
         ) {
             Ok(br) => {
                 println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
@@ -234,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
                         intent_confidence: None,  // CLI pipeline has no intent extraction
                         outgoing_prompt_hash: None, // CLI pipeline: hash computed from query_openai result
                         signing_version: None,
+                        actual_row_count: None,    // CLI pipeline uses exactly 500 seeded rows
                     },
                 )?;
                 Some(br)

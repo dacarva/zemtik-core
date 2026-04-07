@@ -25,6 +25,9 @@ pub struct Receipt {
     pub outgoing_prompt_hash: Option<String>,
     /// FastLane attestation payload version: None or 1 = pre-v0.7.0; 2 = descriptor-bound.
     pub signing_version: Option<u8>,
+    /// Number of real (non-dummy padding) transactions in the ZK proof.
+    /// None for FastLane path or legacy rows (pre-v5).
+    pub actual_row_count: Option<usize>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -137,8 +140,9 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
         "INSERT INTO receipts
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
-             data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
+             actual_row_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -154,6 +158,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.intent_confidence,
             r.outgoing_prompt_hash,
             r.signing_version.map(|v| v as i64),
+            r.actual_row_count.map(|v| v as i64),
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -214,6 +219,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
+                actual_row_count: None,
             })
         })
         .context("query receipts")?;
@@ -256,6 +262,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
+                actual_row_count: None,
             })
         })
         .context("query receipt")?;

@@ -42,6 +42,10 @@ mkdir -p "$ZEMTIK_HOME/.tmp"
 if [ -d "$SCRIPT_DIR/circuit" ]; then
     echo "[INSTALL] Copying circuit files to $ZEMTIK_HOME/circuit/..."
     cp -r "$SCRIPT_DIR/circuit/." "$ZEMTIK_HOME/circuit/"
+    # Remove any stale top-level Nargo.toml left by pre-v0.8 installs.
+    # The mini-circuit layout (sum/, count/, lib/) must NOT have a parent
+    # Nargo.toml — nargo would walk up to it and compile the wrong package.
+    rm -f "$ZEMTIK_HOME/circuit/Nargo.toml"
 fi
 if [ -d "$SCRIPT_DIR/vendor" ]; then
     echo "[INSTALL] Copying vendor dependencies to $ZEMTIK_HOME/vendor/..."

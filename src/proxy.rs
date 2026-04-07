@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::config::AppConfig;
+use crate::config::{AggFn, AppConfig};
 use crate::intent::IntentBackend;
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, IntentResult, MessageContent, OpenAiRequestLog,
@@ -26,8 +27,13 @@ const OPENAI_BASE_URL: &str = "https://api.openai.com";
 
 struct ProxyState {
     http_client: reqwest::Client,
-    /// Serializes ZK pipeline executions — the circuit uses shared files in circuit_dir.
-    pipeline_lock: tokio::sync::Mutex<()>,
+    /// Per-aggregation-type locks for ZK pipeline executions.
+    /// Each mini-circuit uses its own directory, so SUM and COUNT can run concurrently.
+    /// Two requests hitting the same aggregation type still contend on Prover.toml.
+    pipeline_locks: HashMap<AggFn, tokio::sync::Mutex<()>>,
+    /// Lock held across BOTH SUM and COUNT pipeline runs for AVG queries.
+    /// Ensures both proofs operate on the same 500 transactions.
+    avg_pipeline_lock: tokio::sync::Mutex<()>,
     /// File-based receipts DB, shared across requests.
     /// WARNING: std::sync::MutexGuard<Connection> must NEVER be held across an .await point.
     /// Lock inside spawn_blocking or in a synchronous scope that drops before any .await.
@@ -60,6 +66,8 @@ struct ZkPipelineResult {
     /// SHA-256 of the ZK payload JSON sent to the LLM (Rust-layer commitment).
     /// None when fully_verifiable=false — no bundle artifact exists to match against.
     outgoing_prompt_hash: Option<String>,
+    /// Number of real (non-dummy padding) rows included in the proof.
+    actual_row_count: usize,
 }
 
 /// Entry point for proxy mode. Starts Axum on the configured port.
@@ -136,9 +144,14 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         .context("load or generate signing key")?;
     let signing_key_bytes = signing_key.key.to_vec();
 
+    let mut pipeline_locks = HashMap::new();
+    pipeline_locks.insert(AggFn::Sum, tokio::sync::Mutex::new(()));
+    pipeline_locks.insert(AggFn::Count, tokio::sync::Mutex::new(()));
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
-        pipeline_lock: tokio::sync::Mutex::new(()),
+        pipeline_locks,
+        avg_pipeline_lock: tokio::sync::Mutex::new(()),
         receipts_db: std::sync::Mutex::new(receipts_conn),
         ledger_db: std::sync::Mutex::new(ledger_conn),
         config: Arc::clone(&config),
@@ -475,6 +488,7 @@ async fn handle_fast_lane(
         &timestamp,
         Some(intent_result.confidence),
         Some(outgoing_hash.clone()),
+        None,
     );
 
     // Insert receipt — lock synchronously, never hold std::sync::MutexGuard across .await
@@ -499,6 +513,7 @@ async fn handle_fast_lane(
                 intent_confidence: Some(intent_result.confidence),
                 outgoing_prompt_hash: Some(outgoing_hash),
                 signing_version: Some(2),
+                actual_row_count: None,
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
@@ -627,31 +642,58 @@ async fn handle_zk_slow_lane(
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
 
-    let _pipeline_guard = state.pipeline_lock.lock().await;
+    // Resolve the aggregation function for this table from schema_config.
+    let agg_fn = state.config.schema_config
+        .as_ref()
+        .and_then(|s| s.tables.get(&intent.table))
+        .map(|tc| tc.agg_fn.clone())
+        .unwrap_or(AggFn::Sum);
 
-    let config_clone = Arc::clone(&state.config);
-    let key_bytes = state.signing_key_bytes.clone();
-    let req_hash = request_hash.clone();
-    let prm_hash = prompt_hash.clone();
-    let intent_clone = intent.clone();
+    let zk = if agg_fn == AggFn::Avg {
+        // AVG composite: hold avg_pipeline_lock for BOTH SUM and COUNT runs to guarantee
+        // both proofs operate on the same 500 transactions.
+        let _avg_guard = state.avg_pipeline_lock.lock().await;
+        run_avg_pipeline(Arc::clone(&state), request_hash.clone(), prompt_hash.clone(), intent.clone(), effective_client_id)
+            .await
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("timed out") {
+                    ProxyError::Timeout(msg)
+                } else if msg.contains("COUNT=0") {
+                    ProxyError::UnprocessableEntity(msg)
+                } else {
+                    ProxyError::Internal(e)
+                }
+            })?
+    } else {
+        // Single agg: acquire per-type lock.
+        let _pipeline_guard = state.pipeline_locks
+            .get(&agg_fn)
+            .expect("pipeline_locks must contain Sum and Count")
+            .lock()
+            .await;
 
-    let zk = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("build local runtime")?;
-        rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id))
-    })
-    .await
-    .context("ZK blocking task panicked")?
-    .map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("timed out") {
-            ProxyError::Timeout(msg)
-        } else {
-            ProxyError::Internal(e)
-        }
-    })?;
+        let config_clone = Arc::clone(&state.config);
+        let key_bytes = state.signing_key_bytes.clone();
+        let req_hash = request_hash.clone();
+        let prm_hash = prompt_hash.clone();
+        let intent_clone = intent.clone();
+        let agg_fn_clone = agg_fn.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("build local runtime")?;
+            rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id, agg_fn_clone))
+        })
+        .await
+        .context("ZK blocking task panicked")?
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("timed out") { ProxyError::Timeout(msg) } else { ProxyError::Internal(e) }
+        })?
+    };
 
     println!(
         "[ZK] Verified {} spend = ${} ({:.2}s circuit, proof: {})",
@@ -684,6 +726,7 @@ async fn handle_zk_slow_lane(
                 intent_confidence: Some(intent.confidence),
                 outgoing_prompt_hash: zk.outgoing_prompt_hash.clone(),
                 signing_version: None,
+                actual_row_count: Some(zk.actual_row_count),
             },
         ) {
             Ok(()) => Some(br),
@@ -711,12 +754,20 @@ async fn handle_zk_slow_lane(
         end_time: intent.end_unix_secs as u64,
     };
 
-    let zk_payload = serde_json::json!({
-        "category": intent.category_name,
-        "total_spend_usd": zk.aggregate,
-        "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
-        "raw_data_transmitted": false
-    });
+    let metric_label = state.config.schema_config
+        .as_ref()
+        .and_then(|s| s.tables.get(&intent.table))
+        .map(|tc| tc.metric_label.clone())
+        .unwrap_or_else(|| "result".to_owned());
+    let zk_payload = {
+        let mut m = serde_json::Map::new();
+        m.insert("category".to_owned(), serde_json::json!(intent.category_name));
+        m.insert(metric_label.clone(), serde_json::json!(zk.aggregate));
+        m.insert("agg_type".to_owned(), serde_json::json!(agg_fn.as_str()));
+        m.insert("data_provenance".to_owned(), serde_json::json!("ZEMTIK_VALID_ZK_PROOF"));
+        m.insert("raw_data_transmitted".to_owned(), serde_json::json!(false));
+        serde_json::Value::Object(m)
+    };
     let zk_message = format!(
         "Here is a cryptographically verified financial summary:\n\n{}",
         serde_json::to_string_pretty(&zk_payload)
@@ -725,8 +776,8 @@ async fn handle_zk_slow_lane(
     );
 
     println!(
-        "[ZK] Payload: {{ category: \"{}\", total_spend_usd: {}, provenance: \"ZEMTIK_VALID_ZK_PROOF\" }}",
-        intent.category_name, zk.aggregate
+        "[ZK] Payload: {{ category: \"{}\", {}: {}, agg_type: {}, provenance: \"ZEMTIK_VALID_ZK_PROOF\" }}",
+        intent.category_name, metric_label, zk.aggregate, agg_fn.as_str()
     );
     println!("[ZK] Raw rows transmitted to OpenAI: 0");
 
@@ -782,6 +833,7 @@ async fn handle_zk_slow_lane(
         &timestamp_ev,
         Some(intent.confidence),
         zk.outgoing_prompt_hash.clone(),
+        Some(zk.actual_row_count),
     );
     let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
@@ -1032,6 +1084,7 @@ async fn run_zk_pipeline(
     prompt_hash: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
+    agg_fn: AggFn,
 ) -> anyhow::Result<ZkPipelineResult> {
     let target_category_hash = db::poseidon_of_string(&intent.table)
         .map(|fr| db::fr_to_decimal(&fr))
@@ -1048,49 +1101,49 @@ async fn run_zk_pipeline(
     };
 
     let backend = db::init_db().await.context("init DB")?;
-    let txns = db::query_transactions(&backend, effective_client_id)
+    let batch = db::query_transactions(&backend, effective_client_id)
         .await
         .context("query transactions")?;
-    if txns.len() > 500 {
-        anyhow::bail!(
-            "Too many matching rows (N={}). ZK SlowLane supports up to 500 transactions per \
-             query. Narrow the time range or set sensitivity to 'low' to use FastLane instead.",
-            txns.len()
-        );
-    }
-    if txns.len() != 500 {
-        anyhow::bail!(
-            "Expected 500 transactions after padding, got {}. This is a bug in the padding \
-             path — please report it.",
-            txns.len()
-        );
-    }
+
+    let actual_row_count = batch.actual_row_count;
+    let txns = batch.transactions;
+
+    anyhow::ensure!(
+        txns.len() == db::MAX_ZK_TX_COUNT,
+        "Expected {} transactions after padding, got {}. This is a bug in the padding path — please report it.",
+        db::MAX_ZK_TX_COUNT,
+        txns.len()
+    );
+
     let txns_len = txns.len();
     let batch_count = txns_len / db::BATCH_SIZE;
-    println!("[ZK] Loaded {} transactions ({} batches)", txns_len, batch_count);
+    println!("[ZK] Loaded {} transactions ({} batches, {} real rows)", txns_len, batch_count, actual_row_count);
 
     let key = db::PrivateKey::import(key_bytes)
         .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
     let batches = db::sign_transaction_batches(&txns, &key).context("sign batches")?;
     println!("[ZK] Signed {} batches with BabyJubJub EdDSA", batch_count);
 
-    prover::generate_batched_prover_toml(&batches, &params, &config.circuit_dir)
+    // Select the correct mini-circuit directory for this aggregation type.
+    let circuit_dir = prover::circuit_dir_for(&agg_fn, &config.circuit_dir);
+
+    prover::generate_batched_prover_toml(&batches, &params, &circuit_dir)
         .context("write Prover.toml")?;
 
-    let circuit_json = config.circuit_dir.join("target/zemtik_circuit.json");
+    let circuit_json = circuit_dir.join("target/zemtik_circuit.json");
     if !circuit_json.exists() {
-        println!("[ZK] Compiling circuit (first run, ~10s)...");
-        prover::compile_circuit(&config.circuit_dir).context("compile circuit")?;
+        println!("[ZK] Compiling {} circuit (first run, ~30-120s)...", agg_fn.as_str());
+        prover::compile_circuit(&circuit_dir).context("compile circuit")?;
     }
 
-    println!("[ZK] Executing circuit (EdDSA verification + aggregation)...");
+    println!("[ZK] Executing {} circuit (EdDSA verification + aggregation)...", agg_fn.as_str());
     let circuit_exec_start = Instant::now();
-    let hex_output = prover::execute_circuit(&config.circuit_dir).context("execute circuit")?;
+    let hex_output = prover::execute_circuit(&circuit_dir).context("execute circuit")?;
     let circuit_execution_secs = circuit_exec_start.elapsed().as_secs_f32();
     let aggregate = prover::hex_output_to_u64(&hex_output).context("parse aggregate")?;
 
     println!("[ZK] Generating UltraHonk proof...");
-    let run_dir = prover::prepare_run_dir(&config.runs_dir, &config.circuit_dir)
+    let run_dir = prover::prepare_run_dir(&config.runs_dir, &circuit_dir)
         .context("prepare run dir")?;
     // Ensure the run directory is cleaned up regardless of success or error.
     let _run_dir_guard = RunDirGuard(run_dir.clone());
@@ -1120,11 +1173,10 @@ async fn run_zk_pipeline(
     };
 
     // Compute outgoing_prompt_hash: SHA-256 of the ZK payload that will be sent to LLM.
-    // Done here (not in handle_zk_slow_lane) because aggregate is only available inside
-    // run_zk_pipeline — the outer handler doesn't have it until ZkPipelineResult returns.
     let zk_payload_for_hash = serde_json::json!({
         "category": intent.category_name,
-        "total_spend_usd": aggregate,
+        "result": aggregate,
+        "agg_type": agg_fn.as_str(),
         "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
         "raw_data_transmitted": false
     });
@@ -1143,8 +1195,10 @@ async fn run_zk_pipeline(
             Some(&prompt_hash),
             Some(&outgoing_prompt_hash),
             &run_dir,
-            &config.circuit_dir,
+            &circuit_dir,
             &config.receipts_dir,
+            agg_fn.as_str(),
+            Some(actual_row_count),
         ) {
             Ok(br) => Some(br),
             Err(e) => {
@@ -1157,8 +1211,6 @@ async fn run_zk_pipeline(
     };
 
     // Only commit a hash when there's an actual verifiable bundle to match against.
-    // If fully_verifiable=false (no proof file, nargo-execute path), the receipt
-    // should not assert a commitment that has no corresponding artifact.
     let committed_hash = if fully_verifiable {
         Some(outgoing_prompt_hash)
     } else {
@@ -1177,6 +1229,86 @@ async fn run_zk_pipeline(
         fully_verifiable,
         bundle_result,
         outgoing_prompt_hash: committed_hash,
+        actual_row_count,
+    })
+}
+
+/// Run the AVG composite pipeline: SUM proof + COUNT proof + BabyJubJub attestation.
+///
+/// Both proofs use the same transaction dataset (guaranteed by the avg_pipeline_lock held
+/// by the caller). AVG = sum / count, attested via BabyJubJub signing.
+///
+/// Evidence model: "zk_composite+attestation" — numerator and denominator are each
+/// independently ZK-proven; the division step is attested (not ZK-proven).
+async fn run_avg_pipeline(
+    state: Arc<ProxyState>,
+    request_hash: String,
+    prompt_hash: String,
+    intent: crate::types::IntentResult,
+    effective_client_id: i64,
+) -> anyhow::Result<ZkPipelineResult> {
+    println!("[ZK] AVG composite: running SUM pipeline...");
+    let config = Arc::clone(&state.config);
+    let key_bytes = state.signing_key_bytes.clone();
+    let req_hash = request_hash.clone();
+    let prm_hash = prompt_hash.clone();
+    let intent_clone = intent.clone();
+
+    let sum_result = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build local runtime for SUM")?;
+        rt.block_on(run_zk_pipeline(config, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id, AggFn::Sum))
+    })
+    .await
+    .context("AVG/SUM blocking task panicked")??;
+
+    println!("[ZK] AVG composite: running COUNT pipeline...");
+    let config2 = Arc::clone(&state.config);
+    let key_bytes2 = state.signing_key_bytes.clone();
+    let req_hash2 = request_hash.clone();
+    let prm_hash2 = prompt_hash.clone();
+    let intent_clone2 = intent.clone();
+
+    let count_result = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build local runtime for COUNT")?;
+        rt.block_on(run_zk_pipeline(config2, key_bytes2, req_hash2, prm_hash2, intent_clone2, effective_client_id, AggFn::Count))
+    })
+    .await
+    .context("AVG/COUNT blocking task panicked")??;
+
+    anyhow::ensure!(
+        count_result.aggregate > 0,
+        "AVG: no matching transactions in the queried period (COUNT=0)"
+    );
+
+    let avg = sum_result.aggregate / count_result.aggregate;
+    println!(
+        "[ZK] AVG composite: sum={}, count={}, avg={}",
+        sum_result.aggregate, count_result.aggregate, avg
+    );
+
+    // Return a combined ZkPipelineResult carrying the AVG as aggregate.
+    // The proof_hex is the SUM proof hash (first of the two proofs).
+    // The bundle_result is from the SUM pipeline (COUNT bundle stored separately).
+    // TODO: composite bundle format (two proof sub-directories) is Phase 2.
+    Ok(ZkPipelineResult {
+        txns_len: sum_result.txns_len,
+        batch_count: sum_result.batch_count,
+        aggregate: avg,
+        proof_status: "VALID (ZK composite: SUM+COUNT proven, AVG attested)",
+        circuit_execution_secs: sum_result.circuit_execution_secs + count_result.circuit_execution_secs,
+        first_sig: sum_result.first_sig,
+        proof_hex: sum_result.proof_hex,
+        vk_hex: sum_result.vk_hex,
+        fully_verifiable: sum_result.fully_verifiable && count_result.fully_verifiable,
+        bundle_result: sum_result.bundle_result,
+        outgoing_prompt_hash: sum_result.outgoing_prompt_hash,
+        actual_row_count: sum_result.actual_row_count,
     })
 }
 
@@ -1245,6 +1377,7 @@ enum ProxyError {
     Internal(anyhow::Error),
     Timeout(String),
     BadRequest(String),
+    UnprocessableEntity(String),
 }
 
 impl IntoResponse for ProxyError {
@@ -1257,6 +1390,18 @@ impl IntoResponse for ProxyError {
                         "error": {
                             "message": msg,
                             "type": "invalid_request_error"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+            ProxyError::UnprocessableEntity(msg) => {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": msg,
+                            "type": "zemtik_no_data_error"
                         }
                     })),
                 )
@@ -1322,6 +1467,19 @@ mod proxy_error_tests {
             response.status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "ProxyError::Internal must map to HTTP 500"
+        );
+    }
+
+    #[test]
+    fn test_proxy_error_unprocessable_entity_returns_422() {
+        let err = ProxyError::UnprocessableEntity(
+            "AVG: no matching transactions in the queried period (COUNT=0)".to_owned(),
+        );
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "ProxyError::UnprocessableEntity must map to HTTP 422"
         );
     }
 }

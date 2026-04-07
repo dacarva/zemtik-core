@@ -1,7 +1,9 @@
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
+use zemtik::config::AggFn;
 use zemtik::db::BATCH_SIZE;
-use zemtik::prover::{generate_batched_prover_toml, hex_output_to_u64, poll_child_with_timeout, read_proof_artifacts};
+use zemtik::prover::{circuit_dir_for, generate_batched_prover_toml, hex_output_to_u64, poll_child_with_timeout, read_proof_artifacts};
 use zemtik::types::{QueryParams, SignatureData, Transaction};
 
 fn dummy_sig() -> SignatureData {
@@ -113,4 +115,18 @@ fn success_path_returns_exit_status() {
     let mut child = Command::new("true").spawn().expect("spawn true");
     let status = poll_child_with_timeout(&mut child, 5).expect("should succeed");
     assert!(status.success());
+}
+
+#[test]
+fn test_circuit_dir_for_sum() {
+    let base = Path::new("/tmp/circuit");
+    let dir = circuit_dir_for(&AggFn::Sum, base);
+    assert_eq!(dir, base.join("sum"), "SUM should map to base/sum");
+}
+
+#[test]
+fn test_circuit_dir_for_count() {
+    let base = Path::new("/tmp/circuit");
+    let dir = circuit_dir_for(&AggFn::Count, base);
+    assert_eq!(dir, base.join("count"), "COUNT should map to base/count");
 }

@@ -1,5 +1,16 @@
 # TODOS
 
+## P1 — Integration test suite (added 2026-04-07, QA post-mortem)
+
+### End-to-end proxy integration tests (P1, before next sprint)
+- **What:** A `tests/integration/` test suite that spins up the proxy in-process (or via `cargo run -- proxy` subprocess), sends real HTTP requests, and asserts on response status codes, headers (`x-zemtik-engine`, `x-zemtik-bundle-id`), and `evidence` fields. Cover at minimum: SUM/critical, COUNT/critical, AVG/composite, FastLane, reserved-key rejection, and the empty-AVG 422 path.
+- **Why:** Manual QA of `feat/universal-zk-engine` uncovered 4 bugs that unit tests did not catch: (1) `circuit/Nargo.toml` monolith shadowing mini-circuit compilation — nargo walked up to the wrong root; (2) `validate_circuit_dir` checking old file paths from the monolith layout; (3) non-ASCII em dash in Noir source causing silent compile failure; (4) AVG returning HTTP 500 instead of 422 for empty data sets. All four bugs were invisible to unit tests because they only fired when the full pipeline ran: proxy startup → intent routing → nargo compile → ZK execute → response marshaling. Each bug wasted 15–45 min of manual triage. An integration test suite would have caught them in CI in under 2 minutes.
+- **How to apply:** Use `tokio::test` with `axum::serve` bound to an ephemeral port (`0.0.0.0:0`). Use the SQLite backend (no external deps). Gate ZK-heavy paths (proof generation) behind `#[cfg(feature = "integration")]` or `RUN_ZK_TESTS=1`. The proxy startup, intent extraction, FastLane, and error-path tests do NOT require `bb` or `nargo` and can run in every CI build.
+- **Effort:** M (CC+gstack ~1–2h)
+- **Priority:** P1 — implement before the next sprint that touches proxy routing or pipeline changes
+
+---
+
 ## DX debt — added from feat/universal-zk-engine DX review (2026-04-07)
 
 ### Structured JSON error responses (P3, v2)

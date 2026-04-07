@@ -18,6 +18,7 @@ pub fn build_evidence_pack(
     timestamp: &str,
     zemtik_confidence: Option<f32>,
     outgoing_prompt_hash: Option<String>,
+    actual_row_count: Option<usize>,
 ) -> EvidencePack {
     EvidencePack {
         engine_used: engine_used.to_owned(),
@@ -33,5 +34,6 @@ pub fn build_evidence_pack(
         receipt_id: receipt_id.to_owned(),
         zemtik_confidence,
         outgoing_prompt_hash,
+        actual_row_count,
     }
 }

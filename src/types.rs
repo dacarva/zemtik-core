@@ -60,6 +60,16 @@ pub struct Transaction {
     pub timestamp: u64,
 }
 
+/// Batch of transactions fetched from the DB for ZK pipeline use.
+/// Contains the actual (pre-padding) row count for audit transparency.
+#[derive(Debug)]
+pub struct TransactionBatch {
+    /// Exactly 500 transactions, padded with dummy sentinels if actual_row_count < 500.
+    pub transactions: Vec<Transaction>,
+    /// Number of real (non-dummy) rows returned by the DB query.
+    pub actual_row_count: usize,
+}
+
 /// Query parameters that define which spend to aggregate.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryParams {
@@ -321,4 +331,8 @@ pub struct EvidencePack {
     /// NOTE: Circuit-level commitment deferred to Sprint 3 (TODOS.md).
     #[serde(default)]
     pub outgoing_prompt_hash: Option<String>,
+    /// Number of real (non-padding) transactions included in the ZK proof.
+    /// None for FastLane path or legacy rows.
+    #[serde(default)]
+    pub actual_row_count: Option<usize>,
 }

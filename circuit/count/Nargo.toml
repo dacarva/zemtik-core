@@ -1,0 +1,7 @@
+[package]
+name = "zemtik_circuit"
+type = "bin"
+authors = ["Zemtik"]
+
+[dependencies]
+zemtik_lib = { path = "../lib" }

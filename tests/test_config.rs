@@ -455,3 +455,24 @@ fn use_supabase_fast_lane_false_when_missing_service_key() {
         "DB_BACKEND=supabase without service key must not activate Supabase FastLane"
     );
 }
+
+#[test]
+fn test_validate_rejects_reserved_dummy_key() {
+    let mut tables = HashMap::new();
+    tables.insert(
+        "__zemtik_dummy__".to_owned(),
+        TableConfig {
+            sensitivity: "low".to_owned(),
+            ..Default::default()
+        },
+    );
+    let schema = SchemaConfig { fiscal_year_offset_months: 0, tables };
+    let result = validate_schema_config(&schema, false);
+    assert!(result.is_err(), "table key '__zemtik_dummy__' should be rejected as reserved");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("reserved"),
+        "error message should mention 'reserved', got: {}",
+        err
+    );
+}

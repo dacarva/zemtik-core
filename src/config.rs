@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Expand a leading `~` to the home directory so users can write `~/foo` in
@@ -32,7 +32,7 @@ pub struct SchemaConfig {
 /// Aggregation function. Uppercase required in JSON: "SUM", "COUNT", or "AVG".
 /// For critical tables: SUM and COUNT route to ZK SlowLane (one proof each).
 /// AVG routes to ZK SlowLane as a composite: SUM proof + COUNT proof + BabyJubJub attestation (~40-120s).
-#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AggFn {
     #[default]
@@ -182,6 +182,12 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
     for (key, tc) in &config.tables {
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
+        }
+        if key == "__zemtik_dummy__" {
+            anyhow::bail!(
+                "schema_config: table key '{}' is reserved as a padding sentinel — choose a different key",
+                key
+            );
         }
         if tc.sensitivity != "critical" && tc.sensitivity != "low" {
             anyhow::bail!(

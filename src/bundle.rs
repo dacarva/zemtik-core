@@ -71,6 +71,8 @@ pub fn generate_bundle(
     run_dir: &Path,
     circuit_dir: &Path,
     receipts_dir: &Path,
+    agg_type: &str,
+    actual_row_count: Option<usize>,
 ) -> anyhow::Result<BundleResult> {
     let bundle_id = Uuid::new_v4().to_string();
     let bb_version = detect_bb_version();
@@ -103,7 +105,9 @@ pub fn generate_bundle(
         "end_time": params.end_time,
         "bank_pub_key_x": sig.pub_key_x,
         "bank_pub_key_y": sig.pub_key_y,
-        "verified_aggregate": aggregate
+        "verified_aggregate": aggregate,
+        "agg_type": agg_type,
+        "actual_row_count": actual_row_count
     });
     let public_inputs_readable_bytes =
         serde_json::to_vec_pretty(&public_inputs_readable).context("serialize public_inputs_readable")?;
@@ -134,6 +138,7 @@ pub fn generate_bundle(
         // Rust-layer commitment to what was sent to the LLM.
         // NOTE: Not a ZK public input — circuit-level commitment deferred to Sprint 3.
         "outgoing_prompt_hash": outgoing_prompt_hash.unwrap_or(""),
+        "agg_type": agg_type,
         "query_params": {
             "client_id": params.client_id,
             "target_category_hash": params.target_category_hash,
