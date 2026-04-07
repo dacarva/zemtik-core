@@ -6,7 +6,7 @@ Every time a company queries an LLM with internal data, it creates a **shadow co
 
 Zemtik solves this at the infrastructure layer: **compute the answer locally inside a Zero-Knowledge circuit, prove the computation was honest, and send only the proven number to the model.** Zero raw rows ever leave the perimeter.
 
-> **POC status (v0.7.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.8.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -207,6 +207,8 @@ The payload sent to OpenAI contains exactly three data fields:
 }
 ```
 
+The HTTP response to the caller includes an `evidence` object at the top level (`evidence_version: 2`, introduced in v0.8.0). It contains the `actual_row_count` of matching rows (replacing the old `row_count` field), the `proof_hash` or `attestation_hash`, engine name, intent confidence, and `data_exfiltrated: 0`.
+
 ### Trust Model
 
 The ZK proof provides a mathematical guarantee that **if** the signing key is legitimate and **if** the circuit's public inputs are correct, then the aggregate is valid. It does **not** eliminate the need to trust:
@@ -236,15 +238,15 @@ zemtik-core/
 │   ├── prover.rs         # nargo / bb subprocess pipeline
 │   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs          # Audit record writer
-│   ├── receipts.rs       # Receipts ledger (CRUD + v3 migration: outgoing_prompt_hash; v2: engine_used, intent_confidence)
+│   ├── receipts.rs       # Receipts ledger (CRUD + v5 migration: actual_row_count; v3: outgoing_prompt_hash; v2: engine_used, intent_confidence)
 │   ├── keys.rs           # BabyJubJub key generation + persistence
-│   ├── config.rs         # Layered config + SchemaConfig loading
+│   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
 │   └── types.rs          # Shared types
 ├── circuit/
-│   ├── Nargo.toml     # eddsa = { path = "../vendor/eddsa" }, poseidon v0.2.6
-│   └── src/
-│       └── main.nr    # ZK circuit: EdDSA verify + SUM aggregation
+│   ├── sum/           # SUM mini-circuit (Nargo.toml + src/main.nr)
+│   ├── count/         # COUNT mini-circuit (Nargo.toml + src/main.nr)
+│   └── lib/           # Shared Noir library (poseidon, eddsa helpers)
 ├── vendor/eddsa/      # Vendored EdDSA library (noir-lang/eddsa, -59% gates)
 ├── supabase/
 │   └── migrations/    # SQL schema for Supabase backend
@@ -309,7 +311,7 @@ bb verify -p proof -k vk
 - **No raw Postgres connector** — `DB_BACKEND` supports `sqlite` (demo) and `supabase` (PostgREST). Connecting an arbitrary Postgres database requires PostgREST deployed in front of it. A native `sqlx` connector (`DB_BACKEND=postgres`) is planned for v2.
 - **File-based signing key** — `~/.zemtik/keys/bank_sk` is the BabyJubJub private key. A compromised file produces validly-signed but fraudulent proofs. Production deployments must use an HSM or KMS.
 - **ZK proof generation blocked** — `bb prove` fails on the current circuit due to an incompatibility between `eddsa v0.1.3` and Barretenberg v3+/v4+ BigField operations. `nargo execute` validates all constraints successfully. The blocker is in the `eddsa` Noir library, not in Zemtik's circuit logic — unblocked when the library is updated.
-- **FastLane query types** — FastLane supports `SUM` and `COUNT` via `"agg_fn"` in `schema_config.json`. AVG, GROUP BY, and multi-table JOINs require new ZK circuit variants and are not supported.
+- **Aggregation support** — FastLane supports `SUM` and `COUNT` via `"agg_fn"` in `schema_config.json`. The ZK SlowLane additionally supports `AVG` as a composite proof (two sequential ZK proofs for SUM and COUNT + BabyJubJub attestation for the division step). GROUP BY and multi-table JOINs are not supported.
 - **CLI pipeline is hardcoded** — 500 transactions, client 123, `aws_spend`, Q1 2024. Proxy mode supports natural-language queries against tables in `schema_config.json`.
 - **Local CPU proving** — ~17s per query. Sub-second latency requires GPU/FPGA hardware on-prem (remote proving exposes the private witness — see [docs/SCALING.md](docs/SCALING.md)).
 

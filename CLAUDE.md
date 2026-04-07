@@ -64,7 +64,7 @@ Zemtik Core is a **Rust + Noir ZK middleware** that enforces zero-knowledge proo
 | Verify | `cargo run -- verify <bundle.zip>` | Offline bundle verification via `bb verify` |
 | List | `cargo run -- list` | List recent receipts from `~/.zemtik/receipts.db` |
 
-### Proxy Data Flow (v0.4+)
+### Proxy Data Flow (v0.8+)
 
 ```
 POST /v1/chat/completions (user prompt)
@@ -79,10 +79,12 @@ POST /v1/chat/completions (user prompt)
       └── ZK SlowLane (critical sensitivity):
             Raw Transactions (private witnesses, never leave the host)
               → BabyJubJub EdDSA signing (per batch of 50)
-              → Noir circuit: Poseidon commitment verification + aggregation
+              → Noir mini-circuit: Poseidon commitment verification + SUM or COUNT aggregation
+                  (circuit/sum/ for SUM/AVG, circuit/count/ for COUNT; shared lib in circuit/lib/)
               → UltraHonk proof (bb v4 / Barretenberg)
               → Proof verified locally ✓
-              → Aggregate only → OpenAI
+              → AVG: two sequential proofs (SUM + COUNT) + BabyJubJub attestation for division
+              → Aggregate only → OpenAI; response includes evidence_version: 2, actual_row_count
 ```
 
 ### Source Modules (`src/`)
@@ -102,15 +104,21 @@ POST /v1/chat/completions (user prompt)
 | `verify.rs` | Proof bundle extraction + `bb verify` invocation |
 | `bundle.rs` | ZIP bundle creation for portable proofs |
 | `openai.rs` | OpenAI Chat Completions API client |
-| `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json`; `AggFn` enum (SUM/COUNT); identifier validation; `use_supabase_fast_lane()` |
-| `receipts.rs` | SQLite receipts ledger (CRUD + v3 migration: adds `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
+| `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json`; `AggFn` enum (SUM/COUNT/AVG); identifier validation; `use_supabase_fast_lane()` |
+| `receipts.rs` | SQLite receipts ledger (CRUD + v5 migration: adds `actual_row_count`; v3: `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |
 
 ### ZK Circuit (`circuit/`)
 
-Written in Noir. Verifies Poseidon commitments for each signed batch and aggregates the result. Vendored EdDSA library lives in `vendor/eddsa/`.
+Mini-circuit layout introduced in v0.8.0. Three subdirectories:
+
+- `circuit/sum/` — SUM circuit (used by SUM and AVG queries)
+- `circuit/count/` — COUNT circuit (used by COUNT and AVG queries)
+- `circuit/lib/` — Shared Noir library (Poseidon helpers, EdDSA wrappers)
+
+Each mini-circuit verifies Poseidon commitments per signed batch and computes its respective aggregate. The vendored EdDSA library lives in `vendor/eddsa/`. AVG runs both circuits sequentially and combines results with a BabyJubJub attestation.
 
 ### Configuration
 

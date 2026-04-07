@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.7.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults. v0.7.0 adds the universal FastLane engine: any table in `schema_config.json` with `"sensitivity": "low"` automatically routes through FastLane; `AggFn` enum (SUM/COUNT); new `TableConfig` fields (`value_column`, `timestamp_column`, `category_column`, `agg_fn`, `metric_label`, `skip_client_id_filter`, `physical_table`); `attest_fast_lane()` public API; `signing_version: 2`; and fixes ISSUE-001 (`DB_BACKEND=sqlite` ignored when Supabase creds were set).
+**Scope note:** This document is aligned with **v0.8.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults. v0.7.0 adds the universal FastLane engine: any table in `schema_config.json` with `"sensitivity": "low"` automatically routes through FastLane; `AggFn` enum (SUM/COUNT); new `TableConfig` fields (`value_column`, `timestamp_column`, `category_column`, `agg_fn`, `metric_label`, `skip_client_id_filter`, `physical_table`); `attest_fast_lane()` public API; `signing_version: 2`; and fixes ISSUE-001 (`DB_BACKEND=sqlite` ignored when Supabase creds were set). v0.8.0 (Universal ZK Engine) adds `AggFn::Avg` (ZK composite: two sequential proofs + attestation), mini-circuit layout (`circuit/sum/`, `circuit/count/`, `circuit/lib/`), variable row-count padding with sentinel transactions, `actual_row_count` field replacing `row_count`, `evidence_version: 2` on all proxy responses, receipts DB v5 migration, and per-agg pipeline locks (SUM and COUNT run concurrently).
 
 ---
 
@@ -128,7 +128,7 @@ POST /v1/chat/completions (user prompt)
 | `verify.rs` / `bundle.rs` | Bundle ZIP + offline verification |
 | `openai.rs` | Chat Completions client |
 | `config.rs` | Layered config + schema load |
-| `receipts.rs` | SQLite receipts (v3: adds `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
+| `receipts.rs` | SQLite receipts (v5: adds `actual_row_count`; v3: `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key at `~/.zemtik/keys/bank_sk` (0600) |
 | `types.rs` | `IntentResult`, `Route`, `EngineResult`, `EvidencePack`, … |
 | `audit.rs` | JSON audit records under `audit/` |
@@ -186,15 +186,25 @@ The POC seeds **500** transactions (10 batches × 50) for `client_id = 123` acro
 
 Before use in the circuit, transaction batches are signed with **BabyJubJub EdDSA** and **Poseidon** commitments (same construction as the original POC). The commitment tree is documented in the Noir section below.
 
-### 7. The ZK Circuit (`circuit/src/main.nr`)
+### 7. The ZK Circuits (`circuit/`)
 
-Noir 1.0.0-beta.19. One ACIR program processes **`BATCH_COUNT` = 10** batches of **`TX_COUNT` = 50** transactions (500 rows total). Each batch has its own Poseidon commitment and EdDSA signature (`BatchInput`).
+Mini-circuit layout (v0.8.0). Three Noir packages:
 
-**Public inputs:** `target_category`, `start_time`, `end_time`, `bank_pub_key_x`, `bank_pub_key_y`.  
+| Directory | Purpose |
+|-----------|---------|
+| `circuit/sum/` | SUM mini-circuit — computes `SUM(amount)` per batch; used by SUM and AVG queries |
+| `circuit/count/` | COUNT mini-circuit — computes `COUNT(non-null rows)` per batch; used by COUNT and AVG queries |
+| `circuit/lib/` | Shared Noir library — Poseidon tree construction, EdDSA verify wrapper |
+
+**Each mini-circuit** (Noir 1.0.0-beta.19) processes **`BATCH_COUNT` = 10** batches of **`TX_COUNT` = 50** transactions (500 rows total, padded with sentinel transactions when the actual result set is smaller). Each batch has its own Poseidon commitment and EdDSA signature (`BatchInput`).
+
+**Public inputs (both circuits):** `target_category`, `start_time`, `end_time`, `bank_pub_key_x`, `bank_pub_key_y`, `actual_row_count`.  
 **Private inputs:** `batches: [BatchInput; 10]` (rows + `sig_s`, `sig_r8_x`, `sig_r8_y` per batch).  
-**Return value (public):** single `Field`, the sum of per-batch aggregates.
+**Return value (public):** single `Field` — the per-batch aggregate (sum or count).
 
-Per batch: reconstruct 4-level Poseidon tree → `eddsa_verify::<PoseidonHasher>` → branchless masked sum over the 50 rows.
+Per batch: reconstruct 4-level Poseidon tree → `eddsa_verify::<PoseidonHasher>` → branchless masked accumulation over the 50 rows.
+
+**AVG composite:** `proxy.rs` runs the SUM circuit then the COUNT circuit sequentially (under separate per-agg locks), then computes `avg = sum / count` in Rust and signs the triple `(sum, count, avg)` with BabyJubJub. The response includes `sum_proof_hash`, `count_proof_hash`, and `avg_evidence_model: "zk_composite+attestation"`.
 
 ### 8. The Noir Pipeline (`src/prover.rs`)
 
@@ -215,7 +225,7 @@ ZK slow lane writes portable ZIP bundles under `~/.zemtik/receipts/` and rows in
 
 **CLI pipeline** sends a JSON payload including `period_start` / `period_end` and `data_provenance: "ZEMTIK_VALID_ZK_PROOF"` (see `openai.rs`).
 
-**Proxy FastLane** replaces the last user message with a summary that includes an **`evidence`** object: engine name, `attestation_hash`, `schema_config_hash`, aggregate, `row_count`, `receipt_id`, `zemtik_confidence`, `outgoing_prompt_hash`, and `data_exfiltrated: 0`.
+**Proxy FastLane** replaces the last user message with a summary that includes an **`evidence`** object: engine name, `attestation_hash`, `schema_config_hash`, aggregate, `actual_row_count`, `receipt_id`, `zemtik_confidence`, `outgoing_prompt_hash`, `evidence_version: 2`, and `data_exfiltrated: 0`.
 
 **Proxy ZK slow lane** injects the same compact summary into the last user message for the model, and adds the same top-level **`evidence`** object on the HTTP response as FastLane (ZK `proof_hash`, `engine_used`, `intent`, `outgoing_prompt_hash`, etc.). `outgoing_prompt_hash` is `None` when `fully_verifiable=false` (no proof artifact exists). Receipt metadata captures `proof_hash`, confidence, and `outgoing_prompt_hash` server-side.
 
@@ -549,7 +559,7 @@ FastLane provides cryptographic attestation over the aggregate path, not a succi
 
 3. **Fixed batch geometry:** `TX_COUNT` and `BATCH_COUNT` are compile-time constants (currently 50 × 10 = 500 rows). Changing capacity requires recompiling the circuit and regenerating artifacts.
 
-4. **Query expressiveness:** Circuit is SUM with category + time window; other aggregates need new circuits.
+4. **Query expressiveness:** ZK SlowLane supports SUM, COUNT, and AVG (composite). AVG runs two sequential proofs (~40–120s). MIN/MAX, GROUP BY, and multi-table JOINs require new circuit variants and are not supported.
 
 5. **Public inputs sidecar:** Human-readable metadata in bundles is not separately committed inside the circuit (documented in verifier UX); rely on `bb verify` for proof / VK / binary public inputs.
 
