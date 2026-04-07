@@ -611,7 +611,12 @@ Zemtik expects `timestamp_column` to contain UNIX epoch seconds as a `BIGINT`. M
 | Non-sensitive operational data (order count, contract count) | `"low"` — FastLane attestation, < 50ms |
 | Public-facing metrics | `"low"` — FastLane attestation |
 
-When in doubt, use `"critical"`. The ZK proof is slower (~17s) but provides a mathematical guarantee. FastLane provides a BabyJubJub EdDSA attestation — cryptographically binding, but not a succinct proof. **Exception:** `agg_fn: "COUNT"` cannot be paired with `sensitivity: "critical"` — the ZK circuit only handles SUM over BN254 field elements. For COUNT-based tables, use `sensitivity: "low"` (FastLane attestation).
+When in doubt, use `"critical"`. The ZK proof is slower (~17-20s for SUM/COUNT, ~40-120s for AVG) but provides a mathematical guarantee. FastLane provides a BabyJubJub EdDSA attestation — cryptographically binding, but not a succinct proof.
+
+All three aggregation functions are supported on `sensitivity: "critical"` tables:
+- `"SUM"` — single ZK proof (~17-20s)
+- `"COUNT"` — single ZK proof (~17-20s); use a non-nullable `value_column` (primary key recommended)
+- `"AVG"` — composite: SUM proof + COUNT proof + BabyJubJub attestation (~40-120s); the response includes `sum_proof_hash`, `count_proof_hash`, and `avg_evidence_model: "zk_composite+attestation"`
 
 ### Step 5 — Write example prompts
 

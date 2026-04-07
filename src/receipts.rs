@@ -25,6 +25,9 @@ pub struct Receipt {
     pub outgoing_prompt_hash: Option<String>,
     /// FastLane attestation payload version: None or 1 = pre-v0.7.0; 2 = descriptor-bound.
     pub signing_version: Option<u8>,
+    /// Number of real (non-dummy padding) transactions in the ZK proof.
+    /// None for FastLane path or legacy rows (pre-v5).
+    pub actual_row_count: Option<usize>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -63,6 +66,8 @@ pub fn open_receipts_db(db_path: &std::path::Path) -> anyhow::Result<Connection>
 ///                 and creates intent_rejections table.
 /// Version 1 → 2: adds intent_confidence column.
 /// Version 2 → 3: adds outgoing_prompt_hash column.
+/// Version 3 → 4: adds signing_version column.
+/// Version 4 → 5: adds actual_row_count column (pre-padding real row count for ZK path).
 pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -116,6 +121,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v4")?;
     }
 
+    if version < 5 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN actual_row_count INTEGER DEFAULT NULL;
+             PRAGMA user_version = 5;
+             COMMIT;",
+        )
+        .context("apply migration v5")?;
+    }
+
     Ok(())
 }
 
@@ -125,8 +140,9 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
         "INSERT INTO receipts
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
-             data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
+             actual_row_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -142,6 +158,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.intent_confidence,
             r.outgoing_prompt_hash,
             r.signing_version.map(|v| v as i64),
+            r.actual_row_count.map(|v| v as i64),
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -179,7 +196,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     COALESCE(data_exfiltrated, 0),
                     intent_confidence,
                     outgoing_prompt_hash,
-                    signing_version
+                    signing_version,
+                    actual_row_count
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -187,6 +205,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
     let rows = stmt
         .query_map([], |row| {
             let sv: Option<i64> = row.get(13)?;
+            let arc: Option<i64> = row.get(14)?;
             Ok(Receipt {
                 id: row.get(0)?,
                 bundle_path: row.get(1)?,
@@ -202,6 +221,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
+                actual_row_count: arc.map(|v| v as usize),
             })
         })
         .context("query receipts")?;
@@ -221,7 +241,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     COALESCE(data_exfiltrated, 0),
                     intent_confidence,
                     outgoing_prompt_hash,
-                    signing_version
+                    signing_version,
+                    actual_row_count
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -229,6 +250,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
     let mut rows = stmt
         .query_map(rusqlite::params![id], |row| {
             let sv: Option<i64> = row.get(13)?;
+            let arc: Option<i64> = row.get(14)?;
             Ok(Receipt {
                 id: row.get(0)?,
                 bundle_path: row.get(1)?,
@@ -244,6 +266,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
+                actual_row_count: arc.map(|v| v as usize),
             })
         })
         .context("query receipt")?;

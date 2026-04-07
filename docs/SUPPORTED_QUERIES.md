@@ -78,15 +78,15 @@ The proxy silently processes only the highest-confidence match. No note is added
 
 ### Aggregation types
 
-Only `SUM(amount)` is supported. The circuit and engine both implement exactly one aggregation.
+Three aggregation functions are supported. Each routes differently based on `sensitivity`.
 
-| Aggregation | Supported |
-|-------------|---------|
-| SUM | Yes |
-| COUNT | No |
-| AVG / MEAN | No |
-| MIN / MAX | No |
-| Percentiles | No |
+| Aggregation | FastLane (low) | ZK SlowLane (critical) | Notes |
+|-------------|---------------|----------------------|-------|
+| SUM | Yes | Yes | Sums a numeric column |
+| COUNT | Yes | Yes | Counts matching rows (non-null `value_column`; use a PK or non-nullable column for ZK path) |
+| AVG | No | Yes — composite | Two sequential ZK proofs (SUM + COUNT) + BabyJubJub attestation for division. Response includes `sum_proof_hash`, `count_proof_hash`, and `avg_evidence_model: "zk_composite+attestation"`. Latency: ~40-120s. |
+| MIN / MAX | No | No (Phase 2) | |
+| Percentiles | No | No | |
 
 ### Client filtering
 
@@ -132,6 +132,11 @@ The routing decision and confidence score are included in every response's `evid
 | Empty prompt | 400 | `"empty prompt"` |
 | Table key is empty, non-ASCII, or >93 bytes | 500 | `"cannot hash table key '...' (key must be ≤93 bytes after lowercasing)"` |
 | `bb verify` fails | 500 | `"proof verification failed"` |
+| More than 500 matching rows (ZK path) | 422 | `"Too many matching rows (N=...). ZK SlowLane supports up to 500 transactions per query. Narrow the time range or set sensitivity to 'low' to use FastLane instead."` |
+| COUNT table with nullable `value_column` (ZK path) | Runtime 422 | Circuit counts all padded rows that match time/category filters regardless of null semantics — use a primary key or NOT NULL column for `value_column` to avoid incorrect counts |
+| AVG query with no matching rows (COUNT=0) | 422 | `"AVG: no matching transactions in the queried time period. The COUNT step returned 0. Check that the time range and table key match existing data."` |
+| Unrecognized `agg_fn` value in schema_config.json | Exit 1 | serde parse error — valid values are `"SUM"`, `"COUNT"`, `"AVG"` (case-sensitive, uppercase) |
+| Circuit compilation timeout on first ZK request | 504 | `"ZK circuit compilation timed out. This is expected on first use (~30-120s). Retry the request."` |
 
 ---
 

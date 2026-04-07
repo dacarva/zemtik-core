@@ -37,6 +37,7 @@ fn sample_receipt(id: &str) -> Receipt {
         intent_confidence: None,
         outgoing_prompt_hash: None,
         signing_version: None,
+        actual_row_count: None,
     }
 }
 
@@ -90,7 +91,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "expected migration to reach version 4");
+    assert_eq!(version, 5, "expected migration to reach version 5");
 }
 
 #[test]
@@ -100,7 +101,7 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "migration should be idempotent at version 4");
+    assert_eq!(version, 5, "migration should be idempotent at version 5");
 }
 
 #[test]
@@ -147,7 +148,7 @@ fn test_migration_v2_to_v3() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 4, "v2→v4 migration must bump to version 4");
+    assert_eq!(version_after, 5, "v2→v5 migration must bump to version 5");
 
     // Verify the column exists
     let col_count: i64 = conn
@@ -158,6 +159,73 @@ fn test_migration_v2_to_v3() {
         )
         .unwrap();
     assert_eq!(col_count, 1, "outgoing_prompt_hash column must exist after v3 migration");
+}
+
+#[test]
+fn test_migration_v4_to_v5() {
+    // Simulate a v4 database: create base table + run v1-v4 migrations manually
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipts (
+            receipt_id   TEXT PRIMARY KEY,
+            bundle_path  TEXT NOT NULL,
+            proof_status TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            bb_version   TEXT NOT NULL,
+            prompt_hash  TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN engine_used TEXT DEFAULT 'zk_slow_lane_legacy';
+        ALTER TABLE receipts ADD COLUMN proof_hash TEXT;
+        ALTER TABLE receipts ADD COLUMN data_exfiltrated INTEGER DEFAULT 0;
+        CREATE TABLE IF NOT EXISTS intent_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt TEXT NOT NULL,
+            error TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN intent_confidence REAL DEFAULT NULL;
+        PRAGMA user_version = 2;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN outgoing_prompt_hash TEXT DEFAULT NULL;
+        PRAGMA user_version = 3;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN signing_version INTEGER DEFAULT NULL;
+        PRAGMA user_version = 4;
+        COMMIT;",
+    )
+    .unwrap();
+
+    let version_before: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_before, 4);
+
+    run_migration(&conn).unwrap();
+
+    let version_after: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_after, 5, "v4→v5 migration must bump to version 5");
+
+    // Regression: ISSUE-001 — actual_row_count column missing after v4→v5 migration
+    // Found by /qa on 2026-04-07
+    // Report: .gstack/qa-reports/qa-report-zemtik-core-2026-04-07.md
+    let col_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('receipts') WHERE name='actual_row_count'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(col_count, 1, "actual_row_count column must exist after v5 migration");
 }
 
 #[test]

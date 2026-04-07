@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Expand a leading `~` to the home directory so users can write `~/foo` in
@@ -29,13 +29,16 @@ pub struct SchemaConfig {
     pub tables: HashMap<String, TableConfig>,
 }
 
-/// Aggregation function for FastLane queries. Uppercase required in JSON: "SUM" or "COUNT".
-#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
+/// Aggregation function. Uppercase required in JSON: "SUM", "COUNT", or "AVG".
+/// For critical tables: SUM and COUNT route to ZK SlowLane (one proof each).
+/// AVG routes to ZK SlowLane as a composite: SUM proof + COUNT proof + BabyJubJub attestation (~40-120s).
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AggFn {
     #[default]
     Sum,
     Count,
+    Avg,
 }
 
 impl AggFn {
@@ -43,6 +46,17 @@ impl AggFn {
         match self {
             AggFn::Sum => "SUM",
             AggFn::Count => "COUNT",
+            AggFn::Avg => "AVG",
+        }
+    }
+
+    /// Name of the compiled circuit artifact directory for this aggregation.
+    /// AVG has no dedicated circuit — it uses sum/ and count/ sequentially.
+    pub fn circuit_artifact_name(&self) -> Option<&'static str> {
+        match self {
+            AggFn::Sum => Some("sum"),
+            AggFn::Count => Some("count"),
+            AggFn::Avg => None, // composite: uses sum + count
         }
     }
 }
@@ -169,6 +183,12 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
         }
+        if key.trim().to_ascii_lowercase() == "__zemtik_dummy__" {
+            anyhow::bail!(
+                "schema_config: table key '{}' is reserved as a padding sentinel — choose a different key",
+                key
+            );
+        }
         if tc.sensitivity != "critical" && tc.sensitivity != "low" {
             anyhow::bail!(
                 "schema_config: table '{}' has invalid sensitivity '{}' (must be 'critical' or 'low')",
@@ -231,12 +251,22 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
             );
         }
 
-        // COUNT + critical is not supported: the ZK circuit only handles SUM of BN254 field elements.
-        if tc.agg_fn == AggFn::Count && tc.sensitivity == "critical" {
+        // AVG on low-sensitivity tables: not supported (FastLane has no composite path).
+        if tc.agg_fn == AggFn::Avg && tc.sensitivity == "low" {
             anyhow::bail!(
-                "schema_config: table '{}': COUNT aggregation with sensitivity=critical is not \
-                 supported. The ZK circuit only handles SUM. Use sensitivity=low for COUNT tables \
-                 (FastLane-attested only) or use SUM with sensitivity=critical.",
+                "schema_config: table '{}': agg_fn=AVG is not supported for low-sensitivity tables. \
+                 AVG requires the ZK SlowLane composite pipeline. Set sensitivity to 'critical' or \
+                 use agg_fn=SUM or agg_fn=COUNT instead.",
+                key
+            );
+        }
+
+        // AVG on critical tables: composite ZK proof (SUM + COUNT). Warn about latency.
+        if tc.agg_fn == AggFn::Avg && tc.sensitivity == "critical" {
+            eprintln!(
+                "[INFO] schema_config: table '{}': agg_fn=AVG on a critical table runs two ZK \
+                 pipeline proofs sequentially (~40-120s per request). The response will include \
+                 sum_proof_hash and count_proof_hash with avg_evidence_model='zk_composite+attestation'.",
                 key
             );
         }

@@ -138,6 +138,41 @@
         "How many employees joined us last quarter?",
         "What is our headcount growth this year?"
       ]
+    },
+    "headcount_low": {
+      "sensitivity": "low",
+      "description": "FastLane headcount from HR records. Uses physical_table to query 'employees' directly on Supabase (Supabase only — ZK SlowLane always queries the 'transactions' table and does not support physical_table routing). timestamp_column must store UNIX epoch seconds.",
+      "physical_table": "employees",
+      "value_column": "employee_id",
+      "timestamp_column": "hire_date_epoch",
+      "category_column": null,
+      "agg_fn": "COUNT",
+      "metric_label": "headcount",
+      "skip_client_id_filter": true,
+      "example_prompts": [
+        "How many employees were hired in Q1 2024?",
+        "What is the headcount for this quarter?",
+        "How many staff members joined in H1 2024?",
+        "What is our headcount growth this fiscal year?"
+      ]
+    },
+    "avg_deal_size": {
+      "sensitivity": "critical",
+      "description": "ZK-verified average M&A deal size. Uses AVG composite evidence: two independent ZK proofs (SUM + COUNT) plus a BabyJubJub attestation for the division step.",
+      "physical_table": "transactions",
+      "value_column": "amount",
+      "timestamp_column": "timestamp",
+      "category_column": "category_name",
+      "agg_fn": "AVG",
+      "metric_label": "avg_deal_value_usd",
+      "skip_client_id_filter": false,
+      "example_prompts": [
+        "What was the average deal size last quarter?",
+        "Show me average transaction value for Q1 2024",
+        "What is our mean deal value this fiscal year?",
+        "Average M&A transaction size in H1 2024",
+        "What is the typical deal size for our acquisitions this year?"
+      ]
     }
   }
 }

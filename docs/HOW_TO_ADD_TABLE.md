@@ -56,6 +56,18 @@ Open `~/.zemtik/schema_config.json` and add an entry under `"tables"`:
 
 ### Field guidance
 
+**`agg_fn`** — Aggregation function. Valid values: `"SUM"` (default), `"COUNT"`, `"AVG"`. Case-sensitive, uppercase required.
+
+| Value | What it computes | ZK SlowLane (critical) | FastLane (low) | Latency (critical) |
+|-------|-----------------|----------------------|----------------|-------------------|
+| `"SUM"` | Sum of `value_column` | Yes — single ZK proof | Yes | ~17-20s |
+| `"COUNT"` | Count of matching rows | Yes — single ZK proof | Yes | ~17-20s |
+| `"AVG"` | Average of `value_column` | Yes — composite: SUM proof + COUNT proof + BabyJubJub attestation | Not supported | ~40-120s |
+
+> **COUNT semantics:** The ZK circuit counts rows where `value_column` is non-null. Use a primary key or a guaranteed non-nullable column. SQL `COUNT(nullable_col)` skips nulls; the ZK circuit does the same, but an unexpected null will produce a lower count than `COUNT(*)`. For critical tables, use a column you know is always populated.
+
+> **AVG evidence model:** AVG produces two independent ZK proofs (one for the numerator SUM, one for the denominator COUNT). Each proof is independently verifiable with `zemtik verify`. The division step (`avg = sum / count`) is attested with a BabyJubJub signature. The response includes `sum_proof_hash`, `count_proof_hash`, and `avg_evidence_model: "zk_composite+attestation"`.
+
 **`sensitivity`** — Use `"critical"` for any table that needs ZK proof. Since Sprint 2, the circuit hashes the table key string with Poseidon BN254, so any key you define here works with ZK SlowLane — no circuit change needed. Use `"low"` for tables where a fast attestation is sufficient.
 
 **`aliases`** — Add the terms users will actually type. Include abbreviations and synonyms. The intent engine matches these case-insensitively as substrings.

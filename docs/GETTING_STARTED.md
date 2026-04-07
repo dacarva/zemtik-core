@@ -240,6 +240,106 @@ The server terminal shows the ZK pipeline stages. Expect ~17–20s for proof gen
 
 ---
 
+## Step 6.5 — Try COUNT and AVG on critical tables
+
+The ZK SlowLane now supports COUNT and AVG aggregations, not just SUM. Add these entries to your `~/.zemtik/schema_config.json` under `"tables"`:
+
+> **Note on `timestamp_column`:** The engine compares timestamps as UNIX epoch seconds (`u64`). Ensure the column in your database stores epoch seconds, not human-readable date strings. If your table uses a date column, add a computed column or view that converts it (e.g. `EXTRACT(EPOCH FROM hire_date)::bigint`).
+
+```json
+"headcount_low": {
+  "sensitivity": "low",
+  "description": "FastLane headcount from HR records. Uses physical_table to query 'employees' on Supabase (Supabase only — SQLite always queries 'transactions').",
+  "physical_table": "employees",
+  "value_column": "employee_id",
+  "timestamp_column": "hire_date_epoch",
+  "category_column": null,
+  "agg_fn": "COUNT",
+  "metric_label": "headcount",
+  "skip_client_id_filter": true,
+  "example_prompts": [
+    "How many employees were hired in Q1 2024?",
+    "What is the headcount for this quarter?"
+  ]
+},
+"avg_deal_size": {
+  "sensitivity": "critical",
+  "description": "ZK-verified average M&A deal size.",
+  "physical_table": "transactions",
+  "value_column": "amount",
+  "timestamp_column": "timestamp",
+  "category_column": "category_name",
+  "agg_fn": "AVG",
+  "metric_label": "avg_deal_value_usd",
+  "skip_client_id_filter": false,
+  "example_prompts": [
+    "What was the average deal size last quarter?",
+    "Show me average transaction value for Q1 2024"
+  ]
+}
+```
+
+Restart the proxy (`Ctrl+C`, then `cargo run -- proxy`), then query:
+
+**COUNT on a critical table:**
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "How many employees were hired in Q1 2024?"}]
+  }'
+```
+
+Response `evidence` field:
+
+```json
+"evidence": {
+  "evidence_version": 2,
+  "engine": "ZkSlowLane",
+  "proof_hash": "9a1b...",
+  "actual_row_count": 47,
+  "data_exfiltrated": 0
+}
+```
+
+**AVG on a critical table** (runs two ZK proofs sequentially, ~40-120s):
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "What was the average deal size in Q1 2024?"}]
+  }'
+```
+
+Response `evidence` field:
+
+```json
+"evidence": {
+  "evidence_version": 2,
+  "engine": "ZkSlowLane",
+  "sum_proof_hash": "7b2c...",
+  "count_proof_hash": "a3f9...",
+  "avg": 56200,
+  "sum": 2810000,
+  "count": 50,
+  "actual_row_count": 50,
+  "avg_evidence_model": "zk_composite+attestation",
+  "data_exfiltrated": 0
+}
+```
+
+**Understanding the AVG evidence model:** AVG runs two independent ZK proofs — one for the SUM of all matching rows, one for the COUNT. Both proofs are verifiable with `zemtik verify <bundle.zip>`. The final division (`avg = sum / count`) is attested with a BabyJubJub EdDSA signature over the result. This is the same trust model as FastLane for the division step, with full UltraHonk guarantees on both operands.
+
+> **Latency note:** The first AVG or COUNT query on a new table compiles the ZK circuit (~30-120s). The proxy logs `[PROXY] Compiling circuit...` while this happens. Subsequent requests reuse the compiled artifact. Set `ZEMTIK_INTENT_BACKEND=regex` if you want to skip the embedding model download on first proxy start.
+
+---
+
 ## What's next
 
 - **Configure your own tables** — [How to Add a Table](HOW_TO_ADD_TABLE.md)

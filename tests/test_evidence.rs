@@ -14,6 +14,7 @@ fn make_ev(hash: Option<String>) -> EvidencePack {
         "2026-01-01T00:00:00Z",
         Some(0.95),
         hash,
+        None,
     )
 }
 

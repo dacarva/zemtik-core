@@ -1,0 +1,8 @@
+[package]
+name = "zemtik_lib"
+type = "lib"
+authors = ["Zemtik"]
+
+[dependencies]
+eddsa = { path = "../../vendor/eddsa" }
+poseidon = { tag = "v0.2.6", git = "https://github.com/noir-lang/poseidon" }

@@ -1,5 +1,45 @@
 # TODOS
 
+## P1 — Integration test suite (added 2026-04-07, QA post-mortem)
+
+### End-to-end proxy integration tests (P1, before next sprint)
+- **What:** A `tests/integration/` test suite that spins up the proxy in-process (or via `cargo run -- proxy` subprocess), sends real HTTP requests, and asserts on response status codes, headers (`x-zemtik-engine`, `x-zemtik-bundle-id`), and `evidence` fields. Cover at minimum: SUM/critical, COUNT/critical, AVG/composite, FastLane, reserved-key rejection, and the empty-AVG 422 path.
+- **Why:** Manual QA of `feat/universal-zk-engine` uncovered 4 bugs that unit tests did not catch: (1) `circuit/Nargo.toml` monolith shadowing mini-circuit compilation — nargo walked up to the wrong root; (2) `validate_circuit_dir` checking old file paths from the monolith layout; (3) non-ASCII em dash in Noir source causing silent compile failure; (4) AVG returning HTTP 500 instead of 422 for empty data sets. All four bugs were invisible to unit tests because they only fired when the full pipeline ran: proxy startup → intent routing → nargo compile → ZK execute → response marshaling. Each bug wasted 15–45 min of manual triage. An integration test suite would have caught them in CI in under 2 minutes.
+- **How to apply:** Use `tokio::test` with `axum::serve` bound to an ephemeral port (`0.0.0.0:0`). Use the SQLite backend (no external deps). Gate ZK-heavy paths (proof generation) behind `#[cfg(feature = "integration")]` or `RUN_ZK_TESTS=1`. The proxy startup, intent extraction, FastLane, and error-path tests do NOT require `bb` or `nargo` and can run in every CI build.
+- **Effort:** M (CC+gstack ~1–2h)
+- **Priority:** P1 — implement before the next sprint that touches proxy routing or pipeline changes
+
+---
+
+## DX debt — added from feat/universal-zk-engine DX review (2026-04-07)
+
+### Structured JSON error responses (P3, v2)
+- **What:** Migrate proxy error strings to a structured `{ "error": { "type": "...", "code": "...", "message": "...", "doc_url": "..." } }` shape (Stripe API pattern). Currently errors are plain strings.
+- **Why:** Platform engineers parsing responses programmatically can't distinguish error types without regex. Affects every integration that handles errors gracefully.
+- **Pros:** Cleaner client integration, debuggable error types, linkable to docs.
+- **Cons:** Breaking change to the error response shape — requires a versioned rollout.
+- **Effort:** S (human) → S (CC+gstack)
+- **Depends on:** evidence_version field already added (v2 responses)
+
+### Pre-built binary with compiled ZK circuits (P2, post-sprint)
+- **What:** Compile `circuit/sum/` and `circuit/count/` mini-circuits in the GitHub Actions release pipeline and include the compiled artifacts in the tarball.
+- **Why:** The first request for a COUNT or AVG query triggers circuit compilation (~30-120s). The proxy logs `[PROXY] Compiling circuit...` but platform engineers watching a demo think the proxy is hung. Pre-compiled artifacts eliminate this entirely.
+- **Pros:** First-request latency drops to proof generation only (~17s). Champion-tier DX for demo environments.
+- **Cons:** Increases tarball size (~5-15MB per circuit). CI build time increases by ~2min.
+- **Effort:** S (human) → S (CC+gstack)
+- **Depends on:** ~~feat/universal-zk-engine merged~~ ✓ UNBLOCKED (v0.8.0, 2026-04-07) — mini-circuits exist at circuit/sum/ and circuit/count/
+
+### AVG evidence model explainer page (P3, post-sprint)
+- **What:** A standalone `docs/AVG_EVIDENCE.md` that explains the ZK composite evidence model for AVG: why there are two proof hashes, what the BabyJubJub attestation covers, and how to verify each component. Target audience: compliance officer reviewing audit bundles.
+- **Why:** The `avg_evidence_model: "zk_composite+attestation"` field tells engineers there's a mixed model, but compliance officers reading the bundle need plain language. Missing this doc means the compliance officer asks the engineer, who has to invent an explanation on the spot.
+- **Pros:** Compliance officer can self-serve during bundle review. Reduces demo prep time.
+- **Cons:** Needs updating if the AVG pipeline changes (e.g., full ZK AVG circuit in Phase 2).
+- **Effort:** S (human) → S (CC+gstack)
+- **Context:** Link this doc from `request_meta.json` inside AVG proof bundles as `"evidence_model_docs": "https://github.com/zemtik/zemtik-core/blob/main/docs/AVG_EVIDENCE.md"`.
+- **Depends on:** feat/universal-zk-engine merged
+
+---
+
 ## P1 — Gating questions (blocking implementation)
 
 ### SF client demand confirmation (feat/routing-engine, before implementation)
@@ -347,3 +387,31 @@
 - **Effort:** S (human) → S (CC+gstack) — 1 proxy.rs check + 1 test
 - **Priority:** P4 — non-blocking, requires P3
 - **Depends on:** P3 (intent subcategory extraction) merged
+
+---
+
+## P2 — feat/universal-zk-engine (added by /plan-ceo-review 2026-04-07)
+
+### AVG over Supabase operates on two independent dataset snapshots
+
+- **What:** In AVG mode, `run_zk_pipeline` is called twice (SUM + COUNT). Each call invokes `db::init_db()` separately. For SQLite (demo), this is deterministic (seeded data). For Supabase (production), the two calls hit the live DB at different timestamps — if a transaction is inserted between the SUM call and the COUNT call, the SUM and COUNT operate on different datasets. The AVG will be mathematically inconsistent (numerator from N+1 rows, denominator from N rows).
+- **Why:** Found by Codex adversarial review during /plan-ceo-review (2026-04-07). The `avg_pipeline_lock` prevents concurrent ZK requests but does not prevent changes in the external Supabase database.
+- **Pros of fixing:** AVG is cryptographically consistent — both proofs are over the exact same dataset. Required for compliance use cases where auditors may check SUM/COUNT proofs independently.
+- **Cons:** Requires passing a pre-fetched transaction set to both pipeline runs (instead of letting each call `init_db()`). Requires `run_zk_pipeline` to accept pre-fetched data as a parameter.
+- **Context:** The demo uses SQLite (deterministic, seeded). For the first demo, document this as a known limitation in `request_meta.json` as `"avg_snapshot_model": "sequential_independent"`. Fix before shipping Supabase AVG to production.
+- **Effort:** M (human: ~2h / CC: ~20min) — refactor `run_zk_pipeline` to accept pre-fetched TransactionBatch
+- **Priority:** P2 — blocking for production Supabase AVG; non-blocking for SQLite demo
+- **Depends on:** feat/universal-zk-engine merged
+
+---
+
+### AVG queries produce two independent receipts — AVG value not visible in `zemtik list`
+
+- **What:** `handle_avg` inserts two receipts into the receipts DB: one for the SUM bundle (aggregate = raw SUM value) and one for the COUNT bundle (aggregate = row count). `zemtik list` shows these as two independent ZK SlowLane queries. The actual AVG value (SUM / COUNT) is not recorded anywhere in the receipts ledger or the `/verify` page. A compliance officer reviewing the audit trail cannot find the AVG query.
+- **Why:** Found by Claude subagent adversarial review during /plan-eng-review (2026-04-07). The bundle metadata includes `avg_bundle_pair_id` linking the two bundles, but there is no consolidated receipt. The `zemtik list` UX is misleading for AVG.
+- **Pros of fixing:** Full audit trail — compliance officer runs `zemtik list` and sees one AVG entry with the computed value, referencing both the SUM and COUNT proof bundles.
+- **Cons:** Requires a new `engine_used = 'zk_slow_lane_avg'` type, a new receipt insert with `sum_bundle_id` + `count_bundle_id` + `avg_value`, and updates to `zemtik list` display formatting.
+- **Context:** For the first demo, the compliance officer is told to verify both bundles separately and compute the AVG manually. The `avg_bundle_pair_id` in each bundle's `request_meta.json` links them. Document this limitation in the demo script.
+- **Effort:** S (human: ~1h / CC: ~15min) — new engine_used type, one INSERT, list display update
+- **Priority:** P2 — non-blocking for demo; required for production audit trail
+- **Depends on:** feat/universal-zk-engine merged
