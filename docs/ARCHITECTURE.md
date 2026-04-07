@@ -157,7 +157,28 @@ Each table declares sensitivity (e.g. `critical` vs `low`). **Critical** (and un
 
 ### 4. FastLane (`engine_fast.rs`)
 
-Computes `SUM(value_column)` or `COUNT(value_column)` (controlled by `AggFn` in `TableConfig`) for the resolved category and time window. Works against both the **in-memory SQLite ledger** (`DB_BACKEND=sqlite`) and **Supabase PostgREST** (`DB_BACKEND=supabase`). The generic `aggregate_table()` / `query_aggregate_table()` functions accept any table defined in `schema_config.json` with `"sensitivity": "low"` — no code change required to add tables. `attest_fast_lane()` signs the `(aggregate, row_count)` pair with BabyJubJub EdDSA (`signing_version: 2`); **no UltraHonk proof**. Fully concurrent; does not hold the global ZK `pipeline_lock`.
+FastLane is the sub-50ms execution path for tables with `"sensitivity": "low"`. It performs a direct database aggregate and attests the result with BabyJubJub EdDSA — **no Noir circuit is compiled, no UltraHonk proof is generated**.
+
+**Aggregate query.** `aggregate_table()` (SQLite) or `query_aggregate_table()` (Supabase PostgREST) runs a single SQL aggregate. The exact query shape is controlled by `TableConfig` fields: `agg_fn` (SUM or COUNT), `value_column`, `timestamp_column`, `category_column`, and `skip_client_id_filter`. Individual transaction rows are never fetched — only the final `(aggregate, row_count)` pair leaves the DB layer.
+
+**Attestation — `attest_fast_lane()`.** Signs the aggregate using the same BabyJubJub key as the ZK path:
+
+```
+payload = SHA-256(
+    table_key || start_time_le || end_time_le ||
+    aggregate_le || row_count_le || now_le
+)
+(sig_r8_x, sig_r8_y, sig_s) = BabyJubJub EdDSA sign(bank_sk, payload)
+attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
+```
+
+`signing_version: 2` (introduced in v0.7.0) identifies this format in the receipts DB, distinguishing it from the earlier v1 format (category-only attestation). The `attestation_hash` is included in the `EvidencePack` and stored in `receipts.db`.
+
+**Trust model — important limitation.** The attestation binds the aggregate to the institution's signing key and the query descriptor, but there is no circuit constraint. A malicious operator with access to `bank_sk` could call `attest_fast_lane()` with an arbitrary aggregate value without ever querying the database. FastLane is appropriate only when (a) the aggregate is non-sensitive and (b) the institution controls the Zemtik process end-to-end. For sensitive tables, use `"sensitivity": "critical"` to force the ZK SlowLane path.
+
+**Concurrency.** FastLane does not hold the global ZK `pipeline_lock`. Multiple FastLane requests can be served concurrently without contention.
+
+**Database backend.** Works against both `DB_BACKEND=sqlite` (in-memory seeded ledger) and `DB_BACKEND=supabase` (PostgREST). The Supabase path uses `query_aggregate_table()`, which speaks the PostgREST HTTP protocol. `DB_BACKEND=supabase` must be set explicitly — having Supabase credentials without this env var keeps the SQLite path active (ISSUE-001 fix, v0.7.0).
 
 ### 5. The Bank Ledger (`src/db.rs`)
 
@@ -531,7 +552,13 @@ Honest prover with valid signed data matching public inputs can produce a witnes
 
 ### FastLane caveat
 
-FastLane provides cryptographic attestation over the aggregate path, not a succinct ZK proof. Policy (`schema_config.json`) decides which queries are acceptable on that path.
+FastLane provides a BabyJubJub EdDSA attestation over the `(aggregate, query_descriptor)` pair — **not** a Zero-Knowledge proof. Key differences from the ZK path:
+
+- **No circuit constraint.** There is no mathematical statement that the prover must satisfy. A malicious operator with the signing key could produce a valid attestation for an arbitrary aggregate without querying the database.
+- **No offline verification.** FastLane responses cannot be independently verified with `bb verify`. An auditor can confirm the `attestation_hash` was produced by the institution's key, but cannot prove the aggregate was derived from real database rows.
+- **Appropriate use.** FastLane is acceptable when the aggregate itself is non-sensitive and the institution trusts its own Zemtik deployment end-to-end (e.g., e-commerce revenue totals, public headcount figures). For sensitive tables, `"sensitivity": "critical"` forces the ZK path.
+
+Policy (`schema_config.json` `"sensitivity"` field) is the only control that determines which path runs. Unknown tables always fall through to ZK SlowLane (fail-secure).
 
 ---
 
