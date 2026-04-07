@@ -650,9 +650,20 @@ async fn handle_zk_slow_lane(
         .unwrap_or(AggFn::Sum);
 
     let zk = if agg_fn == AggFn::Avg {
-        // AVG composite: hold avg_pipeline_lock for BOTH SUM and COUNT runs to guarantee
-        // both proofs operate on the same 500 transactions.
+        // AVG composite: hold avg_pipeline_lock + per-type locks to prevent concurrent
+        // SUM/COUNT direct requests from corrupting circuit/sum/Prover.toml or
+        // circuit/count/Prover.toml while AVG sub-pipelines are writing them.
         let _avg_guard = state.avg_pipeline_lock.lock().await;
+        let _sum_guard = state.pipeline_locks
+            .get(&AggFn::Sum)
+            .expect("pipeline_locks must contain Sum")
+            .lock()
+            .await;
+        let _count_guard = state.pipeline_locks
+            .get(&AggFn::Count)
+            .expect("pipeline_locks must contain Count")
+            .lock()
+            .await;
         run_avg_pipeline(Arc::clone(&state), request_hash.clone(), prompt_hash.clone(), intent.clone(), effective_client_id)
             .await
             .map_err(|e| {

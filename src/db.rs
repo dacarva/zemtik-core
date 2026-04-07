@@ -509,9 +509,14 @@ pub async fn query_aggregate_table(
     let agg_expr = match agg_fn {
         crate::config::AggFn::Sum => format!("{}:sum({})", value_col, value_col),
         crate::config::AggFn::Count => format!("{}:{}.count()", value_col, value_col),
-        // AVG is handled at pipeline level (SUM + COUNT composite).
-        // If called directly (e.g., FastLane AVG), fall back to sum for safety.
-        crate::config::AggFn::Avg => format!("{}:sum({})", value_col, value_col),
+        // AVG on the Supabase FastLane path is not supported — AVG is a ZK composite
+        // (SUM + COUNT via ZK SlowLane). If this arm is reached, schema_config has
+        // agg_fn=AVG on a low-sensitivity table, which is a misconfiguration.
+        crate::config::AggFn::Avg => anyhow::bail!(
+            "query_aggregate_table: agg_fn=AVG is not supported on the FastLane path \
+             (Supabase PostgREST). Use sensitivity=critical so AVG routes to ZK SlowLane, \
+             or use agg_fn=SUM or agg_fn=COUNT for low-sensitivity tables."
+        ),
     };
 
     let mut endpoint = format!(
