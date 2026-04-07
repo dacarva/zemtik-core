@@ -27,7 +27,7 @@
 - **Pros:** First-request latency drops to proof generation only (~17s). Champion-tier DX for demo environments.
 - **Cons:** Increases tarball size (~5-15MB per circuit). CI build time increases by ~2min.
 - **Effort:** S (human) → S (CC+gstack)
-- **Depends on:** feat/universal-zk-engine merged (mini-circuits must exist before they can be compiled)
+- **Depends on:** ~~feat/universal-zk-engine merged~~ ✓ UNBLOCKED (v0.8.0, 2026-04-07) — mini-circuits exist at circuit/sum/ and circuit/count/
 
 ### AVG evidence model explainer page (P3, post-sprint)
 - **What:** A standalone `docs/AVG_EVIDENCE.md` that explains the ZK composite evidence model for AVG: why there are two proof hashes, what the BabyJubJub attestation covers, and how to verify each component. Target audience: compliance officer reviewing audit bundles.
