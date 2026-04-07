@@ -385,10 +385,11 @@ fn resolved_table_uses_override() {
 }
 
 #[test]
-fn validate_rejects_count_with_critical_sensitivity() {
+fn validate_allows_count_with_critical_sensitivity() {
+    // COUNT+critical is valid since Universal ZK Engine sprint — routes to ZK SlowLane circuit
     let mut tables = HashMap::new();
     tables.insert(
-        "bad_table".to_owned(),
+        "headcount_table".to_owned(),
         TableConfig {
             sensitivity: "critical".to_owned(),
             agg_fn: AggFn::Count,
@@ -397,10 +398,7 @@ fn validate_rejects_count_with_critical_sensitivity() {
     );
     let schema = SchemaConfig { fiscal_year_offset_months: 0, tables };
     let result = validate_schema_config(&schema, false);
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("COUNT"), "error should mention COUNT");
-    assert!(msg.contains("critical"), "error should mention critical");
+    assert!(result.is_ok(), "COUNT+critical should be valid: {:?}", result.err());
 }
 
 #[test]

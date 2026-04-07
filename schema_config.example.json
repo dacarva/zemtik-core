@@ -138,6 +138,42 @@
         "How many employees joined us last quarter?",
         "What is our headcount growth this year?"
       ]
+    },
+    "headcount_critical": {
+      "sensitivity": "critical",
+      "description": "ZK-verified headcount over sensitive HR records. Routes to ZK SlowLane to produce a cryptographic proof of the employee count.",
+      "physical_table": "employees",
+      "value_column": "employee_id",
+      "timestamp_column": "hire_date",
+      "category_column": null,
+      "agg_fn": "COUNT",
+      "metric_label": "verified_headcount",
+      "skip_client_id_filter": true,
+      "example_prompts": [
+        "How many employees were hired in Q1 2024?",
+        "What is the verified headcount for this quarter?",
+        "Give me a ZK-proven employee count for last year",
+        "How many staff members joined in H1 2024?",
+        "What is our certified headcount growth this fiscal year?"
+      ]
+    },
+    "avg_deal_size": {
+      "sensitivity": "critical",
+      "description": "ZK-verified average M&A deal size. Uses AVG composite evidence: two independent ZK proofs (SUM + COUNT) plus a BabyJubJub attestation for the division step.",
+      "physical_table": "transactions",
+      "value_column": "amount",
+      "timestamp_column": "timestamp",
+      "category_column": "category_name",
+      "agg_fn": "AVG",
+      "metric_label": "avg_deal_value_usd",
+      "skip_client_id_filter": false,
+      "example_prompts": [
+        "What was the average deal size last quarter?",
+        "Show me average transaction value for Q1 2024",
+        "What is our mean deal value this fiscal year?",
+        "Average M&A transaction size in H1 2024",
+        "What is the typical deal size for our acquisitions this year?"
+      ]
     }
   }
 }

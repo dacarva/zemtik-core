@@ -442,7 +442,7 @@ async fn handle_fast_lane(
     map.insert("category".to_owned(), serde_json::json!(category_name));
     map.insert("aggregate".to_owned(), serde_json::json!(fl.aggregate));
     map.insert("metric_label".to_owned(), serde_json::json!(metric_label));
-    map.insert("row_count".to_owned(), serde_json::json!(fl.row_count));
+    map.insert("actual_row_count".to_owned(), serde_json::json!(fl.row_count));
     map.insert("data_provenance".to_owned(), serde_json::json!("ZEMTIK_FAST_LANE_ATTESTATION"));
     map.insert("raw_data_transmitted".to_owned(), serde_json::json!(false));
     if table_config.category_column.is_none() {
@@ -450,8 +450,8 @@ async fn handle_fast_lane(
             "This metric aggregates the entire table and does not support category-based filtering."
         ));
     } else if fl.row_count == 0 && fl.aggregate == 0 {
-        // Only emit "no rows matched" when BOTH row_count and aggregate are zero.
-        // Supabase path always returns row_count=0 (PostgREST aggregate API limitation);
+        // Only emit "no rows matched" when BOTH actual_row_count and aggregate are zero.
+        // Supabase path always returns actual_row_count=0 (PostgREST aggregate API limitation);
         // checking aggregate==0 avoids a false "no results" note on non-empty Supabase queries.
         map.insert("note".to_owned(), serde_json::json!("No rows matched the query criteria."));
     }
@@ -526,9 +526,12 @@ async fn handle_fast_lane(
 }
 
 /// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
+/// Adds `evidence_version: 2` to enable downstream parsers to distinguish v1 (row_count,
+/// single-proof) from v2 (actual_row_count, AVG dual-proof) response shapes.
 fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<Value, serde_json::Error> {
     let mut v = serde_json::to_value(ev)?;
     if let Some(obj) = v.as_object_mut() {
+        obj.insert("evidence_version".to_string(), serde_json::json!(2));
         obj.insert("engine".to_string(), Value::String(ev.engine_used.clone()));
         obj.insert(
             "intent".to_string(),
@@ -1048,8 +1051,19 @@ async fn run_zk_pipeline(
     let txns = db::query_transactions(&backend, effective_client_id)
         .await
         .context("query transactions")?;
+    if txns.len() > 500 {
+        anyhow::bail!(
+            "Too many matching rows (N={}). ZK SlowLane supports up to 500 transactions per \
+             query. Narrow the time range or set sensitivity to 'low' to use FastLane instead.",
+            txns.len()
+        );
+    }
     if txns.len() != 500 {
-        anyhow::bail!("Expected 500 transactions, got {}", txns.len());
+        anyhow::bail!(
+            "Expected 500 transactions after padding, got {}. This is a bug in the padding \
+             path — please report it.",
+            txns.len()
+        );
     }
     let txns_len = txns.len();
     let batch_count = txns_len / db::BATCH_SIZE;

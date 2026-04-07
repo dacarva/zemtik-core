@@ -380,6 +380,9 @@ pub fn aggregate_table(
     let agg_expr = match agg_fn {
         crate::config::AggFn::Sum => format!("SUM({})", value_col),
         crate::config::AggFn::Count => format!("COUNT({})", value_col),
+        // AVG is handled at the pipeline level (SUM + COUNT composite); it should not
+        // reach this function directly. If it does, fall back to AVG() for FastLane-only use.
+        crate::config::AggFn::Avg => format!("AVG({})", value_col),
     };
 
     // Build SQL and execute based on category and client_id filter presence.
@@ -456,6 +459,9 @@ pub async fn query_aggregate_table(
     let agg_expr = match agg_fn {
         crate::config::AggFn::Sum => format!("{}:sum({})", value_col, value_col),
         crate::config::AggFn::Count => format!("{}:{}.count()", value_col, value_col),
+        // AVG is handled at pipeline level (SUM + COUNT composite).
+        // If called directly (e.g., FastLane AVG), fall back to sum for safety.
+        crate::config::AggFn::Avg => format!("{}:sum({})", value_col, value_col),
     };
 
     let mut endpoint = format!(

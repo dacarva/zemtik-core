@@ -63,6 +63,8 @@ pub fn open_receipts_db(db_path: &std::path::Path) -> anyhow::Result<Connection>
 ///                 and creates intent_rejections table.
 /// Version 1 → 2: adds intent_confidence column.
 /// Version 2 → 3: adds outgoing_prompt_hash column.
+/// Version 3 → 4: adds signing_version column.
+/// Version 4 → 5: adds actual_row_count column (pre-padding real row count for ZK path).
 pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -114,6 +116,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
              COMMIT;",
         )
         .context("apply migration v4")?;
+    }
+
+    if version < 5 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN actual_row_count INTEGER DEFAULT NULL;
+             PRAGMA user_version = 5;
+             COMMIT;",
+        )
+        .context("apply migration v5")?;
     }
 
     Ok(())

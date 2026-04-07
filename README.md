@@ -78,7 +78,7 @@ Before reading further, understand what Zemtik v1 does **not** do:
 |---|---|
 | Connect to arbitrary Postgres directly | Not supported — requires Supabase/PostgREST in front of your DB |
 | ZK-prove queries with > 500 matching rows | Not supported — circuit is fixed at 500 rows (10 batches × 50) |
-| COUNT (FastLane), AVG, multi-table JOINs, GROUP BY | COUNT is supported on FastLane (`"agg_fn": "COUNT"` in `schema_config.json`); AVG, JOINs, and GROUP BY require new ZK circuit variants |
+| AVG, multi-table JOINs, GROUP BY | COUNT supported on FastLane and ZK SlowLane (`"agg_fn": "COUNT"`). AVG supported via ZK composite proof — two sequential proofs (SUM + COUNT) plus BabyJubJub attestation for the division step (`"agg_fn": "AVG"`). JOINs and GROUP BY not supported. |
 | Sub-second ZK proofs | Not supported — local CPU proving takes ~17s (GPU/FPGA required at scale) |
 | Eliminate need to trust the Zemtik process | Not possible — the binary reads the signing key and constructs witnesses |
 

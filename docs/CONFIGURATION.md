@@ -112,6 +112,13 @@ Required for proxy mode. Zemtik loads this file from `~/.zemtik/schema_config.js
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sensitivity` | string | Yes | `"low"` routes to FastLane. `"critical"` routes to ZK SlowLane. Any other value is treated as `"critical"`. |
+| `agg_fn` | string | No | Aggregation function. Default: `"SUM"`. Valid values: `"SUM"`, `"COUNT"`, `"AVG"` (uppercase, case-sensitive). SUM and COUNT route to ZK SlowLane for critical tables; AVG uses a composite ZK proof (SUM + COUNT proofs + BabyJubJub attestation). AVG is not supported on FastLane (low sensitivity) tables. |
+| `value_column` | string | No | Column to aggregate. Default: `"amount"`. For COUNT, use a non-nullable column (primary key recommended). |
+| `timestamp_column` | string | No | Column for time range filtering. Default: `"timestamp"`. |
+| `category_column` | string | No | Column for category filtering within the table. `null` = aggregate entire table. |
+| `metric_label` | string | No | Label for the aggregate field in the LLM payload. Default: `"total_spend_usd"`. |
+| `physical_table` | string | No | Physical DB table name. Default: the schema key. Supabase/PostgREST only — SQLite always uses `transactions`. |
+| `skip_client_id_filter` | boolean | No | When `true`, omits `client_id` filter from queries. Aggregates across all tenants. Use only for single-tenant tables. Default: `false`. |
 | `aliases` | string[] | No | Alternative names the intent engine uses to match this table. Case-insensitive substring matching. |
 | `description` | string | Required for `embed` backend | Human-readable description of the table. Used to build the embedding index at startup. |
 | `example_prompts` | string[] | Required for `embed` backend | Representative queries for this table. Used to build the embedding index at startup. More examples = better matching accuracy. |

@@ -90,7 +90,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "expected migration to reach version 4");
+    assert_eq!(version, 5, "expected migration to reach version 5");
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "migration should be idempotent at version 4");
+    assert_eq!(version, 5, "migration should be idempotent at version 5");
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn test_migration_v2_to_v3() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 4, "v2→v4 migration must bump to version 4");
+    assert_eq!(version_after, 5, "v2→v5 migration must bump to version 5");
 
     // Verify the column exists
     let col_count: i64 = conn

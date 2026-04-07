@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — Universal ZK Engine (feat/universal-zk-engine)
+
+### Added
+- **COUNT and AVG on ZK SlowLane** — `"agg_fn": "COUNT"` now routes to a dedicated ZK circuit for `sensitivity: "critical"` tables. `"agg_fn": "AVG"` runs two sequential ZK proofs (SUM + COUNT) and attests the division with BabyJubJub. Both produce independently verifiable bundles.
+- **Variable row count (padding)** — ZK SlowLane now handles queries matching fewer than 500 rows. Rows are padded with signed sentinel transactions (amount=0, excluded by predicate filter). `actual_row_count` in the response shows the pre-padding count. Queries matching more than 500 rows return HTTP 422 with a remedy message.
+- **`AggFn::Avg`** — New variant in the `AggFn` enum. AVG is valid in `schema_config.json` as `"agg_fn": "AVG"`. Invalid agg_fn values are caught at config parse time (serde error with valid values listed).
+- **`evidence_version: 2`** — All proxy responses now include `evidence_version: 2` in the evidence object. Enables downstream parsers to distinguish v1 (single proof, `row_count`) from v2 (actual_row_count, AVG dual-proof) response shapes.
+- **`actual_row_count` field** — Replaces the ambiguous `row_count` in v2 responses. Shows how many real (pre-padding) transactions were included. Auditors compare this against their expected dataset size.
+- **mini-circuits** (`circuit/sum/`, `circuit/count/`) — Shared commitment logic extracted to `circuit/lib/commitment.nr`. Each aggregation has its own Nargo project. Startup log shows compiled status per circuit.
+- **schema_config.example.json** — Added `headcount_critical` (COUNT+critical) and `avg_deal_size` (AVG+critical) example entries.
+- **Receipts DB v5 migration** — Adds `actual_row_count` column (nullable, backward-compatible).
+
+### Fixed
+- **COUNT+critical no longer rejected at startup** — Previously Zemtik refused to start if a critical table used COUNT. Now it compiles and routes to the ZK COUNT circuit.
+- **>500 row error message** — Now includes the row count and a remedy: "Narrow the time range or set sensitivity to 'low'."
+- **Proxy startup logs circuit availability** — Each mini-circuit is checked and logged on startup. Missing or uncompiled circuits are flagged before the first request.
+
+### Docs
+- `docs/SUPPORTED_QUERIES.md` — Aggregation table and error reference updated for COUNT/AVG.
+- `docs/GETTING_STARTED.md` — Step 6.5: COUNT and AVG copy-paste examples with expected response shapes.
+- `docs/HOW_TO_ADD_TABLE.md` — New `agg_fn` field guidance with AVG evidence model explanation.
+- `docs/CONFIGURATION.md` — TableConfig reference updated with all fields.
+- `docs/INDUSTRY_USE_CASES.md` — COUNT+critical and AVG+critical guidance updated across all verticals.
+
+### Migration notes
+- **`schema_config.json`** — Existing tables without `agg_fn` continue to work (default: `"SUM"`). No changes required.
+- **`receipts.db`** — Migrates automatically on startup (v4 → v5). No action required.
+- **`evidence` response shape** — `row_count` is deprecated in v2. Use `actual_row_count`. Existing parsers reading `row_count` will get `null` on new responses and should migrate.
+
 ## [0.7.0] - 2026-04-06
 
 ### Added

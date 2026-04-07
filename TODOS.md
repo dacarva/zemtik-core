@@ -1,5 +1,34 @@
 # TODOS
 
+## DX debt — added from feat/universal-zk-engine DX review (2026-04-07)
+
+### Structured JSON error responses (P3, v2)
+- **What:** Migrate proxy error strings to a structured `{ "error": { "type": "...", "code": "...", "message": "...", "doc_url": "..." } }` shape (Stripe API pattern). Currently errors are plain strings.
+- **Why:** Platform engineers parsing responses programmatically can't distinguish error types without regex. Affects every integration that handles errors gracefully.
+- **Pros:** Cleaner client integration, debuggable error types, linkable to docs.
+- **Cons:** Breaking change to the error response shape — requires a versioned rollout.
+- **Effort:** S (human) → S (CC+gstack)
+- **Depends on:** evidence_version field already added (v2 responses)
+
+### Pre-built binary with compiled ZK circuits (P2, post-sprint)
+- **What:** Compile `circuit/sum/` and `circuit/count/` mini-circuits in the GitHub Actions release pipeline and include the compiled artifacts in the tarball.
+- **Why:** The first request for a COUNT or AVG query triggers circuit compilation (~30-120s). The proxy logs `[PROXY] Compiling circuit...` but platform engineers watching a demo think the proxy is hung. Pre-compiled artifacts eliminate this entirely.
+- **Pros:** First-request latency drops to proof generation only (~17s). Champion-tier DX for demo environments.
+- **Cons:** Increases tarball size (~5-15MB per circuit). CI build time increases by ~2min.
+- **Effort:** S (human) → S (CC+gstack)
+- **Depends on:** feat/universal-zk-engine merged (mini-circuits must exist before they can be compiled)
+
+### AVG evidence model explainer page (P3, post-sprint)
+- **What:** A standalone `docs/AVG_EVIDENCE.md` that explains the ZK composite evidence model for AVG: why there are two proof hashes, what the BabyJubJub attestation covers, and how to verify each component. Target audience: compliance officer reviewing audit bundles.
+- **Why:** The `avg_evidence_model: "zk_composite+attestation"` field tells engineers there's a mixed model, but compliance officers reading the bundle need plain language. Missing this doc means the compliance officer asks the engineer, who has to invent an explanation on the spot.
+- **Pros:** Compliance officer can self-serve during bundle review. Reduces demo prep time.
+- **Cons:** Needs updating if the AVG pipeline changes (e.g., full ZK AVG circuit in Phase 2).
+- **Effort:** S (human) → S (CC+gstack)
+- **Context:** Link this doc from `request_meta.json` inside AVG proof bundles as `"evidence_model_docs": "https://github.com/zemtik/zemtik-core/blob/main/docs/AVG_EVIDENCE.md"`.
+- **Depends on:** feat/universal-zk-engine merged
+
+---
+
 ## P1 — Gating questions (blocking implementation)
 
 ### SF client demand confirmation (feat/routing-engine, before implementation)
@@ -347,3 +376,31 @@
 - **Effort:** S (human) → S (CC+gstack) — 1 proxy.rs check + 1 test
 - **Priority:** P4 — non-blocking, requires P3
 - **Depends on:** P3 (intent subcategory extraction) merged
+
+---
+
+## P2 — feat/universal-zk-engine (added by /plan-ceo-review 2026-04-07)
+
+### AVG over Supabase operates on two independent dataset snapshots
+
+- **What:** In AVG mode, `run_zk_pipeline` is called twice (SUM + COUNT). Each call invokes `db::init_db()` separately. For SQLite (demo), this is deterministic (seeded data). For Supabase (production), the two calls hit the live DB at different timestamps — if a transaction is inserted between the SUM call and the COUNT call, the SUM and COUNT operate on different datasets. The AVG will be mathematically inconsistent (numerator from N+1 rows, denominator from N rows).
+- **Why:** Found by Codex adversarial review during /plan-ceo-review (2026-04-07). The `avg_pipeline_lock` prevents concurrent ZK requests but does not prevent changes in the external Supabase database.
+- **Pros of fixing:** AVG is cryptographically consistent — both proofs are over the exact same dataset. Required for compliance use cases where auditors may check SUM/COUNT proofs independently.
+- **Cons:** Requires passing a pre-fetched transaction set to both pipeline runs (instead of letting each call `init_db()`). Requires `run_zk_pipeline` to accept pre-fetched data as a parameter.
+- **Context:** The demo uses SQLite (deterministic, seeded). For the first demo, document this as a known limitation in `request_meta.json` as `"avg_snapshot_model": "sequential_independent"`. Fix before shipping Supabase AVG to production.
+- **Effort:** M (human: ~2h / CC: ~20min) — refactor `run_zk_pipeline` to accept pre-fetched TransactionBatch
+- **Priority:** P2 — blocking for production Supabase AVG; non-blocking for SQLite demo
+- **Depends on:** feat/universal-zk-engine merged
+
+---
+
+### AVG queries produce two independent receipts — AVG value not visible in `zemtik list`
+
+- **What:** `handle_avg` inserts two receipts into the receipts DB: one for the SUM bundle (aggregate = raw SUM value) and one for the COUNT bundle (aggregate = row count). `zemtik list` shows these as two independent ZK SlowLane queries. The actual AVG value (SUM / COUNT) is not recorded anywhere in the receipts ledger or the `/verify` page. A compliance officer reviewing the audit trail cannot find the AVG query.
+- **Why:** Found by Claude subagent adversarial review during /plan-eng-review (2026-04-07). The bundle metadata includes `avg_bundle_pair_id` linking the two bundles, but there is no consolidated receipt. The `zemtik list` UX is misleading for AVG.
+- **Pros of fixing:** Full audit trail — compliance officer runs `zemtik list` and sees one AVG entry with the computed value, referencing both the SUM and COUNT proof bundles.
+- **Cons:** Requires a new `engine_used = 'zk_slow_lane_avg'` type, a new receipt insert with `sum_bundle_id` + `count_bundle_id` + `avg_value`, and updates to `zemtik list` display formatting.
+- **Context:** For the first demo, the compliance officer is told to verify both bundles separately and compute the AVG manually. The `avg_bundle_pair_id` in each bundle's `request_meta.json` links them. Document this limitation in the demo script.
+- **Effort:** S (human: ~1h / CC: ~15min) — new engine_used type, one INSERT, list display update
+- **Priority:** P2 — non-blocking for demo; required for production audit trail
+- **Depends on:** feat/universal-zk-engine merged

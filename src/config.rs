@@ -29,13 +29,16 @@ pub struct SchemaConfig {
     pub tables: HashMap<String, TableConfig>,
 }
 
-/// Aggregation function for FastLane queries. Uppercase required in JSON: "SUM" or "COUNT".
+/// Aggregation function. Uppercase required in JSON: "SUM", "COUNT", or "AVG".
+/// For critical tables: SUM and COUNT route to ZK SlowLane (one proof each).
+/// AVG routes to ZK SlowLane as a composite: SUM proof + COUNT proof + BabyJubJub attestation (~40-120s).
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum AggFn {
     #[default]
     Sum,
     Count,
+    Avg,
 }
 
 impl AggFn {
@@ -43,6 +46,17 @@ impl AggFn {
         match self {
             AggFn::Sum => "SUM",
             AggFn::Count => "COUNT",
+            AggFn::Avg => "AVG",
+        }
+    }
+
+    /// Name of the compiled circuit artifact directory for this aggregation.
+    /// AVG has no dedicated circuit — it uses sum/ and count/ sequentially.
+    pub fn circuit_artifact_name(&self) -> Option<&'static str> {
+        match self {
+            AggFn::Sum => Some("sum"),
+            AggFn::Count => Some("count"),
+            AggFn::Avg => None, // composite: uses sum + count
         }
     }
 }
@@ -231,12 +245,12 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
             );
         }
 
-        // COUNT + critical is not supported: the ZK circuit only handles SUM of BN254 field elements.
-        if tc.agg_fn == AggFn::Count && tc.sensitivity == "critical" {
-            anyhow::bail!(
-                "schema_config: table '{}': COUNT aggregation with sensitivity=critical is not \
-                 supported. The ZK circuit only handles SUM. Use sensitivity=low for COUNT tables \
-                 (FastLane-attested only) or use SUM with sensitivity=critical.",
+        // AVG on critical tables: composite ZK proof (SUM + COUNT). Warn about latency.
+        if tc.agg_fn == AggFn::Avg && tc.sensitivity == "critical" {
+            eprintln!(
+                "[INFO] schema_config: table '{}': agg_fn=AVG on a critical table runs two ZK \
+                 pipeline proofs sequentially (~40-120s per request). The response will include \
+                 sum_proof_hash and count_proof_hash with avg_evidence_model='zk_composite+attestation'.",
                 key
             );
         }
