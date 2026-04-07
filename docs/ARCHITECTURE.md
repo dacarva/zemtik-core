@@ -165,14 +165,20 @@ FastLane is the sub-50ms execution path for tables with `"sensitivity": "low"`. 
 
 ```
 payload = SHA-256(
-    table_key || start_time_le || end_time_le ||
-    aggregate_le || row_count_le || now_le
+    category_name ||
+    start_time_le || end_time_le ||
+    aggregate_le || row_count_le || timestamp_now_le ||
+    resolved_table ||
+    value_column || timestamp_column || category_column_or_empty ||
+    agg_fn || metric_label ||
+    effective_client_id_le
 )
-(sig_r8_x, sig_r8_y, sig_s) = BabyJubJub EdDSA sign(bank_sk, payload)
-attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
+payload_bn254 = le_bytes_to_integer(payload) mod BN254_FIELD_ORDER
+(sig_r8_x, sig_r8_y, sig_s) = BabyJubJub EdDSA sign(bank_sk, payload_bn254)
+attestation_hash = SHA-256("{sig_r8_x}:{sig_r8_y}:{sig_s}")
 ```
 
-`signing_version: 2` (introduced in v0.7.0) identifies this format in the receipts DB, distinguishing it from the earlier v1 format (category-only attestation). The `attestation_hash` is included in the `EvidencePack` and stored in `receipts.db`.
+`signing_version: 2` (introduced in v0.7.0) identifies this descriptor-bound format, distinguishing it from the earlier v1 format (category-only attestation). The `attestation_hash` is included in the `EvidencePack`, but FastLane receipts do not persist it to `receipts.db`: the FastLane write path records `proof_hash: None` in `src/proxy.rs`. Only non-FastLane (v2 ZK) receipts persist the attestation/proof hash in `receipts.db`.
 
 **Trust model — important limitation.** The attestation binds the aggregate to the institution's signing key and the query descriptor, but there is no circuit constraint. A malicious operator with access to `bank_sk` could call `attest_fast_lane()` with an arbitrary aggregate value without ever querying the database. FastLane is appropriate only when (a) the aggregate is non-sensitive and (b) the institution controls the Zemtik process end-to-end. For sensitive tables, use `"sensitivity": "critical"` to force the ZK SlowLane path.
 
@@ -344,13 +350,24 @@ Individual rows, `user_name`, and `description` are **never fetched**.
 **4. Attestation** (`src/engine_fast.rs::attest_fast_lane`)
 
 ```
-SHA-256("marketing" || 1727740800_le || 1735689599_le || 41200000_le || 47_le || now_le)
+SHA-256(
+  "marketing" ||
+  1727740800_le || 1735689599_le ||
+  41200000_le || 47_le || now_le ||
+  "transactions" ||
+  "amount" || "timestamp" || "category" ||
+  "SUM" || "total spend" ||
+  123_le
+)
   → 32-byte payload hash
 
-BabyJubJub EdDSA sign(bank_sk, payload_hash)
+le_bytes_to_integer(payload_hash) mod BN254_FIELD_ORDER
+  → signing scalar
+
+BabyJubJub EdDSA sign(bank_sk, signing scalar)
   → (sig_r8_x, sig_r8_y, sig_s)
 
-attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
+attestation_hash = SHA-256("{sig_r8_x}:{sig_r8_y}:{sig_s}")
 ```
 
 **5. OpenAI payload (what actually crosses the perimeter)**

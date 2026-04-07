@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - **README — Trust Model updated.** FastLane and ZK SlowLane now have separate trust model paragraphs; the stronger trust requirement for FastLane (no circuit constraint) is called out explicitly.
 - **README — Industry table legend added.** Footnote below the "Where Zemtik Applies" table explains the "FastLane or ZK" column and maps each option to the `schema_config.json` sensitivity field.
 - **docs/ARCHITECTURE.md — FastLane section expanded.** Component 4 ("FastLane") now includes an attestation mechanics walkthrough, `signing_version: 2` explanation, latency context, and explicit note that no UltraHonk proof is generated. Cryptographic Security Properties section expanded with a dedicated FastLane caveat block.
-- **docs/GETTING_STARTED.md — FastLane explained before first proxy example.** Step 5 now includes a short explanation of what FastLane is, what `attestation_hash` means, and why the response says `engine: "FastLane"` instead of `engine: "ZkSlowLane"`.
+- **docs/GETTING_STARTED.md — FastLane explained before first proxy example.** Step 5 now includes a short description of FastLane, the meaning of `attestation_hash`, and why the response shows `engine: "FastLane"` instead of `engine: "ZkSlowLane"`.
 - **docs/SUPPORTED_QUERIES.md — FAQ entry added.** "What is the difference between FastLane attestation and a ZK proof?" answers the most common point of confusion for evaluators.
 
 ## [0.8.0] - 2026-04-07

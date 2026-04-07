@@ -206,7 +206,7 @@ The response is a standard OpenAI Chat Completions JSON with one addition: a top
 }
 ```
 
-**`attestation_hash` explained:** SHA-256 of the BabyJubJub EdDSA signature over `(table_key, start_time, end_time, aggregate, row_count, timestamp)`. It cryptographically binds this specific aggregate result to your institution's signing key. It is stored in `receipts.db` for audit purposes.
+**`attestation_hash` explained:** SHA-256 of the BabyJubJub EdDSA signature produced by `attest_fast_lane()` over the aggregate result plus the resolved query and metric configuration: category name, time range, aggregate, row count, timestamp, resolved table and column settings, `agg_fn`, `metric_label`, and the effective client scope. It cryptographically binds this specific aggregate result to your institution's signing key. The hash is returned in the response `evidence` object and included in the `EvidencePack`; the FastLane receipt path in `src/proxy.rs` writes `proof_hash: None`, so FastLane does not persist `attestation_hash` in `receipts.db`.
 
 > **FastLane does not generate a ZK proof.** The `attestation_hash` confirms that *someone with your signing key* produced this aggregate, but there is no circuit constraint proving the aggregate was computed from real database rows. See [Architecture](ARCHITECTURE.md#4-fastlane-engine_fastrs) for the full trust model.
 

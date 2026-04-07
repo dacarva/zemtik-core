@@ -284,13 +284,24 @@ FastLane is the sub-50ms path for tables with `"sensitivity": "low"`. It skips t
 **Step 2 — Attestation.** `engine_fast.rs::attest_fast_lane()` hashes the query descriptor and result:
 
 ```
-SHA-256(table_key || start_time || end_time || aggregate || row_count || timestamp_now)
+SHA-256(
+  category_name ||
+  start_time_le || end_time_le ||
+  aggregate_le || row_count_le || timestamp_now_le ||
+  resolved_table ||
+  value_column || timestamp_column || category_column_or_empty ||
+  agg_fn || metric_label ||
+  effective_client_id_le
+)
   → 32-byte payload hash
 
-BabyJubJub EdDSA sign(bank_sk, payload_hash)
+le_bytes_to_integer(payload_hash) mod BN254_FIELD_ORDER
+  → signing scalar
+
+BabyJubJub EdDSA sign(bank_sk, signing scalar)
   → (sig_r8_x, sig_r8_y, sig_s)
 
-attestation_hash = SHA-256(sig_r8_x || sig_r8_y || sig_s)
+attestation_hash = SHA-256("{sig_r8_x}:{sig_r8_y}:{sig_s}")
 ```
 
 The `attestation_hash` acts as a receipt: it cryptographically binds the aggregate to the institution's signing key and the exact query parameters. `signing_version: 2` in the receipt record identifies the full `TableConfig`-aware format (introduced in v0.7.0).
@@ -299,7 +310,7 @@ The `attestation_hash` acts as a receipt: it cryptographically binds the aggrega
 
 The HTTP response to the caller includes an `evidence` object with `engine: "FastLane"`, `attestation_hash`, `actual_row_count`, `data_exfiltrated: 0`, and `evidence_version: 2`.
 
-> **No offline verification.** Unlike ZK SlowLane bundles, FastLane attestations cannot be independently verified with `bb verify`. An auditor can confirm the `attestation_hash` was produced by the institution's key by re-signing the same descriptor with the public key — but cannot prove the aggregate was computed from real database rows.
+> **No offline verification.** Unlike ZK SlowLane bundles, FastLane attestations cannot be independently verified with `bb verify`. An auditor can recompute the descriptor, verify the signature material behind `attestation_hash` with the institution's public key, and confirm the attestation format was followed — but cannot prove the aggregate was computed from real database rows.
 
 ---
 
