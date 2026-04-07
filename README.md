@@ -18,35 +18,85 @@ Zemtik runs as a local proxy on `localhost:4000`. Point your application at it i
 Your Application
       │
       │  POST /v1/chat/completions
-      │  (normal OpenAI request with raw query)
+      │  (natural-language query)
       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  Zemtik Proxy (localhost:4000)               │
-│                                                             │
-│  ┌──────────────┐    sign     ┌───────────────────────┐    │
-│  │  Transaction │ ──────────► │  Zemtik KMS            │    │
-│  │  DB (SQLite  │             │  (file key, see note)  │    │
-│  │  or Supabase)│             │  BabyJubJub EdDSA      │    │
-│  └──────────────┘             └───────────┬───────────┘    │
-│          │ raw rows (private witness)      │ signature       │
-│          └─────────────────┬──────────────┘                 │
-│                            ▼                                 │
-│               Noir ZK Circuit (UltraHonk)                    │
-│               · Verify EdDSA signature over tx hash          │
-│               · SUM(amount) WHERE category AND time range    │
-│                            │                                 │
-│                            │  $2,805,600  ◄── only this      │
-└────────────────────────────┼─────────────────────────────────┘
-                             │  crosses the boundary
-                             ▼
-                    OpenAI API
-                    { spend: 2805600,
-                      provenance: "ZEMTIK_ZK" }
+┌──────────────────────────────────────────────────────────────────────┐
+│                     Zemtik Proxy (localhost:4000)                    │
+│                                                                      │
+│      Intent extraction + routing (schema_config.json sensitivity)    │
+│                               │                                      │
+│         ┌─────────────────────┴──────────────────────────┐           │
+│    sensitivity: "low"                    sensitivity: "critical"      │
+│         ▼                                               ▼            │
+│  ┌─────────────────────┐               ┌────────────────────────┐   │
+│  │      FastLane        │               │      ZK SlowLane        │   │
+│  │                     │               │                        │   │
+│  │  DB aggregate query  │               │  Transaction DB        │   │
+│  │  (SUM or COUNT)      │               │  (raw rows as private  │   │
+│  │        │             │               │  witnesses — never sent)│   │
+│  │        ▼             │               │        │               │   │
+│  │  BabyJubJub EdDSA   │               │        ▼               │   │
+│  │  sign(aggregate +   │               │  BabyJubJub batch sign │   │
+│  │  query descriptor)  │               │  + Noir ZK Circuit     │   │
+│  │  ── NO ZK PROOF ──  │               │  + UltraHonk proof     │   │
+│  │  < 50ms             │               │  (~17s on CPU)         │   │
+│  └──────────┬──────────┘               └────────────┬───────────┘   │
+│             │ attestation_hash                       │ proof_hash    │
+└─────────────┼───────────────────────────────────────┼───────────────┘
+              │                                       │
+              └────────────────┬──────────────────────┘
+                               │  aggregate only — zero raw rows
+                               ▼
+                          OpenAI API
+                          { aggregate, provenance:
+                            "ZEMTIK_FAST_LANE" or "ZEMTIK_ZK" }
 ```
 
-The raw transaction rows are **private witnesses** inside the ZK circuit. The verifier—and OpenAI—sees only the cryptographically proven aggregate.
+In both paths, raw transaction rows **never leave the Zemtik process**. Which path runs is determined by the `sensitivity` field in `schema_config.json`. See [Two Lanes: FastLane vs ZK SlowLane](#two-lanes-fastlane-vs-zk-slowlane) below.
 
 > **KMS note:** `~/.zemtik/keys/bank_sk` is a 32-byte file (mode 0600) that acts as the BabyJubJub signing key. The ZK circuit's soundness guarantee — `assert(eddsa_verify(...))` — holds only if this key is genuinely controlled by the institution. A compromised file means a compromised attestation. Production deployments must replace this with an HSM or KMS (v2 roadmap).
+
+---
+
+## Two Lanes: FastLane vs ZK SlowLane
+
+Zemtik routes each query to one of two execution paths based on the `"sensitivity"` field you configure per table in `schema_config.json`.
+
+### FastLane (`"sensitivity": "low"`)
+
+FastLane is designed for aggregates that are not themselves sensitive — for example, total e-commerce revenue by category, public-facing headcount by department, or any metric where the aggregate number is safe to share.
+
+1. Zemtik queries the database for the aggregate (`SUM` or `COUNT`) directly. **No raw rows are fetched.**
+2. BabyJubJub EdDSA signs the result together with a query descriptor (table, columns, time range, aggregation function).
+3. The `attestation_hash` and aggregate are forwarded to OpenAI.
+
+**Latency:** < 50ms.
+
+> **Warning — FastLane does not generate a Zero-Knowledge proof.** There is no circuit constraint preventing a malicious operator from signing an arbitrary aggregate value. The privacy guarantee is that raw rows never leave the Zemtik process; the correctness guarantee relies on trusting the Zemtik binary and the confidentiality of `~/.zemtik/keys/bank_sk`. Use FastLane only for tables where the aggregate is non-sensitive and an honest-prover model is acceptable.
+
+### ZK SlowLane (`"sensitivity": "critical"`)
+
+ZK SlowLane is required for tables where even an aggregate could reveal sensitive information — payroll totals, patient counts, classified procurement figures, or anything subject to data-residency regulation.
+
+1. Raw rows are fetched as **private witnesses** — they stay inside the Rust process and are never written to disk or sent over the network.
+2. Each batch of 50 rows is signed with BabyJubJub EdDSA over a Poseidon commitment tree.
+3. A Noir ZK circuit verifies every signature and computes the aggregate. The circuit is a mathematical constraint: a dishonest prover cannot produce a valid proof for a wrong aggregate without breaking the signature assumption.
+4. Barretenberg generates an UltraHonk proof. The `proof_hash` is included in the response and can be independently verified offline.
+
+**Latency:** ~17–20s on CPU. See [docs/SCALING.md](docs/SCALING.md) for the GPU/FPGA path.
+
+### Choosing the right lane
+
+| | FastLane | ZK SlowLane |
+|---|---|---|
+| Raw rows sent to OpenAI | Never | Never |
+| Aggregate is sensitive | No — if yes, use ZK | Yes |
+| Cryptographic proof of correct computation | No | Yes — UltraHonk |
+| AVG supported | No | Yes (composite: SUM + COUNT proofs) |
+| Latency | < 50ms | ~17–20s |
+| Config (`schema_config.json`) | `"sensitivity": "low"` | `"sensitivity": "critical"` |
+
+Unknown tables that are not in `schema_config.json` always route to ZK SlowLane (fail-secure).
 
 ---
 
@@ -63,6 +113,8 @@ Zemtik addresses a specific problem: **your data contains rows you cannot send t
 | **Government / Defense** | FAR, FedRAMP | Contractor identities, program funding | ZK — may be classified |
 | **Pharma / Biotech** | SEC Reg S-K (MNPI) | Trial IDs, per-compound pipeline spend | ZK — material non-public |
 | **Fintech / Crypto** | MiCA, FATF Travel Rule | Wallet addresses, transaction counterparties | ZK — Travel Rule compliance |
+
+> **FastLane vs ZK column:** FastLane = BabyJubJub attestation, no ZK proof, < 50ms, set `"sensitivity": "low"` in `schema_config.json`. ZK = Noir + UltraHonk proof, ~17–20s, set `"sensitivity": "critical"`. Both guarantee zero raw rows reach the LLM. See [Two Lanes: FastLane vs ZK SlowLane](#two-lanes-fastlane-vs-zk-slowlane) for the full tradeoff.
 
 In every case the integration is the same: map your table's columns in `schema_config.json`, point Zemtik at a PostgREST endpoint, and send natural-language queries. The proxy returns a cryptographically attested aggregate. Zero raw rows cross the perimeter.
 
@@ -211,13 +263,54 @@ The HTTP response to the caller includes an `evidence` object at the top level (
 
 ### Trust Model
 
-The ZK proof provides a mathematical guarantee that **if** the signing key is legitimate and **if** the circuit's public inputs are correct, then the aggregate is valid. It does **not** eliminate the need to trust:
+**ZK SlowLane:** The ZK proof provides a mathematical guarantee that **if** the signing key is legitimate and **if** the circuit's public inputs are correct, then the aggregate is valid. It does **not** eliminate the need to trust:
 
 1. **The Zemtik binary itself** — it reads the signing key, constructs witnesses from raw rows, and controls what gets signed.
 2. **The key file** (`~/.zemtik/keys/bank_sk`) — anyone who reads this file can produce valid proofs for arbitrary data. Production requires an HSM.
 3. **The database query results** — Zemtik trusts that the DB returns the correct rows; it does not verify DB-level integrity independently.
 
-In plain terms: Zemtik stops data from reaching the LLM, but the institution must still trust Zemtik's own code and key management.
+**FastLane:** The trust requirement is higher than ZK SlowLane. Because there is no circuit constraint, a malicious operator with access to the signing key could attest an arbitrary aggregate without querying the database at all. FastLane is appropriate only when the aggregate is non-sensitive and the institution controls the Zemtik process end-to-end.
+
+In plain terms: Zemtik stops raw data from reaching the LLM, but the institution must still trust Zemtik's own code and key management — and on the FastLane path, there is no ZK proof to fall back on.
+
+---
+
+## How FastLane Works
+
+FastLane is the sub-50ms path for tables with `"sensitivity": "low"`. It skips the ZK circuit entirely and instead produces a BabyJubJub EdDSA attestation over the aggregate.
+
+**Step 1 — Database aggregate.** Zemtik runs a single SQL aggregate query (`SUM` or `COUNT`) against the database. The query is parameterized by the columns declared in `schema_config.json` (`value_column`, `timestamp_column`, `category_column`, `agg_fn`) and the time range extracted from the user's prompt. Individual rows are never fetched.
+
+**Step 2 — Attestation.** `engine_fast.rs::attest_fast_lane()` hashes the query descriptor and result:
+
+```
+SHA-256(
+  category_name ||
+  start_time_le || end_time_le ||
+  aggregate_le || row_count_le || timestamp_now_le ||
+  resolved_table ||
+  value_column || timestamp_column || category_column_or_empty ||
+  agg_fn || metric_label ||
+  effective_client_id_le
+)
+  → 32-byte payload hash
+
+le_bytes_to_integer(payload_hash) mod BN254_FIELD_ORDER
+  → signing scalar
+
+BabyJubJub EdDSA sign(bank_sk, signing scalar)
+  → (sig_r8_x, sig_r8_y, sig_s)
+
+attestation_hash = SHA-256("{sig_r8_x}:{sig_r8_y}:{sig_s}")
+```
+
+The `attestation_hash` acts as a receipt: it cryptographically binds the aggregate to the institution's signing key and the exact query parameters. `signing_version: 2` in the receipt record identifies the full `TableConfig`-aware format (introduced in v0.7.0).
+
+**Step 3 — OpenAI payload.** The aggregate and `attestation_hash` are included in the substituted user message sent to OpenAI. The raw rows, individual transaction amounts, and any PII columns are never present.
+
+The HTTP response to the caller includes an `evidence` object with `engine: "FastLane"`, `attestation_hash`, `actual_row_count`, `data_exfiltrated: 0`, and `evidence_version: 2`.
+
+> **No offline verification.** Unlike ZK SlowLane bundles, FastLane attestations cannot be independently verified with `bb verify`. An auditor can recompute the descriptor, verify the signature material behind `attestation_hash` with the institution's public key, and confirm the attestation format was followed — but cannot prove the aggregate was computed from real database rows.
 
 ---
 

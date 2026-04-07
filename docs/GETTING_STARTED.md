@@ -174,6 +174,8 @@ You will see:
 
 ## Step 5 — Send your first proxy request
 
+> **What you're about to see — FastLane.** The example `schema_config.example.json` sets `aws_spend` to `"sensitivity": "low"`, so this query routes through **FastLane** — the sub-50ms path that runs a direct database aggregate and attests the result with BabyJubJub EdDSA. No ZK proof is generated. The response `evidence` object will show `"engine": "FastLane"` and an `attestation_hash` (a cryptographic receipt binding the aggregate to your signing key and the exact query parameters). To see the ZK SlowLane in action, proceed to Step 6.
+
 In a separate terminal:
 
 ```bash
@@ -186,7 +188,7 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-The response is a standard OpenAI Chat Completions JSON with one addition: a top-level `evidence` field containing the proof metadata:
+The response is a standard OpenAI Chat Completions JSON with one addition: a top-level `evidence` field:
 
 ```json
 {
@@ -195,12 +197,18 @@ The response is a standard OpenAI Chat Completions JSON with one addition: a top
   "evidence": {
     "engine": "FastLane",
     "attestation_hash": "a3f9...",
+    "actual_row_count": 47,
     "data_exfiltrated": 0,
     "zemtik_confidence": 0.91,
-    "receipt_id": "rec_..."
+    "receipt_id": "rec_...",
+    "evidence_version": 2
   }
 }
 ```
+
+**`attestation_hash` explained:** SHA-256 of the BabyJubJub EdDSA signature produced by `attest_fast_lane()` over the aggregate result plus the resolved query and metric configuration: category name, time range, aggregate, row count, timestamp, resolved table and column settings, `agg_fn`, `metric_label`, and the effective client scope. It cryptographically binds this specific aggregate result to your institution's signing key. The hash is returned in the response `evidence` object and included in the `EvidencePack`; the FastLane receipt path in `src/proxy.rs` writes `proof_hash: None`, so FastLane does not persist `attestation_hash` in `receipts.db`.
+
+> **FastLane does not generate a ZK proof.** The `attestation_hash` confirms that *someone with your signing key* produced this aggregate, but there is no circuit constraint proving the aggregate was computed from real database rows. See [Architecture](ARCHITECTURE.md#4-fastlane-engine_fastrs) for the full trust model.
 
 The proxy logs in the server terminal show the routing decision:
 

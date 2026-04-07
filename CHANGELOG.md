@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2026-04-07
+
+### Docs
+- **README — FastLane documented as a first-class concept.** Added "Two Lanes: FastLane vs ZK SlowLane" section explaining when each path runs, the performance difference (< 50ms vs ~17–20s), and the security tradeoff (attestation-only vs UltraHonk proof). Added explicit warning that FastLane does not generate a ZK proof and is an honest-prover model only.
+- **README — "How It Works" diagram forked.** Diagram now shows both execution paths (FastLane and ZK SlowLane) branching at the routing decision, making the two-lane architecture visible at a glance.
+- **README — "How FastLane Works" section added.** Parallel to the existing "How the ZK Proof Works" section. Covers the DB aggregate query, `attest_fast_lane()` signature construction (`signing_version: 2`), `attestation_hash` semantics, and the offline verification limitation.
+- **README — Trust Model updated.** FastLane and ZK SlowLane now have separate trust model paragraphs; the stronger trust requirement for FastLane (no circuit constraint) is called out explicitly.
+- **README — Industry table legend added.** Footnote below the "Where Zemtik Applies" table explains the "FastLane or ZK" column and maps each option to the `schema_config.json` sensitivity field.
+- **docs/ARCHITECTURE.md — FastLane section expanded.** Component 4 ("FastLane") now includes an attestation mechanics walkthrough, `signing_version: 2` explanation, latency context, and explicit note that no UltraHonk proof is generated. Cryptographic Security Properties section expanded with a dedicated FastLane caveat block.
+- **docs/GETTING_STARTED.md — FastLane explained before first proxy example.** Step 5 now includes a short description of FastLane, the meaning of `attestation_hash`, and why the response shows `engine: "FastLane"` instead of `engine: "ZkSlowLane"`.
+- **docs/SUPPORTED_QUERIES.md — FAQ entry added.** "What is the difference between FastLane attestation and a ZK proof?" answers the most common point of confusion for evaluators.
+
 ## [0.8.0] - 2026-04-07
 
 ### Added

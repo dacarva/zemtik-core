@@ -161,3 +161,18 @@ The intent confidence score is below the threshold (`ZEMTIK_INTENT_THRESHOLD`, d
 **How do I see what route a query took?**
 
 Check the `evidence.engine` field in the response JSON, or run `cargo run -- list` to view recent receipts with their routing decisions.
+
+**What is the difference between FastLane attestation and a ZK proof?**
+
+Both paths guarantee that **zero raw rows are sent to OpenAI**. The difference is in the strength of the correctness guarantee:
+
+| | FastLane (`attestation_hash`) | ZK SlowLane (`proof_hash`) |
+|---|---|---|
+| What is produced | BabyJubJub EdDSA signature over `(aggregate, query_descriptor)` | UltraHonk ZK proof over the Noir circuit |
+| Circuit constraint | None — the prover is not bound by a circuit | Yes — `assert(eddsa_verify(...))` + aggregate computation; a wrong aggregate has no valid witness |
+| Malicious operator | Could sign an arbitrary value with the key | Cannot produce a valid proof for a wrong aggregate without breaking the signature assumption |
+| Offline verification | Not possible with `bb verify` | `cargo run -- verify <bundle.zip>` replays `bb verify` |
+| Latency | < 50ms | ~17–20s on CPU |
+| Use case | Non-sensitive aggregates (e.g., public revenue totals) | Sensitive aggregates where correctness must be cryptographically proven |
+
+In short: FastLane is fast and private; ZK SlowLane is fast, private, *and* verifiably correct. The right choice depends on whether the aggregate itself is sensitive and whether you need a proof that survives external audit.
