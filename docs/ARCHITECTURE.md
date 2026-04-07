@@ -198,9 +198,9 @@ Mini-circuit layout (v0.8.0). Three Noir packages:
 
 **Each mini-circuit** (Noir 1.0.0-beta.19) processes **`BATCH_COUNT` = 10** batches of **`TX_COUNT` = 50** transactions (500 rows total, padded with sentinel transactions when the actual result set is smaller). Each batch has its own Poseidon commitment and EdDSA signature (`BatchInput`).
 
-**Public inputs (both circuits):** `target_category`, `start_time`, `end_time`, `bank_pub_key_x`, `bank_pub_key_y`, `actual_row_count`.  
+**Public inputs (both circuits):** `target_category_hash`, `start_time`, `end_time`, `bank_pub_key_x`, `bank_pub_key_y`.  
 **Private inputs:** `batches: [BatchInput; 10]` (rows + `sig_s`, `sig_r8_x`, `sig_r8_y` per batch).  
-**Return value (public):** single `Field` — the per-batch aggregate (sum or count).
+**Return value (public):** single `Field` — the aggregate across all 10 batches (total sum or total count).
 
 Per batch: reconstruct 4-level Poseidon tree → `eddsa_verify::<PoseidonHasher>` → branchless masked accumulation over the 50 rows.
 

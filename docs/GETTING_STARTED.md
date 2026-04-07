@@ -244,20 +244,22 @@ The server terminal shows the ZK pipeline stages. Expect ~17–20s for proof gen
 
 The ZK SlowLane now supports COUNT and AVG aggregations, not just SUM. Add these entries to your `~/.zemtik/schema_config.json` under `"tables"`:
 
+> **Note on `timestamp_column`:** The engine compares timestamps as UNIX epoch seconds (`u64`). Ensure the column in your database stores epoch seconds, not human-readable date strings. If your table uses a date column, add a computed column or view that converts it (e.g. `EXTRACT(EPOCH FROM hire_date)::bigint`).
+
 ```json
-"headcount_critical": {
-  "sensitivity": "critical",
-  "description": "ZK-verified headcount over sensitive HR records.",
+"headcount_low": {
+  "sensitivity": "low",
+  "description": "FastLane headcount from HR records. Uses physical_table to query 'employees' on Supabase (Supabase only — SQLite always queries 'transactions').",
   "physical_table": "employees",
   "value_column": "employee_id",
-  "timestamp_column": "hire_date",
+  "timestamp_column": "hire_date_epoch",
   "category_column": null,
   "agg_fn": "COUNT",
-  "metric_label": "verified_headcount",
+  "metric_label": "headcount",
   "skip_client_id_filter": true,
   "example_prompts": [
     "How many employees were hired in Q1 2024?",
-    "What is the verified headcount for this quarter?"
+    "What is the headcount for this quarter?"
   ]
 },
 "avg_deal_size": {

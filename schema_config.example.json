@@ -139,22 +139,21 @@
         "What is our headcount growth this year?"
       ]
     },
-    "headcount_critical": {
-      "sensitivity": "critical",
-      "description": "ZK-verified headcount over sensitive HR records. Routes to ZK SlowLane to produce a cryptographic proof of the employee count.",
+    "headcount_low": {
+      "sensitivity": "low",
+      "description": "FastLane headcount from HR records. Uses physical_table to query 'employees' directly on Supabase (Supabase only — ZK SlowLane always queries the 'transactions' table and does not support physical_table routing). timestamp_column must store UNIX epoch seconds.",
       "physical_table": "employees",
       "value_column": "employee_id",
-      "timestamp_column": "hire_date",
+      "timestamp_column": "hire_date_epoch",
       "category_column": null,
       "agg_fn": "COUNT",
-      "metric_label": "verified_headcount",
+      "metric_label": "headcount",
       "skip_client_id_filter": true,
       "example_prompts": [
         "How many employees were hired in Q1 2024?",
-        "What is the verified headcount for this quarter?",
-        "Give me a ZK-proven employee count for last year",
+        "What is the headcount for this quarter?",
         "How many staff members joined in H1 2024?",
-        "What is our certified headcount growth this fiscal year?"
+        "What is our headcount growth this fiscal year?"
       ]
     },
     "avg_deal_size": {

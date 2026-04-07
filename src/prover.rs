@@ -112,6 +112,15 @@ pub fn validate_circuit_dir(circuit_dir: &Path) -> anyhow::Result<()> {
         lib_nargo.display(),
         circuit_dir.display()
     );
+    let lib_src = circuit_dir.join("lib/src/lib.nr");
+    anyhow::ensure!(
+        lib_src.exists(),
+        "Shared library source '{}' is missing.\n\
+         Run install.sh from the repo root, or copy manually:\n\
+         cp -r circuit/. {}",
+        lib_src.display(),
+        circuit_dir.display()
+    );
 
     // Validate ABI of any pre-compiled artifacts.
     for sub in &["sum", "count"] {

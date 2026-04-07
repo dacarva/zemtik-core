@@ -196,7 +196,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     COALESCE(data_exfiltrated, 0),
                     intent_confidence,
                     outgoing_prompt_hash,
-                    signing_version
+                    signing_version,
+                    actual_row_count
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -204,6 +205,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
     let rows = stmt
         .query_map([], |row| {
             let sv: Option<i64> = row.get(13)?;
+            let arc: Option<i64> = row.get(14)?;
             Ok(Receipt {
                 id: row.get(0)?,
                 bundle_path: row.get(1)?,
@@ -219,7 +221,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
-                actual_row_count: None,
+                actual_row_count: arc.map(|v| v as usize),
             })
         })
         .context("query receipts")?;
@@ -239,7 +241,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     COALESCE(data_exfiltrated, 0),
                     intent_confidence,
                     outgoing_prompt_hash,
-                    signing_version
+                    signing_version,
+                    actual_row_count
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -247,6 +250,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
     let mut rows = stmt
         .query_map(rusqlite::params![id], |row| {
             let sv: Option<i64> = row.get(13)?;
+            let arc: Option<i64> = row.get(14)?;
             Ok(Receipt {
                 id: row.get(0)?,
                 bundle_path: row.get(1)?,
@@ -262,7 +266,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 intent_confidence: row.get(11)?,
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
-                actual_row_count: None,
+                actual_row_count: arc.map(|v| v as usize),
             })
         })
         .context("query receipt")?;

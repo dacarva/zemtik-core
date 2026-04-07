@@ -133,7 +133,7 @@ The routing decision and confidence score are included in every response's `evid
 | Table key is empty, non-ASCII, or >93 bytes | 500 | `"cannot hash table key '...' (key must be ≤93 bytes after lowercasing)"` |
 | `bb verify` fails | 500 | `"proof verification failed"` |
 | More than 500 matching rows (ZK path) | 422 | `"Too many matching rows (N=...). ZK SlowLane supports up to 500 transactions per query. Narrow the time range or set sensitivity to 'low' to use FastLane instead."` |
-| COUNT table with nullable `value_column` at startup | Exit 1 | `"[CONFIG] table '...': agg_fn COUNT with sensitivity critical requires a non-nullable value_column. Use a primary key column (e.g. 'id') or confirm the column is NOT NULL."` |
+| COUNT table with nullable `value_column` (ZK path) | Runtime 422 | Circuit counts all padded rows that match time/category filters regardless of null semantics — use a primary key or NOT NULL column for `value_column` to avoid incorrect counts |
 | AVG query with no matching rows (COUNT=0) | 422 | `"AVG: no matching transactions in the queried time period. The COUNT step returned 0. Check that the time range and table key match existing data."` |
 | Unrecognized `agg_fn` value in schema_config.json | Exit 1 | serde parse error — valid values are `"SUM"`, `"COUNT"`, `"AVG"` (case-sensitive, uppercase) |
 | Circuit compilation timeout on first ZK request | 504 | `"ZK circuit compilation timed out. This is expected on first use (~30-120s). Retry the request."` |

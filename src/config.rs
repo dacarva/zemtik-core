@@ -183,7 +183,7 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
         }
-        if key == "__zemtik_dummy__" {
+        if key.trim().to_ascii_lowercase() == "__zemtik_dummy__" {
             anyhow::bail!(
                 "schema_config: table key '{}' is reserved as a padding sentinel — choose a different key",
                 key
@@ -248,6 +248,16 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
                 "schema_config: table '{}': invalid metric_label '{}' \
                  (must match [a-zA-Z0-9_], max 63 chars)",
                 key, tc.metric_label
+            );
+        }
+
+        // AVG on low-sensitivity tables: not supported (FastLane has no composite path).
+        if tc.agg_fn == AggFn::Avg && tc.sensitivity == "low" {
+            anyhow::bail!(
+                "schema_config: table '{}': agg_fn=AVG is not supported for low-sensitivity tables. \
+                 AVG requires the ZK SlowLane composite pipeline. Set sensitivity to 'critical' or \
+                 use agg_fn=SUM or agg_fn=COUNT instead.",
+                key
             );
         }
 
