@@ -52,7 +52,6 @@ embed = ["dep:fastembed"]
 regex-only = []
 eval = []
 benchmarks = []
-integration = []
 
 [[bin]]
 name = "intent-eval"
