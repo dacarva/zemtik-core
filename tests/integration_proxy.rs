@@ -93,6 +93,8 @@ async fn spawn_test_proxy() -> (SocketAddr, MockServer) {
     config.openai_api_key = Some("test-key".to_owned());
     config.client_id = 123;
     config.cors_origins = vec!["*".to_owned()];
+    // Use in-memory receipts DB so parallel test instances don't contend on ~/.zemtik/receipts.db
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
     // Inline schema — no file dependency
     config.schema_config = Some(test_schema());
     config.schema_config_hash = Some("test-schema-hash".to_owned());
