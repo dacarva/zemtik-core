@@ -1,0 +1,38 @@
+{
+  "_demo_notice": "DEMO DATA — override by mounting your own schema_config.json at /home/zemtik/.zemtik/schema_config.json",
+  "fiscal_year_offset_months": 0,
+  "tables": {
+    "client_portfolios": {
+      "sensitivity": "low",
+      "description": "Total asset value across client portfolios, aggregated by sector or asset class.",
+      "example_prompts": [
+        "What is the total portfolio value in Q1 2024?",
+        "Total assets under management by sector",
+        "AUM breakdown Q1 2024",
+        "Portfolio value for tech sector this quarter"
+      ],
+      "physical_table": "transactions",
+      "value_column": "amount",
+      "timestamp_column": "timestamp",
+      "category_column": "category_name",
+      "agg_fn": "SUM",
+      "metric_label": "total_aum_usd"
+    },
+    "portfolio_risk": {
+      "sensitivity": "critical",
+      "description": "Risk exposure metrics and concentration counts across client portfolios.",
+      "example_prompts": [
+        "How many clients have exposure to fixed income?",
+        "Client concentration in healthcare sector Q1 2024",
+        "Portfolio risk concentration this quarter",
+        "How many positions in energy sector?"
+      ],
+      "physical_table": "transactions",
+      "value_column": "amount",
+      "timestamp_column": "timestamp",
+      "category_column": "category_name",
+      "agg_fn": "COUNT",
+      "metric_label": "position_count"
+    }
+  }
+}

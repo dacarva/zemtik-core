@@ -1,11 +1,15 @@
 # Rust build
 /target
-circuit/target
 
-# Noir generated
+# Noir generated (flat layout + v0.8 sub-circuit layout)
+circuit/target/
+circuit/*/target/
 circuit/Prover.toml
+circuit/*/Prover.toml
 circuit/Verifier.toml
+circuit/*/Verifier.toml
 circuit/proofs/
+circuit/*/proofs/
 proofs/
 
 # Environment secrets

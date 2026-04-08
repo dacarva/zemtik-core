@@ -10,8 +10,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Use the same poseidon-rs version as babyjubjub-rs to share the Fr type
 poseidon-rs = "0.0.8"
 ff_ce = "0.11"
-# Use aarch64 feature on Apple Silicon to avoid ppv-lite86 blake-hash panic
-babyjubjub-rs = { version = "0.0.11", features = ["aarch64"], default-features = false }
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
@@ -40,12 +38,21 @@ clap = { version = "4", features = ["derive"] }
 urlencoding = "2"
 fastembed = { version = "5", optional = true }
 
+# aarch64-specific: babyjubjub-rs needs the "aarch64" feature on Apple Silicon
+# to avoid a ppv-lite86 blake-hash panic. x86_64 builds must NOT include it.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+babyjubjub-rs = { version = "0.0.11", features = ["aarch64"], default-features = false }
+
+[target.'cfg(not(target_arch = "aarch64"))'.dependencies]
+babyjubjub-rs = { version = "0.0.11", default-features = false }
+
 [features]
 default = ["embed"]
 embed = ["dep:fastembed"]
 regex-only = []
 eval = []
 benchmarks = []
+integration = []
 
 [[bin]]
 name = "intent-eval"
@@ -55,3 +62,4 @@ required-features = ["eval"]
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
+reqwest = { version = "0.12", features = ["json"] }

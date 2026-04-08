@@ -6,6 +6,36 @@ Every time a company queries an LLM with internal data, it creates a **shadow co
 
 Zemtik solves this at the infrastructure layer: **compute the answer locally inside a Zero-Knowledge circuit, prove the computation was honest, and send only the proven number to the model.** Zero raw rows ever leave the perimeter.
 
+---
+
+## Quick Start (Docker)
+
+The fastest way to run Zemtik. No Rust toolchain or ZK tools required.
+
+```bash
+# 1. Set your OpenAI API key
+export OPENAI_API_KEY=sk-...
+
+# 2. Start the proxy (binds to localhost:4000)
+docker compose up --build
+
+# 3. Verify it's running
+curl http://localhost:4000/health
+
+# 4. Send a query — the magic moment: data_exfiltrated is always 0
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "Q1 2024 client_portfolios total"}]
+  }'
+```
+
+The response includes an `evidence` block with `data_exfiltrated: 0` and `attestation_hash` — a cryptographic receipt you can show to auditors. See [docs/COMPLIANCE_RECEIPT.md](docs/COMPLIANCE_RECEIPT.md) for field descriptions.
+
+To use your own data: mount a custom `schema_config.json` — see the commented volume in `docker-compose.yml`.
+
 > **POC status (v0.8.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---

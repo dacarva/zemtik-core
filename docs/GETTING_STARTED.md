@@ -6,17 +6,46 @@
 
 ---
 
-By the end of this tutorial you will have:
+## Option A — Docker Quick Start (recommended)
+
+No Rust toolchain, no nargo, no bb required. Runs in under 2 minutes.
+
+```bash
+# 1. Set your OpenAI API key
+export OPENAI_API_KEY=sk-...
+
+# 2. Start the proxy
+docker compose up --build
+
+# 3. Verify
+curl http://localhost:4000/health
+
+# 4. Query (change the endpoint from api.openai.com to localhost:4000)
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Q1 2024 client_portfolios total"}]}'
+```
+
+The response includes `evidence.data_exfiltrated: 0` — a cryptographic receipt showing no raw records were sent to OpenAI. See [COMPLIANCE_RECEIPT.md](COMPLIANCE_RECEIPT.md) for field descriptions.
+
+**Using your own data:** mount your `schema_config.json` — see the commented volume in `docker-compose.yml`. The demo dataset uses the `transactions` table with `client_id=123`.
+
+---
+
+## Option B — Build from Source
+
+By the end of this section you will have:
 
 1. Built Zemtik Core from source
 2. Run the CLI demo — 500 transactions processed through a ZK circuit, result sent to OpenAI
 3. Started the proxy and made your first OpenAI-compatible request with zero raw data exfiltration
 
-> **What you will not do in this tutorial:** configure your own database tables or connect to Supabase. Those are covered in the how-to guides after you have the basics working.
+> **What you will not do:** configure your own database tables or connect to Supabase. Those are covered in the how-to guides after you have the basics working.
 
 ---
 
-## Prerequisites
+## Prerequisites (for Build from Source)
 
 You need three tools on your `PATH` before starting. Install them in this order.
 
@@ -79,7 +108,7 @@ Open `.env` and set your OpenAI API key:
 OPENAI_API_KEY=sk-...your-key-here...
 ```
 
-> **Demo model:** The CLI pipeline uses `gpt-5.4-nano` as the model name. This is a placeholder used in the POC. For the OpenAI API call to succeed, update `MODEL` in `src/openai.rs` (or set the model in your proxy request) to a real model name such as `gpt-4o-mini`.
+> **Model:** The CLI pipeline uses `gpt-5.4-nano` (current OpenAI model). To use a different model, set `ZEMTIK_OPENAI_MODEL` before running: `ZEMTIK_OPENAI_MODEL=gpt-4o-mini cargo run`.
 
 All other `.env` values have safe defaults for local development.
 

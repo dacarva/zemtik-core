@@ -1,0 +1,14 @@
+target/
+.git/
+.github/
+docs/
+debug/
+tests/
+eval/
+*.md
+.env
+.env.*
+audit/
+runs/
+receipts/
+supabase/

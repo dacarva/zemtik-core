@@ -1,4 +1,5 @@
 use zemtik::{audit, bundle, config, db, keys, openai, prover, proxy, receipts, types, verify};
+use zemtik::config::AggFn;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -133,18 +134,21 @@ async fn main() -> anyhow::Result<()> {
     // Step 4: Generate the Prover.toml input file for the Noir circuit
     // -----------------------------------------------------------------------
     let toml_start = Instant::now();
+    // The CLI pipeline hardcodes a SUM query (aws_spend). Use the sum/ sub-circuit.
+    let pipeline_circuit_dir = prover::circuit_dir_for(&AggFn::Sum, &app_config.circuit_dir);
+
     print!("[NOIR] Writing Prover.toml ({} batches)... ", batch_count);
-    prover::generate_batched_prover_toml(&batches, &params, &app_config.circuit_dir)?;
+    prover::generate_batched_prover_toml(&batches, &params, &pipeline_circuit_dir)?;
     let toml_secs = toml_start.elapsed().as_secs_f32();
     println!("OK ({:.2}s)", toml_secs);
 
     // -----------------------------------------------------------------------
     // Step 5: Compile the Noir circuit (cached after first run)
     // -----------------------------------------------------------------------
-    let circuit_json = app_config.circuit_dir.join("target/zemtik_circuit.json");
+    let circuit_json = pipeline_circuit_dir.join("target/zemtik_circuit.json");
     if !circuit_json.exists() {
         print!("[NOIR] Compiling circuit (first run only)... ");
-        prover::compile_circuit(&app_config.circuit_dir)?;
+        prover::compile_circuit(&pipeline_circuit_dir)?;
     } else {
         println!("[NOIR] Circuit already compiled, skipping nargo compile");
     }
@@ -157,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         batch_count
     );
     let circuit_exec_start = Instant::now();
-    let hex_output = prover::execute_circuit(&app_config.circuit_dir)?;
+    let hex_output = prover::execute_circuit(&pipeline_circuit_dir)?;
     let circuit_execution_secs = circuit_exec_start.elapsed().as_secs_f32();
     let aggregate = prover::hex_output_to_u64(&hex_output)?;
     println!("[NOIR] Verified aggregate {} spend = ${}", params.category_name, aggregate);
@@ -166,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
     // Step 7: Prepare per-run work directory and generate UltraHonk ZK proof
     // -----------------------------------------------------------------------
     println!("[NOIR] Generating UltraHonk proof (bb v4, CRS auto-download)...");
-    let run_dir = prover::prepare_run_dir(&app_config.runs_dir, &app_config.circuit_dir)?;
+    let run_dir = prover::prepare_run_dir(&app_config.runs_dir, &pipeline_circuit_dir)?;
     struct RunDirGuard(std::path::PathBuf);
     impl Drop for RunDirGuard { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
     let _run_dir_guard = RunDirGuard(run_dir.clone());
