@@ -26,6 +26,8 @@ Key routing rules:
 
 Write tests in the `tests/` directory, not inline in `src/`. Inline `#[cfg(test)]` modules are only acceptable when tests must access private functions or types that cannot be exposed. In all other cases, add tests to the appropriate `tests/test_<module>.rs` file (or create one if it doesn't exist). New test files follow the naming convention `test_<module>.rs` and import via `use zemtik::<module>::<item>`.
 
+Integration tests live in `tests/integration_proxy.rs`. They spin up the full Axum proxy (`build_proxy_router()`) with a mock OpenAI server, set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` to bypass circuit tools, and cover FastLane and ZK SlowLane routing, CORS, error paths, and the `/health` endpoint. Run them with `cargo test --test integration_proxy`.
+
 ## Commands
 
 ```bash
@@ -138,7 +140,10 @@ Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end
 
 ### Release / CI
 
-GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin intent-eval --features eval`) before cross-compiling for `x86_64-linux`, `aarch64-darwin` on version tags (`v*`). Archives include binary + `install.sh` + `config.example.yaml`. (`aarch64-linux` and `x86_64-darwin` removed in v0.6.0 due to `ort-sys` ABI mismatch.)
+Two GitHub Actions workflows:
+
+- **`ci.yml`** — runs on every push/PR: `cargo test` (unit + integration), `cargo clippy`, and a Docker build smoke-test. Integration tests require `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` (no nargo/bb in CI).
+- **`release.yml`** — runs on version tags (`v*`): intent eval gate (`cargo run --bin intent-eval --features eval`), cross-compile for `x86_64-linux` + `aarch64-darwin`, Docker multi-platform publish to GHCR. Archives include binary + `install.sh` + `config.example.yaml`. (`aarch64-linux` and `x86_64-darwin` removed in v0.6.0 due to `ort-sys` ABI mismatch.)
 
 ## Key constraints and known gaps
 

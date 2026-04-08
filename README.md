@@ -350,7 +350,7 @@ The HTTP response to the caller includes an `evidence` object with `engine: "Fas
 zemtik-core/
 ├── src/
 │   ├── main.rs           # Pipeline orchestrator + CLI subcommand routing
-│   ├── proxy.rs          # Axum proxy server (localhost:4000); FastLane + ZK dispatch
+│   ├── proxy.rs          # Axum proxy server (localhost:4000); FastLane + ZK dispatch; build_proxy_router()
 │   ├── intent.rs         # IntentBackend trait dispatch (EmbeddingBackend or RegexBackend)
 │   ├── intent_embed.rs   # EmbeddingBackend: fastembed BGE-small-en ONNX, cosine similarity
 │   ├── time_parser.rs    # DeterministicTimeParser: Q/H/FY/month/relative/YTD → Unix range
@@ -366,6 +366,9 @@ zemtik-core/
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
 │   └── types.rs          # Shared types
+├── tests/
+│   ├── integration_proxy.rs  # Integration tests: full proxy with mock OpenAI (7 tests)
+│   └── test_*.rs             # Unit tests per module
 ├── circuit/
 │   ├── sum/           # SUM mini-circuit (Nargo.toml + src/main.nr)
 │   ├── count/         # COUNT mini-circuit (Nargo.toml + src/main.nr)
@@ -377,13 +380,16 @@ zemtik-core/
 │   ├── intent_eval.rs   # Intent eval harness (235 labeled prompts, CI gate)
 │   └── labeled_prompts.json
 ├── docs/
-│   ├── ARCHITECTURE.md     # Full component breakdown and data flow
-│   ├── CONFIGURATION.md    # All config fields, env vars, schema_config.json format
-│   ├── GETTING_STARTED.md  # End-to-end setup guide
-│   ├── HOW_TO_ADD_TABLE.md # Add a new table to the schema (step-by-step)
-│   ├── INTENT_ENGINE.md    # How EmbeddingBackend + DeterministicTimeParser work
-│   ├── SCALING.md          # Recursive proofs, production path, why remote proving breaks ZK
-│   └── SUPPORTED_QUERIES.md # v1 query contract: supported patterns, error reference
+│   ├── ARCHITECTURE.md       # Full component breakdown and data flow
+│   ├── COMPLIANCE_RECEIPT.md # Evidence response field descriptions for auditors
+│   ├── CONFIGURATION.md      # All config fields, env vars, schema_config.json format
+│   ├── GETTING_STARTED.md    # End-to-end setup guide
+│   ├── HOW_TO_ADD_TABLE.md   # Add a new table to the schema (step-by-step)
+│   ├── INTENT_ENGINE.md      # How EmbeddingBackend + DeterministicTimeParser work
+│   ├── SCALING.md            # Recursive proofs, production path, why remote proving breaks ZK
+│   └── SUPPORTED_QUERIES.md  # v1 query contract: supported patterns, error reference
+├── Dockerfile            # Multi-stage build; non-root user; FastLane only (no nargo/bb)
+├── docker-compose.yml    # Compose file for local Docker runs
 └── .env.example
 ```
 
@@ -465,7 +471,8 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [Intent Engine](docs/INTENT_ENGINE.md) — How embedding-based routing and the time parser work
 - [Supported Queries](docs/SUPPORTED_QUERIES.md) — v1 query contract: time expressions, table matching, error reference
 - [Configuration](docs/CONFIGURATION.md) — All config fields, env vars, schema_config.json format
-- [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide
+- [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide (Docker + build-from-source)
+- [Compliance Receipt](docs/COMPLIANCE_RECEIPT.md) — Evidence response fields: what each field means, how to verify
 - [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
 
