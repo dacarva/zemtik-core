@@ -183,7 +183,7 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
         }
-        if key.trim().to_ascii_lowercase() == "__zemtik_dummy__" {
+        if key.trim().eq_ignore_ascii_case("__zemtik_dummy__") {
             anyhow::bail!(
                 "schema_config: table key '{}' is reserved as a padding sentinel — choose a different key",
                 key

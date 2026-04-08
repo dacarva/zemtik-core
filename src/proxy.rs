@@ -353,6 +353,7 @@ async fn handle_chat_completions(
 }
 
 /// Handle a FastLane request: DB sum → attestation → synthetic evidence response.
+#[allow(clippy::too_many_arguments)]
 async fn handle_fast_lane(
     state: Arc<ProxyState>,
     mut body: Value,
@@ -642,6 +643,7 @@ async fn build_fast_lane_response(
 }
 
 /// Handle a ZK SlowLane request (existing full ZK pipeline).
+#[allow(clippy::too_many_arguments)]
 async fn handle_zk_slow_lane(
     state: Arc<ProxyState>,
     mut body: Value,

@@ -44,14 +44,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Build the config::CliArgs from clap output
-    let mut config_cli = config::CliArgs::default();
-    config_cli.port = cli.port;
-    config_cli.circuit_dir = cli.circuit_dir;
-    config_cli.command = match &cli.command {
-        Some(Commands::Proxy) => Command::Proxy,
-        Some(Commands::Verify { path }) => Command::Verify(path.clone()),
-        Some(Commands::List) => Command::List,
-        None => Command::Pipeline,
+    let config_cli = config::CliArgs {
+        port: cli.port,
+        circuit_dir: cli.circuit_dir,
+        command: match &cli.command {
+            Some(Commands::Proxy) => Command::Proxy,
+            Some(Commands::Verify { path }) => Command::Verify(path.clone()),
+            Some(Commands::List) => Command::List,
+            None => Command::Pipeline,
+        },
     };
 
     let app_config = config::AppConfig::load(&config_cli)?;
@@ -360,10 +361,11 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<38}  {:<20}  {:<22}  {:<8}  {}",
-        "Receipt ID", "Engine", "Status", "Conf", "Created At"
+        "{:<38}  {:<20}  {:<22}  {:<8}  Created At",
+        "Receipt ID", "Engine", "Status", "Conf"
     );
     println!("{}", "-".repeat(120));
+
     for r in &list {
         let conf = match r.intent_confidence {
             Some(c) => format!("{:.2}", c),

@@ -27,7 +27,7 @@ pub fn decide_route_multi(tables: &[&str], schema: &SchemaConfig) -> Route {
         if schema
             .tables
             .get(*table)
-            .map_or(true, |t| t.sensitivity == "critical")
+            .is_none_or(|t| t.sensitivity == "critical")
         {
             return Route::ZkSlowLane;
         }
