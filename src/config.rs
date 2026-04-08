@@ -513,7 +513,14 @@ pub fn load_from_sources(
     }
     if let Some(v) = env.get("ZEMTIK_SKIP_CIRCUIT_VALIDATION") {
         let s = v.trim();
-        config.skip_circuit_validation = s == "1" || s.eq_ignore_ascii_case("true");
+        config.skip_circuit_validation = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_SKIP_CIRCUIT_VALIDATION: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
     }
     if let Some(v) = env.get("ZEMTIK_CORS_ORIGINS") {
         let parsed: Vec<String> = v
