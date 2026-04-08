@@ -152,7 +152,7 @@ pub fn parse_time_range(
 
     // past N days (cap at 36500 days / ~100 years to prevent Duration overflow)
     if let Some(cap) = RE_PAST_N_DAYS.captures(prompt) {
-        let n: i64 = cap[1].parse().unwrap_or(1).max(1).min(36500);
+        let n: i64 = cap[1].parse().unwrap_or(1).clamp(1, 36500);
         let end = now.timestamp();
         let start = (now - Duration::days(n)).timestamp();
         return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });

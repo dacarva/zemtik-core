@@ -183,7 +183,7 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
         if key.is_empty() {
             anyhow::bail!("schema_config: table key must not be empty");
         }
-        if key.trim().to_ascii_lowercase() == "__zemtik_dummy__" {
+        if key.trim().eq_ignore_ascii_case("__zemtik_dummy__") {
             anyhow::bail!(
                 "schema_config: table key '{}' is reserved as a padding sentinel — choose a different key",
                 key
@@ -349,6 +349,17 @@ pub struct AppConfig {
     /// Resolved DB backend ("sqlite" or "supabase"). Populated from DB_BACKEND env var.
     #[serde(skip)]
     pub db_backend: String,
+    /// OpenAI base URL for outbound requests. Default: "https://api.openai.com".
+    /// Env: ZEMTIK_OPENAI_BASE_URL. Override in tests to point at a mock server.
+    #[serde(skip)]
+    pub openai_base_url: String,
+    /// OpenAI model identifier. Default: "gpt-5.4-nano". Env: ZEMTIK_OPENAI_MODEL.
+    #[serde(skip)]
+    pub openai_model: String,
+    /// Skip circuit directory validation at proxy startup. Default: false.
+    /// Env: ZEMTIK_SKIP_CIRCUIT_VALIDATION=1. Set in integration tests and Docker (no nargo/bb).
+    #[serde(skip)]
+    pub skip_circuit_validation: bool,
 }
 
 impl AppConfig {
@@ -387,6 +398,9 @@ impl Default for AppConfig {
             supabase_url: None,
             supabase_service_key: None,
             db_backend: "sqlite".to_owned(),
+            openai_base_url: "https://api.openai.com".to_owned(),
+            openai_model: "gpt-5.4-nano".to_owned(),
+            skip_circuit_validation: false,
         }
     }
 }
@@ -487,6 +501,26 @@ pub fn load_from_sources(
     }
     if let Some(v) = env.get("SUPABASE_SERVICE_KEY") {
         config.supabase_service_key = Some(v.clone());
+    }
+    if let Some(v) = env.get("ZEMTIK_RECEIPTS_DB_PATH") {
+        config.receipts_db_path = expand_tilde(v.trim());
+    }
+    if let Some(v) = env.get("ZEMTIK_OPENAI_BASE_URL") {
+        config.openai_base_url = v.trim().to_owned();
+    }
+    if let Some(v) = env.get("ZEMTIK_OPENAI_MODEL") {
+        config.openai_model = v.trim().to_owned();
+    }
+    if let Some(v) = env.get("ZEMTIK_SKIP_CIRCUIT_VALIDATION") {
+        let s = v.trim();
+        config.skip_circuit_validation = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_SKIP_CIRCUIT_VALIDATION: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
     }
     if let Some(v) = env.get("ZEMTIK_CORS_ORIGINS") {
         let parsed: Vec<String> = v

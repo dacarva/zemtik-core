@@ -6,6 +6,36 @@ Every time a company queries an LLM with internal data, it creates a **shadow co
 
 Zemtik solves this at the infrastructure layer: **compute the answer locally inside a Zero-Knowledge circuit, prove the computation was honest, and send only the proven number to the model.** Zero raw rows ever leave the perimeter.
 
+---
+
+## Quick Start (Docker)
+
+The fastest way to run Zemtik. No Rust toolchain or ZK tools required.
+
+```bash
+# 1. Set your OpenAI API key
+export OPENAI_API_KEY=sk-...
+
+# 2. Start the proxy (binds to localhost:4000)
+docker compose up --build
+
+# 3. Verify it's running
+curl http://localhost:4000/health
+
+# 4. Send a query — the magic moment: data_exfiltrated is always 0
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "Q1 2024 client_portfolios total"}]
+  }'
+```
+
+The response includes an `evidence` block with `data_exfiltrated: 0` and `attestation_hash` — a cryptographic receipt you can show to auditors. See [docs/COMPLIANCE_RECEIPT.md](docs/COMPLIANCE_RECEIPT.md) for field descriptions.
+
+To use your own data: mount a custom `schema_config.json` — see the commented volume in `docker-compose.yml`.
+
 > **POC status (v0.8.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
@@ -320,7 +350,7 @@ The HTTP response to the caller includes an `evidence` object with `engine: "Fas
 zemtik-core/
 ├── src/
 │   ├── main.rs           # Pipeline orchestrator + CLI subcommand routing
-│   ├── proxy.rs          # Axum proxy server (localhost:4000); FastLane + ZK dispatch
+│   ├── proxy.rs          # Axum proxy server (localhost:4000); FastLane + ZK dispatch; build_proxy_router()
 │   ├── intent.rs         # IntentBackend trait dispatch (EmbeddingBackend or RegexBackend)
 │   ├── intent_embed.rs   # EmbeddingBackend: fastembed BGE-small-en ONNX, cosine similarity
 │   ├── time_parser.rs    # DeterministicTimeParser: Q/H/FY/month/relative/YTD → Unix range
@@ -336,6 +366,9 @@ zemtik-core/
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
 │   └── types.rs          # Shared types
+├── tests/
+│   ├── integration_proxy.rs  # Integration tests: full proxy with mock OpenAI (7 tests)
+│   └── test_*.rs             # Unit tests per module
 ├── circuit/
 │   ├── sum/           # SUM mini-circuit (Nargo.toml + src/main.nr)
 │   ├── count/         # COUNT mini-circuit (Nargo.toml + src/main.nr)
@@ -347,13 +380,16 @@ zemtik-core/
 │   ├── intent_eval.rs   # Intent eval harness (235 labeled prompts, CI gate)
 │   └── labeled_prompts.json
 ├── docs/
-│   ├── ARCHITECTURE.md     # Full component breakdown and data flow
-│   ├── CONFIGURATION.md    # All config fields, env vars, schema_config.json format
-│   ├── GETTING_STARTED.md  # End-to-end setup guide
-│   ├── HOW_TO_ADD_TABLE.md # Add a new table to the schema (step-by-step)
-│   ├── INTENT_ENGINE.md    # How EmbeddingBackend + DeterministicTimeParser work
-│   ├── SCALING.md          # Recursive proofs, production path, why remote proving breaks ZK
-│   └── SUPPORTED_QUERIES.md # v1 query contract: supported patterns, error reference
+│   ├── ARCHITECTURE.md       # Full component breakdown and data flow
+│   ├── COMPLIANCE_RECEIPT.md # Evidence response field descriptions for auditors
+│   ├── CONFIGURATION.md      # All config fields, env vars, schema_config.json format
+│   ├── GETTING_STARTED.md    # End-to-end setup guide
+│   ├── HOW_TO_ADD_TABLE.md   # Add a new table to the schema (step-by-step)
+│   ├── INTENT_ENGINE.md      # How EmbeddingBackend + DeterministicTimeParser work
+│   ├── SCALING.md            # Recursive proofs, production path, why remote proving breaks ZK
+│   └── SUPPORTED_QUERIES.md  # v1 query contract: supported patterns, error reference
+├── Dockerfile            # Multi-stage build; non-root user; FastLane only (no nargo/bb)
+├── docker-compose.yml    # Compose file for local Docker runs
 └── .env.example
 ```
 
@@ -435,7 +471,8 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [Intent Engine](docs/INTENT_ENGINE.md) — How embedding-based routing and the time parser work
 - [Supported Queries](docs/SUPPORTED_QUERIES.md) — v1 query contract: time expressions, table matching, error reference
 - [Configuration](docs/CONFIGURATION.md) — All config fields, env vars, schema_config.json format
-- [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide
+- [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide (Docker + build-from-source)
+- [Compliance Receipt](docs/COMPLIANCE_RECEIPT.md) — Evidence response fields: what each field means, how to verify
 - [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
 

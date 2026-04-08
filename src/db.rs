@@ -314,6 +314,7 @@ pub fn sum_by_category(
 ///
 /// Deprecated: use `query_aggregate_table` instead (table-agnostic, supports COUNT, no pagination required).
 #[deprecated(since = "0.7.0", note = "use query_aggregate_table instead")]
+#[allow(clippy::too_many_arguments)]
 pub async fn query_sum_by_category(
     client: &reqwest::Client,
     url: &str,
@@ -396,6 +397,7 @@ pub async fn query_sum_by_category(
 ///
 /// Returns `(aggregate, row_count)`. Negative SUM → `Err` (overflow guard).
 /// COUNT always returns a non-negative result.
+#[allow(clippy::too_many_arguments)]
 pub fn aggregate_table(
     conn: &Connection,
     table: &str,
@@ -489,6 +491,7 @@ pub fn aggregate_table(
 /// omits the `client_id=eq.{X}` query param (for tables without a client_id column).
 ///
 /// Returns `(aggregate, 0)` — row_count is not available from PostgREST aggregate response.
+#[allow(clippy::too_many_arguments)]
 pub async fn query_aggregate_table(
     client: &reqwest::Client,
     url: &str,
@@ -965,7 +968,7 @@ pub fn sign_transaction_batches(
     key: &PrivateKey,
 ) -> anyhow::Result<Vec<(Vec<Transaction>, SignatureData)>> {
     anyhow::ensure!(
-        txns.len() % BATCH_SIZE == 0,
+        txns.len().is_multiple_of(BATCH_SIZE),
         "transaction count ({}) must be a multiple of BATCH_SIZE ({})",
         txns.len(),
         BATCH_SIZE

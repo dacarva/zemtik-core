@@ -27,6 +27,7 @@ static BN254_FIELD_ORDER: LazyLock<BigInt> = LazyLock::new(|| {
 /// timestamp_column, category_column, agg_fn, metric_label) and the effective client_id
 /// (`0` when `skip_client_id_filter=true`, signalling a non-tenant-scoped query).
 /// Called by both the SQLite path (via `run_fast_lane`) and the Supabase path.
+#[allow(clippy::too_many_arguments)]
 pub fn attest_fast_lane(
     signing_key: &PrivateKey,
     client_id: i64,
@@ -73,7 +74,7 @@ pub fn attest_fast_lane(
     let msg = msg_raw % &*BN254_FIELD_ORDER;
     let sig = match signing_key.sign(msg) {
         Ok(s) => s,
-        Err(e) => return EngineResult::SignError(format!("{}", e)),
+        Err(e) => return EngineResult::SignError(e.to_string()),
     };
 
     // attestation_hash = SHA-256(sig_r8_x || ":" || sig_r8_y || ":" || sig_s)
@@ -100,6 +101,7 @@ pub fn attest_fast_lane(
 /// Always returns `EngineResult::Ok` (even for row_count == 0) so that
 /// zero-result receipts are cryptographically bound to a specific installation key.
 /// Does NOT acquire `pipeline_lock` — FastLane is fully concurrent.
+#[allow(clippy::too_many_arguments)]
 pub fn run_fast_lane(
     db_conn: &Connection,
     signing_key: &PrivateKey,

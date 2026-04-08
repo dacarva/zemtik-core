@@ -1,0 +1,70 @@
+# Zemtik Proxy — Demo Deployment
+# Pin this tag during pilot. Update manually for upgrades.
+#
+# Quick start:
+#   export OPENAI_API_KEY=sk-...
+#   docker compose up --build
+#
+# The proxy listens on http://localhost:4000 and intercepts POST /v1/chat/completions.
+# Point your existing OpenAI client at localhost:4000 — no code changes needed.
+
+services:
+  zemtik:
+    build:
+      context: .
+      args:
+        # Set to "true" to install nargo + bb inside the image for ZK SlowLane support.
+        # Also remove the ZEMTIK_SKIP_CIRCUIT_VALIDATION line below and uncomment the
+        # zemtik_srs volume mount so the ~1GB SRS is cached across container restarts.
+        INSTALL_ZK_TOOLS: "${INSTALL_ZK_TOOLS:-false}"
+    # Local image tag. Use ZEMTIK_VARIANT to avoid overwriting between builds:
+    #   FastLane (default):  docker compose up --build
+    #   ZK SlowLane:         ZEMTIK_VARIANT=zk INSTALL_ZK_TOOLS=true docker compose up --build
+    image: zemtik-core:${ZEMTIK_VARIANT:-fastlane}
+    # Pre-built pulls (alternative to building locally):
+    # image: ghcr.io/dacarva/zemtik-core:v0.8.1
+    ports:
+      - "4000:4000"
+    environment:
+      # Bind to 0.0.0.0 so the port is reachable from outside the container.
+      - ZEMTIK_BIND_ADDR=0.0.0.0:4000
+      # Regex intent backend: no ONNX model download (~130MB) on first start.
+      # Switch to ZEMTIK_INTENT_BACKEND=embed for embedding-based intent matching.
+      - ZEMTIK_INTENT_BACKEND=regex
+      # Skip nargo/bb circuit validation — FastLane works without ZK tools.
+      # Remove this line to enable ZK SlowLane (requires nargo+bb in the image).
+      - ZEMTIK_SKIP_CIRCUIT_VALIDATION=1
+      # Required: your OpenAI API key.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:?Set OPENAI_API_KEY before running docker compose up}
+      # OpenAI model forwarded to api.openai.com. gpt-5.4-nano is the current default.
+      - ZEMTIK_OPENAI_MODEL=${ZEMTIK_OPENAI_MODEL:-gpt-5.4-nano}
+      # Client ID used for DB filtering (default demo dataset uses 123).
+      - ZEMTIK_CLIENT_ID=${ZEMTIK_CLIENT_ID:-123}
+      # CORS: allow all origins for demo. Restrict in production.
+      - ZEMTIK_CORS_ORIGINS=*
+      # Store receipts.db inside the persisted receipts/ directory so it survives restarts.
+      # Without this, /verify/<id> links break after container recreate.
+      - ZEMTIK_RECEIPTS_DB_PATH=/home/zemtik/.zemtik/receipts/receipts.db
+    volumes:
+      # Persist keys across container restarts so attestation_hash is stable.
+      - zemtik_keys:/home/zemtik/.zemtik/keys
+      # Persist compliance receipts DB (bundles + receipts.db index).
+      - zemtik_receipts:/home/zemtik/.zemtik/receipts
+      # Optional: mount your own schema_config.json to override the bundled demo config.
+      # Uncomment and set the path to your file:
+      # - /path/to/your/schema_config.json:/home/zemtik/.zemtik/schema_config.json:ro
+      # Optional: cache the bb SRS (~1GB) across restarts when INSTALL_ZK_TOOLS=true.
+      # - zemtik_srs:/home/zemtik/.bb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  zemtik_keys:
+  zemtik_receipts:
+  # Uncomment when INSTALL_ZK_TOOLS=true to persist the bb SRS cache (~1GB).
+  # zemtik_srs:

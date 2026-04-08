@@ -60,6 +60,7 @@ pub fn parse_bb_version(raw: &str) -> Option<(u32, u32, u32)> {
 ///   circuit_hash.txt         — SHA-256 of the circuit ACIR JSON
 ///   manifest.json            — sidecar SHA-256 for tamper detection (v0.5.1+)
 ///   request_meta.json        — bundle metadata
+#[allow(clippy::too_many_arguments)]
 pub fn generate_bundle(
     params: &QueryParams,
     aggregate: u64,

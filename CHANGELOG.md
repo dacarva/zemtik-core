@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2] - 2026-04-08
+
+### Added
+- **Docker support** — multi-stage `Dockerfile` (Rust 1.88 builder + Debian bookworm-slim runtime). Default image builds FastLane-only (~150MB); set `INSTALL_ZK_TOOLS=true` at build time for ZK SlowLane support (~450MB). Docker Hub/GHCR release automation added to `release.yml`.
+- **`docker-compose.yml`** — demo deployment with all required env vars pre-configured. Includes comments for both FastLane (default) and ZK SlowLane variants.
+- **CI pipeline** — `.github/workflows/ci.yml` runs unit tests, integration tests, clippy (`-D warnings`), and a Docker build on every push/PR. Integration tests use `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` so they run without nargo/bb.
+- **Integration test suite** — `tests/integration_proxy.rs` spins up a real Axum server on an ephemeral port with a WireMock OpenAI stub and in-memory SQLite. Covers FastLane SUM and COUNT roundtrips, `/health`, passthrough for unsupported model, ambiguous-prompt 400, empty-prompt 400, and `schema_config`-missing 500.
+- **`ZEMTIK_OPENAI_BASE_URL`** and **`ZEMTIK_OPENAI_MODEL`** env vars — override OpenAI endpoint and model at runtime; used in integration tests to point at a mock server.
+- **`ZEMTIK_SKIP_CIRCUIT_VALIDATION`** env var — skip nargo/bb circuit-dir checks at proxy startup; required for Docker and integration tests.
+- **`build_proxy_router()`** public function extracted from `run_proxy()` — allows integration tests to spin up a server on an ephemeral port without binding to a real address.
+
+### Fixed
+- **Clippy warnings resolved** — 13 pre-existing warnings suppressed or fixed (`too_many_arguments`, `is_multiple_of`, `.to_string()`). CI now enforces `-D warnings` from day one.
+- **`render_verify_page` XSS** — `category` and `aggregate` fields in the `/verify/:id` HTML receipt page were not HTML-escaped; both now wrapped with `html_escape()`.
+- **`circuit_dir_for(AggFn::Sum)` in CLI pipeline** — the CLI pipeline hardcodes a SUM query but was passing the root `circuit_dir` to nargo; now correctly resolves the `circuit/sum/` sub-directory.
+
 ## [0.8.1] - 2026-04-07
 
 ### Docs

@@ -53,11 +53,19 @@ You can mix layers freely. Most deployments use only `.env` + `schema_config.jso
 | `ZEMTIK_INTENT_BACKEND` | `embed` | `embed`, `regex` | Intent extraction backend. `embed` uses BGE-small-en ONNX for semantic matching. `regex` uses keyword substring matching. Case-insensitive. |
 | `ZEMTIK_INTENT_THRESHOLD` | `0.65` | `0.0`–`1.0` | Cosine similarity threshold for the embedding backend. Prompts below this confidence score are routed to ZK SlowLane. |
 
+### OpenAI client
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_OPENAI_BASE_URL` | `https://api.openai.com` | URL | Base URL for OpenAI API calls. Override in tests or dev to point at a mock server (e.g. `http://localhost:3000`). |
+| `ZEMTIK_OPENAI_MODEL` | `gpt-5.4-nano` | model identifier | OpenAI model used in CLI pipeline and proxy forwarding. `gpt-5.4-nano` is the current default. Set to any Chat Completions-compatible model. |
+
 ### ZK pipeline
 
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
 | `ZEMTIK_VERIFY_TIMEOUT_SECS` | `120` | positive integer | Seconds the proxy waits for `bb verify` before returning HTTP 504. On timeout, the `bb` child process is killed and reaped (v0.6.0+). |
+| `ZEMTIK_SKIP_CIRCUIT_VALIDATION` | `0` | `0`, `1`, `true` | When `1` or `true`, skips the startup check that verifies `nargo` and `bb` are on `PATH` and the circuit directory is present. Required in Docker (where ZK tools are not installed) and in integration tests. FastLane queries continue to work; ZK SlowLane queries will fail at proof time if tools are missing. |
 
 ### Runtime paths
 

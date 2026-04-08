@@ -26,6 +26,8 @@ Key routing rules:
 
 Write tests in the `tests/` directory, not inline in `src/`. Inline `#[cfg(test)]` modules are only acceptable when tests must access private functions or types that cannot be exposed. In all other cases, add tests to the appropriate `tests/test_<module>.rs` file (or create one if it doesn't exist). New test files follow the naming convention `test_<module>.rs` and import via `use zemtik::<module>::<item>`.
 
+Integration tests live in `tests/integration_proxy.rs`. They spin up the full Axum proxy (`build_proxy_router()`) with a mock OpenAI server, set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` to bypass circuit tools, and cover FastLane and ZK SlowLane routing, CORS, error paths, and the `/health` endpoint. Run them with `cargo test --test integration_proxy`.
+
 ## Commands
 
 ```bash
@@ -126,7 +128,7 @@ Layered resolution order (later overrides earlier):
 
 1. Hardcoded defaults (`~/.zemtik/` subdirs: `circuit/`, `runs/`, `keys/`, `receipts/`, `receipts.db`, `zemtik.db`)
 2. YAML file (`~/.zemtik/config.yaml`)
-3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard))
+3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard), `ZEMTIK_OPENAI_BASE_URL` (default `https://api.openai.com`; override in tests/dev), `ZEMTIK_OPENAI_MODEL` (default `gpt-5.4-nano`; `gpt-5.4-nano` is a real OpenAI model, not a placeholder), `ZEMTIK_SKIP_CIRCUIT_VALIDATION` (`1`|`true`; skips nargo/bb circuit dir check — required in Docker and integration tests))
 4. CLI flags (`--port`, `--circuit-dir`)
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end runs.
@@ -138,7 +140,10 @@ Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end
 
 ### Release / CI
 
-GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin intent-eval --features eval`) before cross-compiling for `x86_64-linux`, `aarch64-darwin` on version tags (`v*`). Archives include binary + `install.sh` + `config.example.yaml`. (`aarch64-linux` and `x86_64-darwin` removed in v0.6.0 due to `ort-sys` ABI mismatch.)
+Two GitHub Actions workflows:
+
+- **`ci.yml`** — runs on every push/PR: `cargo test` (unit + integration), `cargo clippy`, and a Docker build smoke-test. Integration tests require `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` (no nargo/bb in CI).
+- **`release.yml`** — runs on version tags (`v*`): intent eval gate (`cargo run --bin intent-eval --features eval`), cross-compile for `x86_64-linux` + `aarch64-darwin`, Docker multi-platform publish to GHCR. Archives include binary + `install.sh` + `config.example.yaml`. (`aarch64-linux` and `x86_64-darwin` removed in v0.6.0 due to `ort-sys` ABI mismatch.)
 
 ## Key constraints and known gaps
 
@@ -151,4 +156,4 @@ GitHub Actions (`release.yml`) runs the intent eval gate (`cargo run --bin inten
 - Public inputs sidecar is not cryptographically committed (known limitation, tracked).
 - EmbeddingBackend downloads BGE-small-en model (~130MB) on first proxy start to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip. First start can take 30–120s.
 - `IntentBackend` trait: `index_schema(&mut self, schema)` called once at startup; `match_prompt(&self, prompt, k)` returns sorted `Vec<(table_key, score)>`. Add new backends by implementing this trait.
-- **Testing model:** All curl examples, test payloads, and end-to-end tests use `gpt-5.4-nano` (hardcoded default in `src/openai.rs`). Do NOT use `gpt-4o` or other model names in test commands — they won't match the proxy fallback and will pass through unmodified.
+- **Testing model:** All curl examples, test payloads, and end-to-end tests use `gpt-5.4-nano` (the current default in `src/openai.rs`). `gpt-5.4-nano` is a real OpenAI model (the latest as of 2026-04). Do NOT use `gpt-4o` or other model names in test commands — they won't match the proxy fallback and will pass through unmodified. The model name is configurable via `ZEMTIK_OPENAI_MODEL` env var (see `src/openai.rs`).

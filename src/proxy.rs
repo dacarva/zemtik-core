@@ -23,8 +23,6 @@ use crate::types::{
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
-const OPENAI_BASE_URL: &str = "https://api.openai.com";
-
 struct ProxyState {
     http_client: reqwest::Client,
     /// Per-aggregation-type locks for ZK pipeline executions.
@@ -49,6 +47,9 @@ struct ProxyState {
     schema_config_hash: String,
     /// Intent matching backend — static after startup, no lock needed.
     intent_backend: Arc<dyn IntentBackend>,
+    /// OpenAI base URL for forwarding requests. Injected from AppConfig so tests
+    /// can point this at a wiremock server instead of api.openai.com.
+    openai_base_url: String,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -70,29 +71,34 @@ struct ZkPipelineResult {
     actual_row_count: usize,
 }
 
-/// Entry point for proxy mode. Starts Axum on the configured port.
-pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
+/// Build the Axum router with all state wired up. Extracted from `run_proxy()` so
+/// integration tests can spin up a server on an ephemeral port without binding to a
+/// real address or requiring nargo/bb on PATH.
+pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
     // Fail fast: schema_config.json is required for proxy mode routing.
     if config.schema_config.is_none() {
-        eprintln!(
-            "Fatal: schema_config required for proxy mode. \
+        anyhow::bail!(
+            "schema_config required for proxy mode. \
              schema_config.json not found at {}. \
              Copy schema_config.example.json to ~/.zemtik/schema_config.json \
-             and configure your table sensitivities.",
+             and configure your table sensitivities. \
+             Fix: mount your config with -v /path/to/schema_config.json:/etc/zemtik/schema_config.json",
             config.schema_config_path.display()
         );
-        std::process::exit(1);
     }
 
     // Validate sensitivity values
     crate::config::validate_schema_config(config.schema_config.as_ref().unwrap(), false)
         .context("validate schema_config")?;
 
-    // Fail fast: verify circuit directory has all required files before accepting requests.
-    prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
+    // Circuit validation — skipped when skip_circuit_validation=true (Docker / tests without nargo/bb).
+    if !config.skip_circuit_validation {
+        prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
+    }
 
     let schema_config_hash = config.schema_config_hash.clone().unwrap_or_default();
     let schema = config.schema_config.clone().unwrap();
+    let openai_base_url = config.openai_base_url.clone();
 
     // Build intent backend. Use EmbeddingBackend unless ZEMTIK_INTENT_BACKEND=regex
     // or the feature is disabled. Falls back to RegexBackend on model load failure.
@@ -158,6 +164,7 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         signing_key_bytes,
         schema_config_hash,
         intent_backend,
+        openai_base_url,
     });
 
     // If any configured origin is "*", use the wildcard policy.
@@ -188,7 +195,13 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         .layer(cors)
         .with_state(state);
 
+    Ok(app)
+}
+
+/// Entry point for proxy mode. Starts Axum on the configured port.
+pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     let addr = config.bind_addr.clone();
+    let app = build_proxy_router(config).await?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     println!("╔══════════════════════════════════════════════════╗");
@@ -340,6 +353,7 @@ async fn handle_chat_completions(
 }
 
 /// Handle a FastLane request: DB sum → attestation → synthetic evidence response.
+#[allow(clippy::too_many_arguments)]
 async fn handle_fast_lane(
     state: Arc<ProxyState>,
     mut body: Value,
@@ -589,7 +603,7 @@ async fn build_fast_lane_response(
         }
     }
 
-    let openai_url = format!("{}/v1/chat/completions", OPENAI_BASE_URL);
+    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
     let openai_resp = state
         .http_client
         .post(&openai_url)
@@ -629,6 +643,7 @@ async fn build_fast_lane_response(
 }
 
 /// Handle a ZK SlowLane request (existing full ZK pipeline).
+#[allow(clippy::too_many_arguments)]
 async fn handle_zk_slow_lane(
     state: Arc<ProxyState>,
     mut body: Value,
@@ -805,9 +820,9 @@ async fn handle_zk_slow_lane(
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or("gpt-5.4-nano")
+        .unwrap_or(&state.config.openai_model)
         .to_owned();
-    let openai_url = format!("{}/v1/chat/completions", OPENAI_BASE_URL);
+    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
 
     let openai_resp = state
         .http_client
@@ -1044,8 +1059,8 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
         id = html_escape(&r.id),
         badge_color = badge_color,
         status_label = status_label,
-        aggregate = aggregate,
-        category = category,
+        aggregate = html_escape(&aggregate),
+        category = html_escape(&category),
         proof_status = html_escape(&r.proof_status),
         circuit_hash = html_escape(&r.circuit_hash),
         bb_version = html_escape(&r.bb_version),
