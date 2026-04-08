@@ -42,10 +42,13 @@ services:
       - ZEMTIK_CLIENT_ID=${ZEMTIK_CLIENT_ID:-123}
       # CORS: allow all origins for demo. Restrict in production.
       - ZEMTIK_CORS_ORIGINS=*
+      # Store receipts.db inside the persisted receipts/ directory so it survives restarts.
+      # Without this, /verify/<id> links break after container recreate.
+      - ZEMTIK_RECEIPTS_DB_PATH=/home/zemtik/.zemtik/receipts/receipts.db
     volumes:
       # Persist keys across container restarts so attestation_hash is stable.
       - zemtik_keys:/home/zemtik/.zemtik/keys
-      # Persist compliance receipts DB.
+      # Persist compliance receipts DB (bundles + receipts.db index).
       - zemtik_receipts:/home/zemtik/.zemtik/receipts
       # Optional: mount your own schema_config.json to override the bundled demo config.
       # Uncomment and set the path to your file:

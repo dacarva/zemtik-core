@@ -502,6 +502,9 @@ pub fn load_from_sources(
     if let Some(v) = env.get("SUPABASE_SERVICE_KEY") {
         config.supabase_service_key = Some(v.clone());
     }
+    if let Some(v) = env.get("ZEMTIK_RECEIPTS_DB_PATH") {
+        config.receipts_db_path = expand_tilde(v.trim());
+    }
     if let Some(v) = env.get("ZEMTIK_OPENAI_BASE_URL") {
         config.openai_base_url = v.trim().to_owned();
     }
