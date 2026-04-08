@@ -44,7 +44,7 @@ fastembed = { version = "5", optional = true }
 babyjubjub-rs = { version = "0.0.11", features = ["aarch64"], default-features = false }
 
 [target.'cfg(not(target_arch = "aarch64"))'.dependencies]
-babyjubjub-rs = { version = "0.0.11", default-features = false }
+babyjubjub-rs = "0.0.11"
 
 [features]
 default = ["embed"]
