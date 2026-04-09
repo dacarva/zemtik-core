@@ -10,6 +10,7 @@ pub mod keys;
 pub mod openai;
 pub mod proxy;
 pub mod prover;
+pub mod tunnel;
 pub mod receipts;
 pub mod router;
 pub mod time_parser;

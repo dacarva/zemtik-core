@@ -19,6 +19,17 @@ fn expand_tilde(s: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// ZemtikMode — standard proxy or transparent tunnel mode
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ZemtikMode {
+    #[default]
+    Standard,
+    Tunnel,
+}
+
+// ---------------------------------------------------------------------------
 // SchemaConfig — table sensitivity configuration for the routing engine
 // ---------------------------------------------------------------------------
 
@@ -129,6 +140,11 @@ pub struct TableConfig {
     /// WARNING: setting this on a multi-tenant table exposes all tenants' data.
     #[serde(default)]
     pub skip_client_id_filter: bool,
+
+    /// Tunnel mode: numerical diff tolerance for this table. Default: 0.01 (1%).
+    /// Override per-table when the default tolerance doesn't fit the column's scale.
+    #[serde(default)]
+    pub tunnel_diff_tolerance: Option<f64>,
 }
 
 impl Default for TableConfig {
@@ -146,6 +162,7 @@ impl Default for TableConfig {
             agg_fn: AggFn::Sum,
             metric_label: default_metric_label(),
             skip_client_id_filter: false,
+            tunnel_diff_tolerance: None,
         }
     }
 }
@@ -360,6 +377,42 @@ pub struct AppConfig {
     /// Env: ZEMTIK_SKIP_CIRCUIT_VALIDATION=1. Set in integration tests and Docker (no nargo/bb).
     #[serde(skip)]
     pub skip_circuit_validation: bool,
+
+    // --- Tunnel mode fields ---
+
+    /// Operating mode: Standard (default) or Tunnel.
+    /// Env: ZEMTIK_MODE=standard|tunnel
+    #[serde(skip)]
+    pub mode: ZemtikMode,
+    /// Separate API key for zemtik's verification calls in tunnel mode.
+    /// Env: ZEMTIK_TUNNEL_API_KEY. Falls back to OPENAI_API_KEY if unset (warns at startup).
+    #[serde(skip)]
+    pub tunnel_api_key: Option<String>,
+    /// Model for zemtik's verification OpenAI calls. Falls back to openai_model if unset.
+    /// Env: ZEMTIK_TUNNEL_MODEL
+    #[serde(skip)]
+    pub tunnel_model: Option<String>,
+    /// Max seconds for FORK 2 background pipeline. Default: 180 (covers nargo+bb).
+    /// Env: ZEMTIK_TUNNEL_TIMEOUT_SECS
+    #[serde(skip)]
+    pub tunnel_timeout_secs: u64,
+    /// Max concurrent FORK 2 background tasks. Default: 50.
+    /// Env: ZEMTIK_TUNNEL_SEMAPHORE_PERMITS
+    #[serde(skip)]
+    pub tunnel_semaphore_permits: usize,
+    /// Bearer token required for /tunnel/audit and /tunnel/audit/csv.
+    /// Env: ZEMTIK_DASHBOARD_API_KEY. Warns at startup if unset in tunnel mode.
+    #[serde(skip)]
+    pub dashboard_api_key: Option<String>,
+    /// Path to tunnel audit SQLite DB. Default: ~/.zemtik/tunnel_audit.db.
+    /// Env: ZEMTIK_TUNNEL_AUDIT_DB_PATH
+    #[serde(skip)]
+    pub tunnel_audit_db_path: PathBuf,
+    /// When true, store a 500-char plaintext preview of original OpenAI responses in the audit DB.
+    /// Default: false — previews are omitted in production to avoid persisting customer LLM output.
+    /// Env: ZEMTIK_TUNNEL_DEBUG_PREVIEWS=1
+    #[serde(skip)]
+    pub tunnel_debug_previews: bool,
 }
 
 impl AppConfig {
@@ -401,6 +454,14 @@ impl Default for AppConfig {
             openai_base_url: "https://api.openai.com".to_owned(),
             openai_model: "gpt-5.4-nano".to_owned(),
             skip_circuit_validation: false,
+            mode: ZemtikMode::Standard,
+            tunnel_api_key: None,
+            tunnel_model: None,
+            tunnel_timeout_secs: 180,
+            tunnel_semaphore_permits: 50,
+            dashboard_api_key: None,
+            tunnel_audit_db_path: base.join("tunnel_audit.db"),
+            tunnel_debug_previews: false,
         }
     }
 }
@@ -409,6 +470,7 @@ pub enum Command {
     Proxy,
     Verify(PathBuf),
     List,
+    ListTunnel,
     Pipeline,
 }
 
@@ -530,6 +592,61 @@ pub fn load_from_sources(
             .collect();
         if !parsed.is_empty() {
             config.cors_origins = parsed;
+        }
+    }
+
+    // Tunnel mode env vars
+    if let Some(v) = env.get("ZEMTIK_MODE") {
+        let s = v.trim().to_lowercase();
+        config.mode = match s.as_str() {
+            "standard" => ZemtikMode::Standard,
+            "tunnel" => ZemtikMode::Tunnel,
+            other => anyhow::bail!(
+                "ZEMTIK_MODE: unrecognized value {:?}; accepted: standard, tunnel",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_API_KEY") {
+        config.tunnel_api_key = Some(v.trim().to_owned());
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_MODEL") {
+        config.tunnel_model = Some(v.trim().to_owned());
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_TIMEOUT_SECS") {
+        let secs = v.trim().parse::<u64>().context("parse ZEMTIK_TUNNEL_TIMEOUT_SECS")?;
+        anyhow::ensure!(secs >= 10, "ZEMTIK_TUNNEL_TIMEOUT_SECS must be >= 10 (got {})", secs);
+        config.tunnel_timeout_secs = secs;
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_SEMAPHORE_PERMITS") {
+        let permits = v.trim().parse::<usize>().context("parse ZEMTIK_TUNNEL_SEMAPHORE_PERMITS")?;
+        anyhow::ensure!(permits >= 1, "ZEMTIK_TUNNEL_SEMAPHORE_PERMITS must be >= 1 (got {})", permits);
+        config.tunnel_semaphore_permits = permits;
+    }
+    if let Some(v) = env.get("ZEMTIK_DASHBOARD_API_KEY") {
+        config.dashboard_api_key = Some(v.trim().to_owned());
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_DEBUG_PREVIEWS") {
+        let s = v.trim();
+        config.tunnel_debug_previews = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_TUNNEL_DEBUG_PREVIEWS: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_AUDIT_DB_PATH") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+                home.join(rest)
+            } else {
+                PathBuf::from(trimmed)
+            };
+            config.tunnel_audit_db_path = expanded;
         }
     }
 

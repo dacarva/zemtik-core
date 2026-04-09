@@ -27,14 +27,31 @@ pub fn load_or_generate_key(keys_dir: &Path) -> anyhow::Result<PrivateKey> {
             .map_err(|e| anyhow::anyhow!("import key from {}: {}", key_path.display(), e))
     } else {
         let seed: [u8; 32] = rand::thread_rng().gen();
-        std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&key_path)
             .and_then(|mut f| f.write_all(&seed))
-            .with_context(|| format!("write key to {}", key_path.display()))?;
-        PrivateKey::import(seed.to_vec())
-            .map_err(|e| anyhow::anyhow!("import generated key: {}", e))
+        {
+            Ok(()) => PrivateKey::import(seed.to_vec())
+                .map_err(|e| anyhow::anyhow!("import generated key: {}", e)),
+            // Race: another process created the file between our exists() check and open().
+            // Fall back to reading the file that already exists.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let bytes = std::fs::read(&key_path)
+                    .with_context(|| format!("read key from {}", key_path.display()))?;
+                if bytes.len() != 32 {
+                    anyhow::bail!(
+                        "corrupt key file at {}: expected 32 bytes, got {}",
+                        key_path.display(),
+                        bytes.len()
+                    );
+                }
+                PrivateKey::import(bytes)
+                    .map_err(|e| anyhow::anyhow!("import key from {}: {}", key_path.display(), e))
+            }
+            Err(e) => Err(e).with_context(|| format!("write key to {}", key_path.display())),
+        }
     }
 }

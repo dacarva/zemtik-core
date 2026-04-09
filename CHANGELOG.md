@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-04-09
+
+### Added
+- **Tunnel mode** (`ZEMTIK_MODE=tunnel`) — transparent verification proxy that forwards all requests to OpenAI immediately (FORK 1) while running ZK proof verification in the background (FORK 2). Zero latency impact on the pilot customer.
+- **`/tunnel/audit`** endpoint — JSON audit log of every request with match status, diff detection, ZK aggregate vs LLM response comparison. Protected by `ZEMTIK_DASHBOARD_API_KEY`.
+- **`/tunnel/audit/csv`** — CSV export of audit records for compliance review.
+- **`/tunnel/summary`** — aggregate metrics (total requests, matched rate, diff rate, avg latency).
+- **`zemtik list-tunnel`** CLI command — inspect tunnel audit records from the command line.
+- **`x-zemtik-receipt-id`** response header — correlates each request with its audit record ID.
+- **Streaming support** — `stream:true` requests are fully supported; SSE chunks are teed to the client and accumulated for FORK 2 verification after the stream ends.
+- **`docs/TUNNEL_MODE.md`** — full documentation for tunnel mode setup, configuration, and audit endpoints.
+- **`TunnelMatchStatus::Diverged`** — audit records now distinguish between `matched` (ZK agrees with LLM) and `diverged` (ZK detects discrepancy).
+
+### Changed
+- `ProxyState` fields made `pub(crate)` to support the tunnel module.
+- `run_fast_lane_engine()` and `run_zk_pipeline()` extracted as `pub(crate)` functions usable by tunnel FORK 2.
+- `handle_health` now includes `mode`, `tunnel_semaphore_available`, `tunnel_semaphore_capacity`, and `tunnel_backpressure_count` fields in tunnel mode.
+
+### Fixed
+- `ZEMTIK_TUNNEL_API_KEY` missing in tunnel mode is now a hard startup error (prevents silent billing of the pilot customer's key).
+- `handle_tunnel_passthrough` now forwards unrecognized routes transparently to the upstream OpenAI base URL, preserving the tunnel mode design goal of zero customer impact.
+- Dashboard auth defaults to `401` when `ZEMTIK_DASHBOARD_API_KEY` is not configured (was silently allowing all requests).
+- Dashboard API key comparison now uses constant-time equality to prevent timing-oracle attacks.
+- Regex in `compute_diff` now compiled once at startup via `LazyLock` (was re-compiled per request).
+- `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS=0` and `ZEMTIK_TUNNEL_TIMEOUT_SECS` < 10 are now rejected at startup.
+- Backpressure events now write a `Backpressure` audit record to the DB.
+- CSV export now strips leading formula-injection characters (`=`, `+`, `-`, `@`) from field values.
+
 ## [0.8.2] - 2026-04-08
 
 ### Added

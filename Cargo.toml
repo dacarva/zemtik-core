@@ -1,18 +1,22 @@
 [package]
 name = "zemtik"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
 
 [dependencies]
+constant_time_eq = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Use the same poseidon-rs version as babyjubjub-rs to share the Fr type
 poseidon-rs = "0.0.8"
 ff_ce = "0.11"
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -61,4 +65,4 @@ required-features = ["eval"]
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }

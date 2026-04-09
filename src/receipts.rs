@@ -1,6 +1,10 @@
+use std::path::Path;
+
 use anyhow::Context;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+
+use crate::types::TunnelAuditRecord;
 
 /// A row in the receipts table — one per successfully generated proof bundle.
 pub struct Receipt {
@@ -275,4 +279,260 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
         Some(r) => Ok(Some(r.context("read receipt row")?)),
         None => Ok(None),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tunnel audit DB (separate SQLite file: tunnel_audit.db)
+// ---------------------------------------------------------------------------
+
+/// Open (or create) the tunnel_audit.db SQLite database.
+/// Uses WAL journal mode for concurrent read/write access.
+pub fn open_tunnel_audit_db(db_path: &Path) -> anyhow::Result<Connection> {
+    // Handle in-memory DBs used in tests (":memory:" path).
+    if db_path.to_str() != Some(":memory:") {
+        if let Some(dir) = db_path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create directory {}", dir.display()))?;
+        }
+    }
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("open tunnel_audit DB at {}", db_path.display()))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS tunnel_audit (
+            id                          TEXT PRIMARY KEY,
+            receipt_id                  TEXT,
+            created_at                  TEXT NOT NULL,
+            match_status                TEXT NOT NULL,
+            matched_table               TEXT,
+            matched_agg_fn              TEXT,
+            original_status_code        INTEGER NOT NULL,
+            original_response_body_hash TEXT NOT NULL,
+            original_latency_ms         INTEGER NOT NULL,
+            zemtik_aggregate            INTEGER,
+            zemtik_row_count            INTEGER,
+            zemtik_engine               TEXT,
+            zemtik_latency_ms           INTEGER,
+            diff_detected               INTEGER NOT NULL DEFAULT 0,
+            diff_summary                TEXT,
+            diff_details                TEXT,
+            original_response_preview   TEXT,
+            zemtik_response_preview     TEXT,
+            error_message               TEXT,
+            request_hash                TEXT NOT NULL,
+            prompt_hash                 TEXT NOT NULL,
+            intent_confidence           REAL,
+            tunnel_model                TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tunnel_audit_created ON tunnel_audit(created_at);
+        CREATE INDEX IF NOT EXISTS idx_tunnel_audit_status ON tunnel_audit(match_status);
+    ")?;
+    Ok(conn)
+}
+
+/// Insert a tunnel audit record. Never hold the MutexGuard across .await.
+pub fn insert_tunnel_audit(conn: &Connection, r: &TunnelAuditRecord) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO tunnel_audit (
+            id, receipt_id, created_at, match_status, matched_table, matched_agg_fn,
+            original_status_code, original_response_body_hash, original_latency_ms,
+            zemtik_aggregate, zemtik_row_count, zemtik_engine, zemtik_latency_ms,
+            diff_detected, diff_summary, diff_details,
+            original_response_preview, zemtik_response_preview, error_message,
+            request_hash, prompt_hash, intent_confidence, tunnel_model
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+        rusqlite::params![
+            r.id,
+            r.receipt_id,
+            r.created_at,
+            r.match_status,
+            r.matched_table,
+            r.matched_agg_fn,
+            r.original_status_code as i64,
+            r.original_response_body_hash,
+            r.original_latency_ms as i64,
+            r.zemtik_aggregate,
+            r.zemtik_row_count.map(|v| v as i64),
+            r.zemtik_engine,
+            r.zemtik_latency_ms.map(|v| v as i64),
+            r.diff_detected as i64,
+            r.diff_summary,
+            r.diff_details,
+            r.original_response_preview,
+            r.zemtik_response_preview,
+            r.error_message,
+            r.request_hash,
+            r.prompt_hash,
+            r.intent_confidence,
+            r.tunnel_model,
+        ],
+    ).context("insert tunnel_audit record")?;
+    Ok(())
+}
+
+/// Filters for querying tunnel audit records.
+pub struct TunnelAuditFilters {
+    pub match_status: Option<String>,
+    pub diff_detected: Option<bool>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub table: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Default for TunnelAuditFilters {
+    fn default() -> Self {
+        TunnelAuditFilters {
+            match_status: None,
+            diff_detected: None,
+            from: None,
+            to: None,
+            table: None,
+            limit: 100,
+            offset: 0,
+        }
+    }
+}
+
+fn row_to_tunnel_audit(row: &rusqlite::Row<'_>) -> rusqlite::Result<TunnelAuditRecord> {
+    Ok(TunnelAuditRecord {
+        id: row.get(0)?,
+        receipt_id: row.get(1)?,
+        created_at: row.get(2)?,
+        match_status: row.get(3)?,
+        matched_table: row.get(4)?,
+        matched_agg_fn: row.get(5)?,
+        original_status_code: row.get::<_, i64>(6)? as u16,
+        original_response_body_hash: row.get(7)?,
+        original_latency_ms: row.get::<_, i64>(8)? as u64,
+        zemtik_aggregate: row.get(9)?,
+        zemtik_row_count: row.get::<_, Option<i64>>(10)?.map(|v| v as usize),
+        zemtik_engine: row.get(11)?,
+        zemtik_latency_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+        diff_detected: row.get::<_, i64>(13)? != 0,
+        diff_summary: row.get(14)?,
+        diff_details: row.get(15)?,
+        original_response_preview: row.get(16)?,
+        zemtik_response_preview: row.get(17)?,
+        error_message: row.get(18)?,
+        request_hash: row.get(19)?,
+        prompt_hash: row.get(20)?,
+        intent_confidence: row.get(21)?,
+        tunnel_model: row.get(22)?,
+    })
+}
+
+/// Query tunnel audit records with optional filters and pagination.
+pub fn query_tunnel_audits(
+    conn: &Connection,
+    filters: &TunnelAuditFilters,
+) -> anyhow::Result<Vec<TunnelAuditRecord>> {
+    let mut sql = "SELECT id, receipt_id, created_at, match_status, matched_table, matched_agg_fn,
+        original_status_code, original_response_body_hash, original_latency_ms,
+        zemtik_aggregate, zemtik_row_count, zemtik_engine, zemtik_latency_ms,
+        diff_detected, diff_summary, diff_details,
+        original_response_preview, zemtik_response_preview, error_message,
+        request_hash, prompt_hash, intent_confidence, tunnel_model
+        FROM tunnel_audit WHERE 1=1".to_owned();
+
+    let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut idx = 1usize;
+
+    if let Some(ref status) = filters.match_status {
+        sql.push_str(&format!(" AND match_status = ?{idx}"));
+        param_values.push(Box::new(status.clone()));
+        idx += 1;
+    }
+    if let Some(diff) = filters.diff_detected {
+        sql.push_str(&format!(" AND diff_detected = ?{idx}"));
+        param_values.push(Box::new(diff as i64));
+        idx += 1;
+    }
+    if let Some(ref from) = filters.from {
+        sql.push_str(&format!(" AND created_at >= ?{idx}"));
+        param_values.push(Box::new(from.clone()));
+        idx += 1;
+    }
+    if let Some(ref to) = filters.to {
+        sql.push_str(&format!(" AND created_at <= ?{idx}"));
+        param_values.push(Box::new(to.clone()));
+        idx += 1;
+    }
+    if let Some(ref table) = filters.table {
+        sql.push_str(&format!(" AND matched_table = ?{idx}"));
+        param_values.push(Box::new(table.clone()));
+        idx += 1;
+    }
+    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{idx} OFFSET ?{}", idx + 1));
+    param_values.push(Box::new(filters.limit as i64));
+    param_values.push(Box::new(filters.offset as i64));
+
+    let params: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), row_to_tunnel_audit)
+        .context("query tunnel_audit")?;
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row.context("read tunnel_audit row")?);
+    }
+    Ok(results)
+}
+
+/// List tunnel audit records (most recent first).
+pub fn list_tunnel_audits(conn: &Connection, limit: usize) -> anyhow::Result<Vec<TunnelAuditRecord>> {
+    query_tunnel_audits(conn, &TunnelAuditFilters {
+        limit,
+        ..Default::default()
+    })
+}
+
+/// Aggregate summary metrics for the /tunnel/summary endpoint.
+pub struct TunnelSummary {
+    pub total_requests: u64,
+    pub matched_rate: f64,
+    pub diff_rate: f64,
+    pub avg_zemtik_latency_ms: f64,
+}
+
+pub fn tunnel_summary(conn: &Connection) -> anyhow::Result<TunnelSummary> {
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tunnel_audit",
+        [],
+        |r| r.get(0),
+    )?;
+
+    if total == 0 {
+        return Ok(TunnelSummary {
+            total_requests: 0,
+            matched_rate: 0.0,
+            diff_rate: 0.0,
+            avg_zemtik_latency_ms: 0.0,
+        });
+    }
+
+    let matched: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tunnel_audit WHERE match_status = 'matched'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    let diff_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tunnel_audit WHERE diff_detected = 1",
+        [],
+        |r| r.get(0),
+    )?;
+
+    let avg_latency: f64 = conn.query_row(
+        "SELECT COALESCE(AVG(CAST(zemtik_latency_ms AS REAL)), 0.0) FROM tunnel_audit WHERE zemtik_latency_ms IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+
+    Ok(TunnelSummary {
+        total_requests: total as u64,
+        matched_rate: matched as f64 / total as f64,
+        diff_rate: diff_count as f64 / total as f64,
+        avg_zemtik_latency_ms: avg_latency,
+    })
 }

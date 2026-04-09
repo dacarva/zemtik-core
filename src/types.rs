@@ -336,3 +336,77 @@ pub struct EvidencePack {
     #[serde(default)]
     pub actual_row_count: Option<usize>,
 }
+
+// ---------------------------------------------------------------------------
+// Tunnel mode types
+// ---------------------------------------------------------------------------
+
+/// Status of FORK 2 (background verification pipeline) for a tunnel request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelMatchStatus {
+    /// Intent matched + engine ran + zemtik value agrees with OpenAI response (diff within tolerance).
+    Matched,
+    /// Intent matched + engine ran + zemtik value diverges from OpenAI response (diff outside tolerance).
+    Diverged,
+    /// Intent extraction failed (no table identified / ambiguous).
+    Unmatched,
+    /// Engine error or zemtik OpenAI call failed.
+    Error,
+    /// FORK 2 exceeded ZEMTIK_TUNNEL_TIMEOUT_SECS.
+    Timeout,
+    /// Semaphore full — FORK 2 was skipped entirely.
+    Backpressure,
+}
+
+impl TunnelMatchStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Diverged => "diverged",
+            Self::Unmatched => "unmatched",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::Backpressure => "backpressure",
+        }
+    }
+}
+
+/// Audit record stored in tunnel_audit.db for each tunnel request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelAuditRecord {
+    pub id: String,
+    pub receipt_id: Option<String>,
+    pub created_at: String,
+    pub match_status: String,          // TunnelMatchStatus::as_str()
+    pub matched_table: Option<String>,
+    pub matched_agg_fn: Option<String>,
+    pub original_status_code: u16,
+    pub original_response_body_hash: String,
+    pub original_latency_ms: u64,
+    pub zemtik_aggregate: Option<i64>,
+    pub zemtik_row_count: Option<usize>,
+    pub zemtik_engine: Option<String>,
+    pub zemtik_latency_ms: Option<u64>,
+    pub diff_detected: bool,
+    pub diff_summary: Option<String>,
+    pub diff_details: Option<String>,
+    pub original_response_preview: Option<String>,
+    pub zemtik_response_preview: Option<String>,
+    pub error_message: Option<String>,
+    pub request_hash: String,
+    pub prompt_hash: String,
+    pub intent_confidence: Option<f32>,
+    pub tunnel_model: Option<String>,
+}
+
+/// Payload sent from FORK 1 to FORK 2 via oneshot channel.
+/// FORK 1 sends Some(data) on success OR None on error.
+/// FORK 2 treats None as "original request failed" → match_status=Error, no diff.
+#[derive(Debug, Clone)]
+pub struct OriginalResponseData {
+    pub status_code: u16,
+    pub response_body: String,
+    pub response_body_hash: String,
+    pub latency_ms: u64,
+}

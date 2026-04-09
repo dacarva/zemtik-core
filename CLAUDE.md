@@ -26,7 +26,7 @@ Key routing rules:
 
 Write tests in the `tests/` directory, not inline in `src/`. Inline `#[cfg(test)]` modules are only acceptable when tests must access private functions or types that cannot be exposed. In all other cases, add tests to the appropriate `tests/test_<module>.rs` file (or create one if it doesn't exist). New test files follow the naming convention `test_<module>.rs` and import via `use zemtik::<module>::<item>`.
 
-Integration tests live in `tests/integration_proxy.rs`. They spin up the full Axum proxy (`build_proxy_router()`) with a mock OpenAI server, set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` to bypass circuit tools, and cover FastLane and ZK SlowLane routing, CORS, error paths, and the `/health` endpoint. Run them with `cargo test --test integration_proxy`.
+Integration tests live in `tests/integration_proxy.rs` (proxy/FastLane/ZK routing, CORS, `/health`) and `tests/integration_tunnel.rs` (tunnel mode: FORK 1 passthrough, FORK 2 background verification, audit endpoints, match status, dashboard auth). Both spin up the full Axum router with a mock OpenAI server and require `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1`. Run them with `cargo test --test integration_proxy` and `cargo test --test integration_tunnel`.
 
 ## Commands
 
@@ -46,6 +46,9 @@ cargo run -- verify <bundle.zip>
 # List recent receipts
 cargo run -- list
 
+# List recent tunnel audit records (tunnel mode only)
+cargo run -- list-tunnel
+
 # Tests
 cargo test
 
@@ -63,8 +66,10 @@ Zemtik Core is a **Rust + Noir ZK middleware** that enforces zero-knowledge proo
 |------|-------------|--------------|
 | CLI pipeline | `cargo run` | One-shot: seed 500 txs → sign → prove → verify → call OpenAI |
 | Proxy | `cargo run -- proxy` | Axum HTTP server on `:4000`; intercepts `POST /v1/chat/completions`, extracts intent → routes to FastLane or ZK SlowLane → forwards sanitized request |
+| Tunnel | `ZEMTIK_MODE=tunnel cargo run -- proxy` | Transparent passthrough proxy; forwards every request to OpenAI unmodified (FORK 1) while running ZK verification in the background (FORK 2) and logging a comparison audit record. No customer impact. |
 | Verify | `cargo run -- verify <bundle.zip>` | Offline bundle verification via `bb verify` |
 | List | `cargo run -- list` | List recent receipts from `~/.zemtik/receipts.db` |
+| List-tunnel | `cargo run -- list-tunnel` | List recent tunnel audit records from `~/.zemtik/tunnel_audit.db` |
 
 ### Proxy Data Flow (v0.8+)
 
@@ -93,8 +98,9 @@ POST /v1/chat/completions (user prompt)
 
 | File | Role |
 |------|------|
-| `main.rs` | Pipeline orchestrator; CLI arg parsing; routes to proxy / verify / list / pipeline |
-| `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception; FastLane + ZK dispatch |
+| `main.rs` | Pipeline orchestrator; CLI arg parsing; routes to proxy / verify / list / list-tunnel / pipeline |
+| `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception; FastLane + ZK dispatch; tunnel mode routing |
+| `tunnel.rs` | Tunnel mode handlers: `handle_tunnel` (FORK 1 + FORK 2 dispatch), `handle_audit`, `handle_audit_csv`, `handle_summary`, `handle_tunnel_passthrough`; `TunnelAuditRecord` persistence; diff computation |
 | `intent.rs` | `IntentBackend` trait + `RegexBackend` (fallback); dispatches to embedding or regex backend |
 | `intent_embed.rs` | `EmbeddingBackend` (fastembed + BGE-small-en ONNX, CPU-only); schema index builder; cosine similarity |
 | `time_parser.rs` | `DeterministicTimeParser` — Q/H/FY/MMM/relative/YTD patterns; unrecognized → `TimeRangeAmbiguous` |
@@ -128,7 +134,7 @@ Layered resolution order (later overrides earlier):
 
 1. Hardcoded defaults (`~/.zemtik/` subdirs: `circuit/`, `runs/`, `keys/`, `receipts/`, `receipts.db`, `zemtik.db`)
 2. YAML file (`~/.zemtik/config.yaml`)
-3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard), `ZEMTIK_OPENAI_BASE_URL` (default `https://api.openai.com`; override in tests/dev), `ZEMTIK_OPENAI_MODEL` (default `gpt-5.4-nano`; `gpt-5.4-nano` is a real OpenAI model, not a placeholder), `ZEMTIK_SKIP_CIRCUIT_VALIDATION` (`1`|`true`; skips nargo/bb circuit dir check — required in Docker and integration tests))
+3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard), `ZEMTIK_OPENAI_BASE_URL` (default `https://api.openai.com`; override in tests/dev), `ZEMTIK_OPENAI_MODEL` (default `gpt-5.4-nano`; `gpt-5.4-nano` is a real OpenAI model, not a placeholder), `ZEMTIK_SKIP_CIRCUIT_VALIDATION` (`1`|`true`; skips nargo/bb circuit dir check — required in Docker and integration tests), `ZEMTIK_MODE` (`standard`|`tunnel`; default `standard`), `ZEMTIK_TUNNEL_API_KEY` (required when `ZEMTIK_MODE=tunnel`; hard startup error if unset), `ZEMTIK_TUNNEL_MODEL` (default: `ZEMTIK_OPENAI_MODEL`), `ZEMTIK_TUNNEL_TIMEOUT_SECS` (default 180), `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` (default 50), `ZEMTIK_DASHBOARD_API_KEY` (protects `/tunnel/audit` and `/tunnel/summary`; warning if unset in tunnel mode), `ZEMTIK_TUNNEL_AUDIT_DB_PATH` (default `~/.zemtik/tunnel_audit.db`), `ZEMTIK_TUNNEL_DEBUG_PREVIEWS` (`0`|`1`; default `0` — when enabled, stores 500-char plaintext snippets of original LLM responses in the audit DB; disable in production to avoid persisting customer output))
 4. CLI flags (`--port`, `--circuit-dir`)
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end runs.
@@ -157,3 +163,4 @@ Two GitHub Actions workflows:
 - EmbeddingBackend downloads BGE-small-en model (~130MB) on first proxy start to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip. First start can take 30–120s.
 - `IntentBackend` trait: `index_schema(&mut self, schema)` called once at startup; `match_prompt(&self, prompt, k)` returns sorted `Vec<(table_key, score)>`. Add new backends by implementing this trait.
 - **Testing model:** All curl examples, test payloads, and end-to-end tests use `gpt-5.4-nano` (the current default in `src/openai.rs`). `gpt-5.4-nano` is a real OpenAI model (the latest as of 2026-04). Do NOT use `gpt-4o` or other model names in test commands — they won't match the proxy fallback and will pass through unmodified. The model name is configurable via `ZEMTIK_OPENAI_MODEL` env var (see `src/openai.rs`).
+- **Tunnel mode (`ZEMTIK_MODE=tunnel`):** `ZEMTIK_TUNNEL_API_KEY` is a **hard startup error** if unset — proxy refuses to start. This is intentional: verification calls must be billed to zemtik's account, not the pilot customer's. `TunnelMatchStatus` has six variants: `Matched`, `Diverged` (diff outside tolerance), `Unmatched`, `Error`, `Timeout`, `Backpressure`. The `Diverged` variant was added in v0.9.0 — it distinguishes "verification ran but values don't agree" from "verification couldn't run at all". See `src/types.rs:TunnelMatchStatus`.

@@ -36,6 +36,28 @@
 
 ---
 
+## Tunnel Mode deferred items — added from feat/tunnel-mode (2026-04-08)
+
+### Drift alert webhook (P3, v2)
+- **What:** `ZEMTIK_TUNNEL_WEBHOOK_URL` — POST a JSON payload to this URL whenever `diff_detected=true` exceeds a configurable threshold rate (e.g. `ZEMTIK_TUNNEL_ALERT_DIFF_RATE_THRESHOLD=0.1`).
+- **Why:** Today, divergence is only visible via `/tunnel/summary` or `list-tunnel`. A pilot customer's ops team needs a push notification when Zemtik would have caught a real discrepancy, so they can investigate proactively.
+- **Effort:** S (human) → S (CC+gstack)
+- **Depends on:** tunnel mode shipped (feat/tunnel-mode)
+
+### Audit durability on container restart (P3, v2)
+- **What:** Document and default `ZEMTIK_TUNNEL_AUDIT_DB_PATH` to a named Docker volume path so `tunnel_audit.db` survives container recreates (similar to the `receipts.db` volume added in v0.8.2).
+- **Why:** Currently `tunnel_audit.db` is written to `~/.zemtik/tunnel_audit.db` inside the container. If the container is recreated without a volume mount, all audit history is lost. The docker-compose.yml currently has a commented section but no volume is declared.
+- **Effort:** XS (human) → XS (CC+gstack)
+- **Depends on:** tunnel mode shipped
+
+### Interactive HTML dashboard at /tunnel/dashboard (P3, v2)
+- **What:** A single-page HTML dashboard served at `/tunnel/dashboard` (no JS framework) showing a live table of audit records, match/diff rates, and a simple timeline chart.
+- **Why:** The JSON API at `/tunnel/audit` is sufficient for engineers but not for a pilot customer's manager who wants a weekly screenshot for a status update.
+- **Effort:** M (human) → S (CC+gstack)
+- **Depends on:** tunnel mode shipped
+
+---
+
 ## P1 — Gating questions (blocking implementation)
 
 ### SF client demand confirmation (feat/routing-engine, before implementation)
@@ -67,12 +89,8 @@
 
 ## P3 — Tech debt, non-blocking
 
-### Migrate CLI arg parsing to clap
-- **What:** Replace manual `args.get(1)` / `args.get(2)` arg parsing with `clap`.
-- **Why:** Works today with 2 subcommands (`--proxy`, `verify`). Will break cleanly at 3+ subcommands (`list`, `export`, `config`). Manual parsing is error-prone and produces no `--help`.
-- **Effort:** S (human) → S (CC+gstack)
-- **Trigger:** feat/verifier-flow adds `verify` as 2nd subcommand. Migrate before adding a 3rd.
-- **Depends on:** feat/verifier-flow merged
+### ~~Migrate CLI arg parsing to clap~~ ✓ DONE (main.rs already uses clap, 2026-04-08)
+- `use clap::{Parser, Subcommand}` in main.rs. `Commands` enum with `Proxy`, `Verify`, `List` variants. `feat/tunnel-mode` adds `ListTunnel`.
 
 ### ~~bb verify timeout (prevents proxy deadlock)~~ ✓ DONE (fix/pipeline-timing-instrumentation v0.5.2)
 - `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120) controls the timeout. Proxy returns HTTP 504 on expiry.
@@ -421,3 +439,58 @@
 - **How to fix:** Pin the installer scripts with `sha256sum -c` before executing, or copy pre-built, hash-verified binaries from a trusted artifact registry (e.g., GitHub Release asset with verified SHA) rather than running shell-pipe installers as root.
 - **Effort:** S (human: ~1h / CC: ~15min) — update Dockerfile RUN commands, add sha256 verification
 - **Priority:** P1 — fix before marketing the ZK SlowLane Docker path to customers
+
+---
+
+## Tunnel mode — post-pilot improvements (added 2026-04-08, feat/tunnel-mode CEO review)
+
+### Drift alert webhook (P2, post-pilot week 2)
+
+- **What:** POST to `ZEMTIK_TUNNEL_WEBHOOK_URL` when `diff_rate_last_N > threshold` (configurable). Payload JSON with `{n_requests, diff_rate, threshold, sample_record}`. Customer connects to Slack, PagerDuty, or their own system.
+- **Why:** Pilot customer needs proactive alerts when ZK-verified numbers diverge from unverified OpenAI responses. Without this, they do manual polling of `/tunnel/audit`. Transforms zemtik from a passive audit tool into an active data quality monitor.
+- **Pros:** Turns a 4-week eval into an active monitoring setup. Bridges toward production adoption.
+- **Cons:** Requires background aggregation task, HTTP client in tunnel.rs, new config fields. ~150 LOC.
+- **Context:** Decision made during CEO review: defer until pilot customer is onboarded and explicitly requests it. Do not build for a user who doesn't exist yet.
+- **Effort:** M (human: ~3h) → S (CC+gstack: ~30min)
+- **Priority:** P2 — build in week 2 of pilot if requested
+- **Depends on:** `ZEMTIK_MODE=tunnel` shipped and running for a pilot customer
+
+### Tunnel audit durability on restart (P3)
+
+- **What:** At startup in tunnel mode, if `tunnel_audit` and `receipts` tables exist, check if any receipts with `created_at` in the last 180s have no matching `tunnel_audit` entry. Log: `[WARN] N tunnel audit records may be missing due to process restart`.
+- **Why:** When zemtik restarts mid-flight (FORK 2 in progress), audit records for those requests are silently lost. For a compliance pilot, silent gaps in the audit trail undermine trust. A visible warning at startup makes the gap explicit and auditable.
+- **Pros:** 5 minutes of code, changes a silent gap into a visible + logged gap.
+- **Cons:** Adds startup latency if `tunnel_audit` is large (~10ms for 1000 records).
+- **Context:** Raised by Codex outside voice review. Shutdown/restart story was not in the original spec.
+- **Effort:** S (human: ~30min) → XS (CC+gstack: ~5min)
+- **Priority:** P3 — not blocking for pilot launch; add before marketing tunnel mode broadly
+- **Depends on:** tunnel mode shipped
+
+### Migration v6 downgrade documentation (P3, before second customer)
+
+- **What:** Add a note to release notes and TUNNEL_MODE.md: "The `tunnel_audit` table (migration v6) is one-way. Back up your `~/.zemtik/receipts.db` before downgrading zemtik to a version before tunnel mode."
+- **Why:** Silent data loss on downgrade is worse than a downgrade failure. A compliance pilot customer will have audit records they need to retain.
+- **Effort:** XS (human: ~5min / CC: ~2min)
+- **Priority:** P3 — add before shipping to second customer
+- **Depends on:** tunnel mode shipped (migration v6 merged)
+
+### Semaphore permits in /health (P3)
+
+- **What:** Add `"tunnel_semaphore_available_permits": N` to the `/health` JSON response when running in tunnel mode.
+- **Why:** A platform engineer monitoring the proxy can see backpressure building up before it starts dropping FORK 2 tasks. Currently /health has no visibility into tunnel mode state.
+- **Pros:** ~5 LOC. Enables proactive scaling decisions.
+- **Cons:** Minor: slightly increases /health response size.
+- **Effort:** XS (human: ~15min / CC: ~5min)
+- **Priority:** P3 — not blocking for pilot, useful for week 2+ monitoring
+- **Depends on:** tunnel mode shipped
+
+### HTML dashboard /tunnel/audit (P2, post-pilot)
+
+- **What:** `GET /tunnel/audit` with `Accept: text/html` (or no `Accept` header) returns an HTML page with a sortable table of audit records. Similar to the existing `/verify/{id}` HTML page.
+- **Why:** If the pilot customer wants to share audit results with non-technical stakeholders (compliance officer, CFO), a navigable HTML table is more convincing than a raw JSON blob.
+- **Pros:** ~100 LOC. Reuses existing HTML templating pattern from verify.rs. High perceived value, low effort.
+- **Cons:** Content negotiation adds a small amount of complexity to handle_tunnel_audit.
+- **Context:** Deferred from initial pilot launch per CEO review. Build in week 2 if customer requests it.
+- **Effort:** S (human: ~2h / CC: ~20min)
+- **Priority:** P2 — build in week 2 of pilot if requested
+- **Depends on:** tunnel mode shipped, pilot customer onboarded
