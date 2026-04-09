@@ -15,60 +15,67 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::config::{AggFn, AppConfig};
+use crate::config::{AggFn, AppConfig, ZemtikMode};
 use crate::intent::IntentBackend;
 use crate::types::{
-    AuditRecord, EngineResult, EvidencePack, IntentResult, MessageContent, OpenAiRequestLog,
-    OpenAiResponseLog, QueryParams, Route, SignatureData, TokenUsage,
+    AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
+    OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route, SignatureData, TokenUsage,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
-struct ProxyState {
-    http_client: reqwest::Client,
+pub(crate) struct ProxyState {
+    pub(crate) http_client: reqwest::Client,
     /// Per-aggregation-type locks for ZK pipeline executions.
     /// Each mini-circuit uses its own directory, so SUM and COUNT can run concurrently.
     /// Two requests hitting the same aggregation type still contend on Prover.toml.
-    pipeline_locks: HashMap<AggFn, tokio::sync::Mutex<()>>,
+    pub(crate) pipeline_locks: HashMap<AggFn, tokio::sync::Mutex<()>>,
     /// Lock held across BOTH SUM and COUNT pipeline runs for AVG queries.
     /// Ensures both proofs operate on the same 500 transactions.
-    avg_pipeline_lock: tokio::sync::Mutex<()>,
+    pub(crate) avg_pipeline_lock: tokio::sync::Mutex<()>,
     /// File-based receipts DB, shared across requests.
     /// WARNING: std::sync::MutexGuard<Connection> must NEVER be held across an .await point.
     /// Lock inside spawn_blocking or in a synchronous scope that drops before any .await.
-    receipts_db: std::sync::Mutex<Connection>,
+    pub(crate) receipts_db: std::sync::Mutex<Connection>,
     /// Separate in-memory ledger DB for FastLane reads (avoids contention with receipts_db).
     /// WARNING: std::sync::MutexGuard<Connection> must NEVER be held across an .await point.
-    ledger_db: std::sync::Mutex<Connection>,
+    pub(crate) ledger_db: std::sync::Mutex<Connection>,
     /// Application configuration (ports, paths).
-    config: Arc<AppConfig>,
+    pub(crate) config: Arc<AppConfig>,
     /// Bank signing key bytes (loaded once at startup, passed into spawn_blocking).
-    signing_key_bytes: Vec<u8>,
+    pub(crate) signing_key_bytes: Vec<u8>,
     /// SHA-256 of schema_config.json bytes (empty string when schema absent).
-    schema_config_hash: String,
+    pub(crate) schema_config_hash: String,
     /// Intent matching backend — static after startup, no lock needed.
-    intent_backend: Arc<dyn IntentBackend>,
+    pub(crate) intent_backend: Arc<dyn IntentBackend>,
     /// OpenAI base URL for forwarding requests. Injected from AppConfig so tests
     /// can point this at a wiremock server instead of api.openai.com.
-    openai_base_url: String,
+    pub(crate) openai_base_url: String,
+    /// Semaphore for bounding concurrent FORK 2 background tasks (tunnel mode only).
+    pub(crate) tunnel_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Separate SQLite connection for tunnel audit records (tunnel mode only).
+    /// WARNING: Never hold MutexGuard across .await.
+    pub(crate) tunnel_audit_db: Option<std::sync::Mutex<Connection>>,
+    /// Count of requests where FORK 2 was skipped due to semaphore exhaustion.
+    pub(crate) backpressure_count: std::sync::atomic::AtomicU64,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
-struct ZkPipelineResult {
-    txns_len: usize,
-    batch_count: usize,
-    aggregate: u64,
-    proof_status: &'static str,
-    circuit_execution_secs: f32,
-    first_sig: SignatureData,
-    proof_hex: Option<String>,
-    vk_hex: Option<String>,
-    fully_verifiable: bool,
-    bundle_result: Option<bundle::BundleResult>,
+pub(crate) struct ZkPipelineResult {
+    pub(crate) txns_len: usize,
+    pub(crate) batch_count: usize,
+    pub(crate) aggregate: u64,
+    pub(crate) proof_status: &'static str,
+    pub(crate) circuit_execution_secs: f32,
+    pub(crate) first_sig: SignatureData,
+    pub(crate) proof_hex: Option<String>,
+    pub(crate) vk_hex: Option<String>,
+    pub(crate) fully_verifiable: bool,
+    pub(crate) bundle_result: Option<bundle::BundleResult>,
     /// SHA-256 of the ZK payload JSON sent to the LLM (Rust-layer commitment).
     /// None when fully_verifiable=false — no bundle artifact exists to match against.
-    outgoing_prompt_hash: Option<String>,
+    pub(crate) outgoing_prompt_hash: Option<String>,
     /// Number of real (non-dummy padding) rows included in the proof.
-    actual_row_count: usize,
+    pub(crate) actual_row_count: usize,
 }
 
 /// Build the Axum router with all state wired up. Extracted from `run_proxy()` so
@@ -154,6 +161,16 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
     pipeline_locks.insert(AggFn::Sum, tokio::sync::Mutex::new(()));
     pipeline_locks.insert(AggFn::Count, tokio::sync::Mutex::new(()));
 
+    // Initialize tunnel-mode-specific fields.
+    let (tunnel_semaphore, tunnel_audit_db) = if config.mode == ZemtikMode::Tunnel {
+        let sem = Arc::new(tokio::sync::Semaphore::new(config.tunnel_semaphore_permits));
+        let audit_conn = receipts::open_tunnel_audit_db(&config.tunnel_audit_db_path)
+            .context("open tunnel audit DB")?;
+        (Some(sem), Some(std::sync::Mutex::new(audit_conn)))
+    } else {
+        (None, None)
+    };
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_locks,
@@ -165,6 +182,9 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         schema_config_hash,
         intent_backend,
         openai_base_url,
+        tunnel_semaphore,
+        tunnel_audit_db,
+        backpressure_count: std::sync::atomic::AtomicU64::new(0),
     });
 
     // If any configured origin is "*", use the wildcard policy.
@@ -187,13 +207,22 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .allow_headers(tower_http::cors::Any)
     };
 
-    let app = Router::new()
-        .route("/health", get(handle_health))
-        .route("/v1/chat/completions", post(handle_chat_completions))
-        .route("/verify/{id}", get(handle_verify))
-        .route("/{*path}", any(handle_passthrough))
-        .layer(cors)
-        .with_state(state);
+    let app = match config.mode {
+        ZemtikMode::Standard => Router::new()
+            .route("/health", get(handle_health))
+            .route("/v1/chat/completions", post(handle_chat_completions))
+            .route("/verify/{id}", get(handle_verify))
+            .route("/{*path}", any(handle_passthrough)),
+        ZemtikMode::Tunnel => Router::new()
+            .route("/health", get(handle_health))
+            .route("/v1/chat/completions", post(crate::tunnel::handle_tunnel))
+            .route("/tunnel/audit", get(crate::tunnel::handle_audit))
+            .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
+            .route("/tunnel/summary", get(crate::tunnel::handle_summary))
+            .route("/verify/{id}", get(handle_verify))
+            .route("/{*path}", any(crate::tunnel::handle_tunnel_passthrough)),
+    };
+    let app = app.layer(cors).with_state(state);
 
     Ok(app)
 }
@@ -201,6 +230,13 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
 /// Entry point for proxy mode. Starts Axum on the configured port.
 pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     let addr = config.bind_addr.clone();
+    let is_tunnel = config.mode == ZemtikMode::Tunnel;
+    let tunnel_model = config.tunnel_model.clone()
+        .unwrap_or_else(|| config.openai_model.clone());
+    let tunnel_permits = config.tunnel_semaphore_permits;
+    let tunnel_timeout = config.tunnel_timeout_secs;
+    let tunnel_api_key_missing = is_tunnel && config.tunnel_api_key.is_none();
+
     let app = build_proxy_router(config).await?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
@@ -208,19 +244,36 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
     println!("║   Zemtik Proxy — ZK Middleware for Enterprise AI ║");
     println!("╚══════════════════════════════════════════════════╝");
     println!();
-    println!("[PROXY] Listening on http://{}", addr);
-    println!(
-        "[PROXY] Intercepts POST /v1/chat/completions → ZK pipeline → forwards to OpenAI"
-    );
-    println!(
-        "[PROXY] Point your app to http://{} instead of api.openai.com",
-        addr
-    );
-    println!(
-        "[PROXY] Verify receipts at http://{}/verify/<bundle-id>",
-        addr
-    );
-    println!();
+
+    if is_tunnel {
+        println!("[TUNNEL MODE] Zemtik is running in transparent verification mode.");
+        println!("[TUNNEL MODE] Audit records:    http://{}/tunnel/audit", addr);
+        println!("[TUNNEL MODE] Summary metrics:  http://{}/tunnel/summary", addr);
+        println!(
+            "[TUNNEL MODE] ZEMTIK_TUNNEL_MODEL: {} | permits: {} | timeout: {}s",
+            tunnel_model, tunnel_permits, tunnel_timeout
+        );
+        if tunnel_api_key_missing {
+            println!("[WARN] ZEMTIK_TUNNEL_API_KEY not set — using OPENAI_API_KEY for verification calls.");
+            println!("[WARN]   Zemtik's verification calls will be billed to the customer's API account.");
+            println!("[WARN]   Set ZEMTIK_TUNNEL_API_KEY to use a separate billing account.");
+        }
+        println!();
+    } else {
+        println!("[PROXY] Listening on http://{}", addr);
+        println!(
+            "[PROXY] Intercepts POST /v1/chat/completions → ZK pipeline → forwards to OpenAI"
+        );
+        println!(
+            "[PROXY] Point your app to http://{} instead of api.openai.com",
+            addr
+        );
+        println!(
+            "[PROXY] Verify receipts at http://{}/verify/<bundle-id>",
+            addr
+        );
+        println!();
+    }
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -352,32 +405,27 @@ async fn handle_chat_completions(
     }
 }
 
-/// Handle a FastLane request: DB sum → attestation → synthetic evidence response.
-#[allow(clippy::too_many_arguments)]
-async fn handle_fast_lane(
-    state: Arc<ProxyState>,
-    mut body: Value,
-    api_key: String,
-    request_hash: String,
-    prompt_hash: String,
-    intent_result: crate::types::IntentResult,
+/// Output of the FastLane engine: computed aggregate + table config for the caller.
+pub(crate) struct FastLaneEngineOutput {
+    pub(crate) result: FastLaneResult,
+    pub(crate) table_config: crate::config::TableConfig,
+    pub(crate) metric_label: String,
+}
+
+/// Run the FastLane engine (DB aggregate → BabyJubJub attestation).
+/// Extracted from handle_fast_lane so tunnel.rs can call the engine without the HTTP layer.
+pub(crate) async fn run_fast_lane_engine(
+    state: &Arc<ProxyState>,
+    intent: &IntentResult,
     effective_client_id: i64,
-    total_start: Instant,
-) -> Result<Response, ProxyError> {
-    println!(
-        "[FAST] FastLane route → table='{}' start={} end={}",
-        intent_result.table, intent_result.start_unix_secs, intent_result.end_unix_secs
-    );
-
-    let category_name = intent_result.category_name.clone();
-    let start = intent_result.start_unix_secs;
-    let end = intent_result.end_unix_secs;
+) -> Result<FastLaneEngineOutput, ProxyError> {
+    let category_name = intent.category_name.clone();
+    let start = intent.start_unix_secs;
+    let end = intent.end_unix_secs;
     let key_bytes = state.signing_key_bytes.clone();
-    let schema_config_hash = state.schema_config_hash.clone();
     let client_id = effective_client_id;
-    let table = intent_result.table.clone();
+    let table = intent.table.clone();
 
-    // Resolve TableConfig for this table (routing guarantees it exists in schema).
     let schema = state.config.schema_config.as_ref()
         .ok_or_else(|| ProxyError::Internal(anyhow::anyhow!("schema_config missing in FastLane")))?;
     let table_config = schema.tables.get(&table).cloned()
@@ -387,7 +435,6 @@ async fn handle_fast_lane(
     let engine_result: EngineResult = if state.config.use_supabase_fast_lane() {
         let url = state.config.supabase_url.as_ref().unwrap();
         let svc_key = state.config.supabase_service_key.as_ref().unwrap();
-        // Supabase path: query PostgREST with generic aggregate, then sign the result.
         let physical_table = table_config.resolved_table(&table).to_owned();
         let (aggregate, row_count) = db::query_aggregate_table(
             &state.http_client,
@@ -426,11 +473,10 @@ async fn handle_fast_lane(
         .map_err(|e| ProxyError::Internal(anyhow::anyhow!("spawn_blocking join: {}", e)))?
         .map_err(ProxyError::Internal)?
     } else {
-        // SQLite path (local dev / demo mode): in-memory ledger with seeded data.
-        let state2 = Arc::clone(&state);
+        let state2 = Arc::clone(state);
         let category_name_blocking = category_name.clone();
         let table_key_blocking = table.clone();
-        let table_config_blocking = table_config.clone(); // clone for 'static bound
+        let table_config_blocking = table_config.clone();
         tokio::task::spawn_blocking(move || {
             let guard = state2.ledger_db
                 .lock()
@@ -459,6 +505,34 @@ async fn handle_fast_lane(
             return Err(ProxyError::Internal(anyhow::anyhow!("FastLane sign error: {}", e)));
         }
     };
+
+    Ok(FastLaneEngineOutput { result: fl, table_config, metric_label })
+}
+
+/// Handle a FastLane request: DB sum → attestation → synthetic evidence response.
+#[allow(clippy::too_many_arguments)]
+async fn handle_fast_lane(
+    state: Arc<ProxyState>,
+    mut body: Value,
+    api_key: String,
+    request_hash: String,
+    prompt_hash: String,
+    intent_result: crate::types::IntentResult,
+    effective_client_id: i64,
+    total_start: Instant,
+) -> Result<Response, ProxyError> {
+    println!(
+        "[FAST] FastLane route → table='{}' start={} end={}",
+        intent_result.table, intent_result.start_unix_secs, intent_result.end_unix_secs
+    );
+
+    let schema_config_hash = state.schema_config_hash.clone();
+    let category_name = intent_result.category_name.clone();
+
+    let engine_out = run_fast_lane_engine(&state, &intent_result, effective_client_id).await?;
+    let fl = engine_out.result;
+    let table_config = engine_out.table_config;
+    let metric_label = engine_out.metric_label;
 
     let receipt_id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
@@ -1103,7 +1177,7 @@ impl Drop for RunDirGuard {
 
 /// Run the full ZK pipeline (DB → sign → circuit → proof → bundle).
 /// Called from within spawn_blocking so DbBackend's !Sync is not an issue.
-async fn run_zk_pipeline(
+pub(crate) async fn run_zk_pipeline(
     config: Arc<AppConfig>,
     key_bytes: Vec<u8>,
     request_hash: String,
@@ -1266,7 +1340,7 @@ async fn run_zk_pipeline(
 ///
 /// Evidence model: "zk_composite+attestation" — numerator and denominator are each
 /// independently ZK-proven; the division step is attested (not ZK-proven).
-async fn run_avg_pipeline(
+pub(crate) async fn run_avg_pipeline(
     state: Arc<ProxyState>,
     request_hash: String,
     prompt_hash: String,
@@ -1374,17 +1448,32 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
             )
         }
     } else {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})),
-        )
+        let mut body = serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")});
+        if let Some(obj) = body.as_object_mut() {
+            let mode_str = match state.config.mode {
+                crate::config::ZemtikMode::Tunnel => "tunnel",
+                crate::config::ZemtikMode::Standard => "standard",
+            };
+            obj.insert("mode".to_string(), serde_json::json!(mode_str));
+            // Tunnel mode: expose semaphore utilization and backpressure counter.
+            if let Some(ref sem) = state.tunnel_semaphore {
+                use std::sync::atomic::Ordering;
+                obj.insert("tunnel_semaphore_available".to_string(),
+                    serde_json::json!(sem.available_permits()));
+                obj.insert("tunnel_semaphore_capacity".to_string(),
+                    serde_json::json!(state.config.tunnel_semaphore_permits));
+                obj.insert("tunnel_backpressure_count".to_string(),
+                    serde_json::json!(state.backpressure_count.load(Ordering::Relaxed)));
+            }
+        }
+        (StatusCode::OK, Json(body))
     }
 }
 
 /// Transparent passthrough for non-intercepted routes.
 async fn handle_passthrough() -> impl IntoResponse {
     (
-        StatusCode::NOT_IMPLEMENTED,
+        StatusCode::NOT_FOUND,
         Json(serde_json::json!({
             "error": {
                 "message": "Zemtik proxy only intercepts POST /v1/chat/completions. \
@@ -1399,11 +1488,22 @@ async fn handle_passthrough() -> impl IntoResponse {
 // Error type: typed variants for 500 (Internal) and 504 (Timeout)
 // ---------------------------------------------------------------------------
 
-enum ProxyError {
+pub(crate) enum ProxyError {
     Internal(anyhow::Error),
     Timeout(String),
     BadRequest(String),
     UnprocessableEntity(String),
+}
+
+impl std::fmt::Debug for ProxyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyError::Internal(e) => write!(f, "ProxyError::Internal({:?})", e),
+            ProxyError::Timeout(s) => write!(f, "ProxyError::Timeout({:?})", s),
+            ProxyError::BadRequest(s) => write!(f, "ProxyError::BadRequest({:?})", s),
+            ProxyError::UnprocessableEntity(s) => write!(f, "ProxyError::UnprocessableEntity({:?})", s),
+        }
+    }
 }
 
 impl IntoResponse for ProxyError {

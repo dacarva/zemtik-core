@@ -34,6 +34,12 @@ enum Commands {
     },
     /// List recent receipts
     List,
+    /// List recent tunnel audit records (requires ZEMTIK_MODE=tunnel history)
+    ListTunnel {
+        /// Maximum number of records to show (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -51,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
             Some(Commands::Proxy) => Command::Proxy,
             Some(Commands::Verify { path }) => Command::Verify(path.clone()),
             Some(Commands::List) => Command::List,
+            Some(Commands::ListTunnel { .. }) => Command::ListTunnel,
             None => Command::Pipeline,
         },
     };
@@ -64,6 +71,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::List => {
             return run_list(app_config);
+        }
+        Command::ListTunnel => {
+            let limit = match &cli.command {
+                Some(Commands::ListTunnel { limit }) => *limit,
+                _ => 20,
+            };
+            return run_list_tunnel(app_config, limit);
         }
         Command::Pipeline => {} // fall through to default pipeline
     }
@@ -381,5 +395,38 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
         );
     }
     println!("\n{} receipt(s) total.", list.len());
+    Ok(())
+}
+
+fn run_list_tunnel(config: config::AppConfig, limit: usize) -> anyhow::Result<()> {
+    let conn = receipts::open_tunnel_audit_db(&config.tunnel_audit_db_path)
+        .context("open tunnel audit DB")?;
+    let list = receipts::list_tunnel_audits(&conn, limit).context("list tunnel audits")?;
+
+    if list.is_empty() {
+        println!("No tunnel audit records found. Run zemtik with ZEMTIK_MODE=tunnel to generate records.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10}  {:<10}  {:<25}  {:<12}  {:<20}  {:<6}  {}",
+        "ID", "Receipt", "Created At", "Status", "Table", "Diff", "Summary"
+    );
+    println!("{}", "-".repeat(120));
+
+    for r in &list {
+        let id_short = if r.id.len() >= 8 { &r.id[..8] } else { &r.id };
+        let receipt_short = r.receipt_id.as_deref()
+            .map(|s| if s.len() >= 8 { &s[..8] } else { s })
+            .unwrap_or("-");
+        let table = r.matched_table.as_deref().unwrap_or("-");
+        let diff = if r.diff_detected { "yes" } else { "no" };
+        let summary = r.diff_summary.as_deref().unwrap_or("-");
+        println!(
+            "{:<10}  {:<10}  {:<25}  {:<12}  {:<20}  {:<6}  {}",
+            id_short, receipt_short, r.created_at, r.match_status, table, diff, summary,
+        );
+    }
+    println!("\n{} tunnel audit record(s) shown (limit: {}).", list.len(), limit);
     Ok(())
 }

@@ -60,6 +60,20 @@ You can mix layers freely. Most deployments use only `.env` + `schema_config.jso
 | `ZEMTIK_OPENAI_BASE_URL` | `https://api.openai.com` | URL | Base URL for OpenAI API calls. Override in tests or dev to point at a mock server (e.g. `http://localhost:3000`). |
 | `ZEMTIK_OPENAI_MODEL` | `gpt-5.4-nano` | model identifier | OpenAI model used in CLI pipeline and proxy forwarding. `gpt-5.4-nano` is the current default. Set to any Chat Completions-compatible model. |
 
+### Tunnel mode (v0.9.0+)
+
+Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNNEL_MODE.md](TUNNEL_MODE.md) for full details.
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_MODE` | `standard` | `standard`, `tunnel` | Operating mode. `tunnel` enables transparent forwarding + background ZK verification. Unrecognized values are rejected at startup. |
+| `ZEMTIK_TUNNEL_API_KEY` | — | OpenAI API key | Key forwarded to OpenAI in FORK 1. Falls back to client's own `Authorization` header if unset. |
+| `ZEMTIK_TUNNEL_MODEL` | `gpt-5.4-nano` | model identifier | Model used by Zemtik's background verification pipeline. |
+| `ZEMTIK_TUNNEL_TIMEOUT_SECS` | `180` | positive integer | Seconds FORK 2 is allowed to run before `match_status=timeout`. |
+| `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` | `50` | positive integer | Max concurrent background verifications. Excess requests get `x-zemtik-verified: false`. |
+| `ZEMTIK_DASHBOARD_API_KEY` | — | string | If set, `/tunnel/audit`, `/tunnel/audit/csv`, and `/tunnel/summary` require `Authorization: Bearer <key>`. |
+| `ZEMTIK_TUNNEL_AUDIT_DB_PATH` | `~/.zemtik/tunnel_audit.db` | file path | Path to the SQLite audit database (WAL mode, separate from receipts.db). |
+
 ### ZK pipeline
 
 | Variable | Default | Values | Description |

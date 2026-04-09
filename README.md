@@ -130,6 +130,38 @@ Unknown tables that are not in `schema_config.json` always route to ZK SlowLane 
 
 ---
 
+## Tunnel Mode (Pilot Evaluation)
+
+Tunnel Mode is designed for customers who want to evaluate Zemtik without any risk to their production traffic. Set `ZEMTIK_MODE=tunnel` and Zemtik becomes a **transparent passthrough proxy** — every request is forwarded to OpenAI exactly as received (FORK 1) while Zemtik runs its verification pipeline in the background (FORK 2) and logs a comparison audit record.
+
+```
+Client → Zemtik (tunnel mode) → OpenAI     ← FORK 1: customer traffic, unmodified
+                      └→ ZK Pipeline       ← FORK 2: background verification, no customer impact
+                      └→ tunnel_audit.db   ← Comparison logged: matched / divergence / unmatched
+```
+
+The customer sees zero latency penalty and zero risk of broken requests. Zemtik learns how well its verification matches real responses before any enforcement is turned on.
+
+**Quick start:**
+```bash
+export ZEMTIK_MODE=tunnel
+export ZEMTIK_TUNNEL_API_KEY=sk-...
+export ZEMTIK_DASHBOARD_API_KEY=secret
+cargo run -- proxy
+
+# Check match rates after sending traffic
+curl -H "Authorization: Bearer secret" http://localhost:4000/tunnel/summary
+```
+
+Response headers added in tunnel mode:
+- `x-zemtik-mode: tunnel` — always present
+- `x-zemtik-verified: true/false` — `false` when backpressure prevented verification
+- `x-zemtik-receipt-id: <uuid>` — correlates with audit database entry
+
+See [docs/TUNNEL_MODE.md](docs/TUNNEL_MODE.md) for the full configuration reference, audit record schema, and dashboard endpoint documentation.
+
+---
+
 ## Where Zemtik Applies
 
 Zemtik addresses a specific problem: **your data contains rows you cannot send to an LLM, but your business needs answers from those rows.** The pattern recurs across industries wherever regulation, privilege, or competitive sensitivity governs data residency.

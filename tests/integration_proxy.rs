@@ -249,9 +249,9 @@ async fn fast_lane_count_roundtrip() {
     assert_eq!(engine, "fast_lane", "expected x-zemtik-engine: fast_lane");
 }
 
-/// POST /v1/embeddings returns 501 (passthrough — only /v1/chat/completions is intercepted).
+/// POST /v1/embeddings returns 404 (passthrough — only /v1/chat/completions is intercepted).
 #[tokio::test]
-async fn passthrough_returns_501() {
+async fn passthrough_returns_404() {
     let (addr, _mock) = spawn_test_proxy().await;
     let client = reqwest::Client::new();
 
@@ -263,7 +263,7 @@ async fn passthrough_returns_501() {
         .await
         .expect("POST /v1/embeddings failed");
 
-    assert_eq!(resp.status(), 501, "expected 501 for passthrough route");
+    assert_eq!(resp.status(), 404, "expected 404 for passthrough route");
 
     let body: Value = resp.json().await.expect("response not JSON");
     assert_eq!(

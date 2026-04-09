@@ -42,6 +42,14 @@ services:
       - ZEMTIK_CLIENT_ID=${ZEMTIK_CLIENT_ID:-123}
       # CORS: allow all origins for demo. Restrict in production.
       - ZEMTIK_CORS_ORIGINS=*
+      # --- Tunnel Mode (pilot evaluation) ---
+      # Uncomment these three lines to run Zemtik in transparent verification mode.
+      # Tunnel mode forwards all traffic to OpenAI untouched while running ZK
+      # verification in the background and logging comparison results. Safe to
+      # enable in production — no customer request or response is ever modified.
+      # - ZEMTIK_MODE=tunnel
+      # - ZEMTIK_TUNNEL_API_KEY=${OPENAI_API_KEY}
+      # - ZEMTIK_DASHBOARD_API_KEY=${ZEMTIK_DASHBOARD_API_KEY:-changeme}
       # Store receipts.db inside the persisted receipts/ directory so it survives restarts.
       # Without this, /verify/<id> links break after container recreate.
       - ZEMTIK_RECEIPTS_DB_PATH=/home/zemtik/.zemtik/receipts/receipts.db
