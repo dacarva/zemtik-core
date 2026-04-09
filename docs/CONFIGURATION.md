@@ -67,7 +67,7 @@ Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNN
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
 | `ZEMTIK_MODE` | `standard` | `standard`, `tunnel` | Operating mode. `tunnel` enables transparent forwarding + background ZK verification. Unrecognized values are rejected at startup. |
-| `ZEMTIK_TUNNEL_API_KEY` | — | OpenAI API key | Key forwarded to OpenAI in FORK 1. Falls back to client's own `Authorization` header if unset. |
+| `ZEMTIK_TUNNEL_API_KEY` | — | OpenAI API key | **Required in tunnel mode.** Key forwarded to OpenAI in FORK 1 and used for FORK 2 verification calls. Proxy refuses to start if unset — ensures verification is billed to zemtik, not the pilot customer. |
 | `ZEMTIK_TUNNEL_MODEL` | `gpt-5.4-nano` | model identifier | Model used by Zemtik's background verification pipeline. |
 | `ZEMTIK_TUNNEL_TIMEOUT_SECS` | `180` | positive integer | Seconds FORK 2 is allowed to run before `match_status=timeout`. |
 | `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` | `50` | positive integer | Max concurrent background verifications. Excess requests get `x-zemtik-verified: false`. |
@@ -283,6 +283,7 @@ The regex backend uses keyword and substring matching against table keys and ali
 ├── schema_config.json    # Table definitions (required for proxy)
 ├── zemtik.db             # SQLite transaction database (sqlite backend)
 ├── receipts.db           # Receipts ledger
+├── tunnel_audit.db       # Tunnel mode audit log (created when ZEMTIK_MODE=tunnel)
 ├── keys/
 │   └── bank_sk           # BabyJubJub private key (mode 0600)
 ├── circuit/              # Compiled Noir artifacts (Prover.toml, bytecode)

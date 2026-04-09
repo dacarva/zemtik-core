@@ -61,7 +61,7 @@ Client
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZEMTIK_MODE` | `standard` | Set to `tunnel` to enable tunnel mode. Other values are rejected at startup. |
-| `ZEMTIK_TUNNEL_API_KEY` | — | API key forwarded to OpenAI in FORK 1. Falls back to the client's own `Authorization: Bearer` header if not set. Warning printed at startup if missing. |
+| `ZEMTIK_TUNNEL_API_KEY` | — | **Required.** API key forwarded to OpenAI in FORK 1 (and used for FORK 2 verification calls). Proxy refuses to start if unset — verification calls must be billed to zemtik, not the pilot customer. |
 | `ZEMTIK_TUNNEL_MODEL` | `gpt-5.4-nano` | Model used by Zemtik's FORK 2 verification pipeline. Should match what the customer sends. |
 | `ZEMTIK_TUNNEL_TIMEOUT_SECS` | `180` | Seconds FORK 2 is allowed to run before it is cancelled and `match_status=timeout` is recorded. |
 | `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` | `50` | Max concurrent FORK 2 verifications. Excess requests get `match_status=backpressure` and `x-zemtik-verified: false`. |
@@ -105,7 +105,8 @@ Default tolerance when not set: `0.01` (1%).
 
 | Value | Meaning |
 |-------|---------|
-| `matched` | FORK 2 completed; diff was computed and recorded. |
+| `matched` | FORK 2 completed; diff was within tolerance. |
+| `diverged` | FORK 2 completed; diff exceeded tolerance (`diff_detected=true`). Zemtik and OpenAI returned different numbers. |
 | `unmatched` | Intent extraction failed or returned no table; Zemtik could not verify this prompt type. No diff computed. |
 | `error` | FORK 2 encountered an unexpected error during verification. `error_message` field contains details. |
 | `timeout` | FORK 2 exceeded `ZEMTIK_TUNNEL_TIMEOUT_SECS`. |
@@ -193,7 +194,7 @@ Default tolerance when not set: `0.01` (1%).
 
 | Parameter | Values | Description |
 |-----------|--------|-------------|
-| `match_status` | `matched`, `unmatched`, `error`, `timeout`, `backpressure` | Filter by status. |
+| `match_status` | `matched`, `diverged`, `unmatched`, `error`, `timeout`, `backpressure` | Filter by status. |
 | `diff_detected` | `true`, `false` | Filter by whether a diff was found. |
 | `from` | ISO-8601 datetime | Records created at or after this time. |
 | `to` | ISO-8601 datetime | Records created at or before this time. |
@@ -256,7 +257,7 @@ Every `POST /v1/chat/completions` response in tunnel mode includes:
 ## Startup checklist
 
 1. `ZEMTIK_MODE=tunnel` — required to activate tunnel mode.
-2. `ZEMTIK_TUNNEL_API_KEY` — set to your OpenAI key; if unset, falls back to client Bearer token (warning printed).
+2. `ZEMTIK_TUNNEL_API_KEY` — **required**; proxy will not start without it. Use zemtik's own OpenAI key, not the customer's.
 3. `ZEMTIK_DASHBOARD_API_KEY` — set to protect `/tunnel/audit` endpoints (warning printed if missing).
 4. `schema_config.json` — must contain the tables your customers query.
 5. Health check: `curl http://localhost:4000/health` — verify `tunnel_semaphore_available` is present.
