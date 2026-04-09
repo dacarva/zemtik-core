@@ -93,6 +93,7 @@ async fn spawn_tunnel_proxy() -> (SocketAddr, MockServer) {
     config.schema_config_hash = Some("test-schema-hash".to_owned());
     config.tunnel_semaphore_permits = 2; // small for backpressure tests
     config.tunnel_timeout_secs = 5;
+    config.dashboard_api_key = Some("test-dashboard-key".to_owned());
 
     let app = build_proxy_router(config)
         .await
@@ -384,6 +385,7 @@ async fn test_tunnel_audit_endpoint_returns_json() {
 
     let resp = client
         .get(format!("http://{}/tunnel/audit", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/audit failed");
@@ -408,6 +410,7 @@ async fn test_tunnel_audit_filter_by_status() {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("http://{}/tunnel/audit?match_status=matched", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/audit?match_status=matched failed");
@@ -433,6 +436,7 @@ async fn test_tunnel_audit_filter_by_diff() {
 
     let resp = client
         .get(format!("http://{}/tunnel/audit?diff_detected=true", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/audit?diff_detected=true failed");
@@ -453,6 +457,7 @@ async fn test_tunnel_audit_csv() {
 
     let resp = client
         .get(format!("http://{}/tunnel/audit/csv", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/audit/csv failed");
@@ -490,6 +495,7 @@ async fn test_tunnel_summary() {
 
     let resp = client
         .get(format!("http://{}/tunnel/summary", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/summary failed");
@@ -560,6 +566,7 @@ async fn test_tunnel_passthrough_no_audit_record() {
     // Audit should be empty (passthrough does not write records).
     let audit_resp: Value = client
         .get(format!("http://{}/tunnel/audit", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/audit failed")
@@ -698,6 +705,7 @@ async fn test_tunnel_summary_empty() {
 
     let resp: Value = client
         .get(format!("http://{}/tunnel/summary", addr))
+        .header("authorization", "Bearer test-dashboard-key")
         .send()
         .await
         .expect("GET /tunnel/summary failed")
@@ -788,4 +796,86 @@ fn test_zemtik_mode_tunnel_parses() {
     env.insert("ZEMTIK_MODE".to_owned(), "tunnel".to_owned());
     let config = load_from_sources(None, &env, &CliArgs::default()).expect("load config");
     assert_eq!(config.mode, ZemtikMode::Tunnel);
+}
+
+// ---------------------------------------------------------------------------
+// 25. Streaming path — forward_streaming returns 200 with tunnel headers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_tunnel_streaming_happy_path() {
+    let (addr, mock) = spawn_tunnel_proxy().await;
+
+    // Mount an SSE mock that returns two data chunks and [DONE].
+    let sse_body = concat!(
+        "data: {\"id\":\"chatcmpl-stream-001\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-stream-001\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_bytes(sse_body.as_bytes()),
+        )
+        .mount(&mock)
+        .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend total"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("POST /v1/chat/completions streaming failed");
+
+    assert_eq!(resp.status(), 200, "streaming FORK 1 must return 200");
+    assert_eq!(
+        resp.headers().get("x-zemtik-mode").map(|v| v.to_str().unwrap_or("")),
+        Some("tunnel"),
+        "x-zemtik-mode header must be 'tunnel' on streaming response"
+    );
+
+    // Capture receipt-id for FORK 2 correlation.
+    let receipt_id = resp.headers()
+        .get("x-zemtik-receipt-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned());
+
+    let body_bytes = resp.bytes().await.expect("read streaming body");
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(body_str.contains("Hello"), "streaming body must contain SSE content");
+    assert!(body_str.contains("[DONE]"), "streaming body must include [DONE] terminator");
+
+    // Verify FORK 2 eventually writes an audit record for this streaming request.
+    // Poll up to 2s to avoid flaky timing dependencies.
+    assert!(receipt_id.is_some(), "x-zemtik-receipt-id header must be present");
+    let audit_client = reqwest::Client::new();
+    let mut found = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let audit: Value = audit_client
+            .get(format!("http://{}/tunnel/audit", addr))
+            .header("authorization", "Bearer test-dashboard-key")
+            .send()
+            .await
+            .expect("audit poll failed")
+            .json()
+            .await
+            .expect("parse audit JSON");
+        if audit["count"].as_u64().unwrap_or(0) > 0 {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "FORK 2 must write an audit record for streaming requests");
 }

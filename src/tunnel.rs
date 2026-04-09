@@ -85,6 +85,9 @@ pub(crate) async fn handle_tunnel(
         .or_else(|| state.config.openai_api_key.clone())
         .unwrap_or_default();
 
+    // Generate audit ID here so it can be injected into the response header before FORK 2 runs.
+    let audit_id = Uuid::new_v4().to_string();
+
     // Oneshot channel: FORK 1 sends OriginalResponseData to FORK 2 (or None on error).
     // original_tx stays in main thread; original_rx is moved to FORK 2.
     let (original_tx, original_rx) = oneshot::channel::<Option<OriginalResponseData>>();
@@ -101,12 +104,13 @@ pub(crate) async fn handle_tunnel(
             let prompt_hash2 = prompt_hash.clone();
             let tunnel_model2 = tunnel_model.clone();
             let total_start2 = total_start;
+            let audit_id2 = audit_id.clone();
             tokio::spawn(async move {
                 let _permit = permit; // RAII: released when closure exits in any branch
                 let timeout = Duration::from_secs(state2.config.tunnel_timeout_secs);
                 match tokio::time::timeout(
                     timeout,
-                    run_fork2_pipeline(state2, prompt2, request_hash2, prompt_hash2, original_rx, tunnel_model2, total_start2),
+                    run_fork2_pipeline(state2, audit_id2, prompt2, request_hash2, prompt_hash2, original_rx, tunnel_model2, total_start2),
                 ).await {
                     Ok(()) => {}
                     Err(_elapsed) => {
@@ -117,9 +121,23 @@ pub(crate) async fn handle_tunnel(
             true
         }
         None => {
-            // Semaphore exhausted: drop receiver so FORK 1's send will be a no-op.
+            // Semaphore exhausted: drop receiver, increment counter, write backpressure audit record.
             drop(original_rx);
             state.backpressure_count.fetch_add(1, Ordering::Relaxed);
+            let state_bp = Arc::clone(&state);
+            let audit_id_bp = audit_id.clone();
+            let request_hash_bp = request_hash.clone();
+            let prompt_hash_bp = prompt_hash.clone();
+            let tunnel_model_bp = tunnel_model.clone();
+            tokio::spawn(async move {
+                write_audit_record_simple(
+                    &state_bp, &audit_id_bp, &Utc::now().to_rfc3339(),
+                    &request_hash_bp, &prompt_hash_bp,
+                    TunnelMatchStatus::Backpressure,
+                    None, None, None, None, None, None,
+                    false, None, None, None, None, tunnel_model_bp, total_start,
+                );
+            });
             false
         }
     };
@@ -127,16 +145,18 @@ pub(crate) async fn handle_tunnel(
     // --- FORK 1: forward original request to OpenAI ---
     let fork1_start = Instant::now();
 
-    let (client_response, original_data) = if is_streaming {
-        forward_streaming(&state, &fork1_api_key, body, fork1_start).await
+    let client_response = if is_streaming {
+        // Streaming: forward_streaming owns original_tx and sends OriginalResponseData to
+        // FORK 2 via the oneshot after the SSE stream ends (in a background collector task).
+        forward_streaming(&state, &fork1_api_key, body, fork1_start, original_tx).await
     } else {
-        forward_non_streaming(&state, &fork1_api_key, body, fork1_start).await
+        let (response, original_data) = forward_non_streaming(&state, &fork1_api_key, body, fork1_start).await;
+        // Non-streaming: data is available immediately; send to FORK 2 now.
+        let _ = original_tx.send(original_data);
+        response
     };
 
-    // Send original response data to FORK 2 (if nobody is listening, send silently fails).
-    let _ = original_tx.send(original_data);
-
-    // Inject tunnel headers into the client response.
+    // Inject tunnel headers into the response.
     let mut response = client_response;
     let headers_mut = response.headers_mut();
     headers_mut.insert(
@@ -147,6 +167,9 @@ pub(crate) async fn handle_tunnel(
         "x-zemtik-verified",
         HeaderValue::from_static(if fork2_verified { "true" } else { "false" }),
     );
+    if let Ok(val) = HeaderValue::from_str(&audit_id) {
+        headers_mut.insert("x-zemtik-receipt-id", val);
+    }
 
     response
 }
@@ -222,13 +245,15 @@ async fn forward_non_streaming(
 }
 
 /// Forward streaming request (stream:true). Tees SSE chunks to client + accumulator.
-/// Returns the streaming Response immediately; original data is sent via oneshot after stream ends.
+/// Returns the streaming Response immediately. Sends OriginalResponseData to FORK 2 via
+/// the oneshot sender after the stream ends (in a background collector task).
 async fn forward_streaming(
     state: &Arc<ProxyState>,
     api_key: &str,
     body: Bytes,
     start: Instant,
-) -> (Response, Option<OriginalResponseData>) {
+    fork2_tx: oneshot::Sender<Option<OriginalResponseData>>,
+) -> Response {
     let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
 
     let resp = match state.http_client
@@ -242,11 +267,12 @@ async fn forward_streaming(
         Ok(r) => r,
         Err(e) => {
             eprintln!("[TUNNEL] FORK 1 streaming: OpenAI request failed: {}", e);
+            let _ = fork2_tx.send(None);
             let response = Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::from(format!(r#"{{"error":{{"message":"{}","type":"upstream_error"}}}}"#, e)))
                 .unwrap();
-            return (response, None);
+            return response;
         }
     };
 
@@ -287,10 +313,10 @@ async fn forward_streaming(
         // accum_tx drops here, closing accum_rx for the collector task.
     });
 
-    // Spawn SSE collector: drains accumulator AFTER stream ends, sends oneshot.
-    // Note: this task lives beyond the streaming response — FORK 2 may receive data
-    // seconds after the client got its last SSE chunk.
-    let _ = tokio::spawn(async move {
+    // Spawn SSE collector: drains accumulator AFTER stream ends, then sends OriginalResponseData
+    // to FORK 2 via the oneshot sender. This task outlives the streaming response — FORK 2
+    // receives the full accumulated SSE content once the client stream is done.
+    tokio::spawn(async move {
         let mut accumulated: Vec<u8> = Vec::new();
         let mut accum_rx = accum_rx;
         while let Some(chunk) = accum_rx.recv().await {
@@ -298,15 +324,16 @@ async fn forward_streaming(
         }
         let content = extract_content_from_sse(&accumulated);
         let response_body_hash = hex::encode(Sha256::digest(&accumulated));
-        OriginalResponseData {
+        let data = OriginalResponseData {
             status_code: status.as_u16(),
             response_body: content,
             response_body_hash,
             latency_ms,
-        }
+        };
+        let _ = fork2_tx.send(Some(data));
     });
 
-    // Build streaming response from chunk channel.
+    // Build streaming response from chunk channel and return immediately.
     let stream = ReceiverStream::new(chunk_rx);
     let mut builder = Response::builder().status(status);
     for (k, v) in resp_headers.iter() {
@@ -314,16 +341,9 @@ async fn forward_streaming(
             builder = builder.header(k, v);
         }
     }
-    let response = builder
+    builder
         .body(Body::from_stream(stream))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-
-    // For streaming, oneshot is sent by the collector task (which runs after stream ends).
-    // We return None here — the collector task directly sends via oneshot.
-    // The actual mechanism: the collector task result is dropped; FORK 2 awaits original_rx
-    // which will receive None if streaming (simplification for MVP — full SSE tee to FORK 2
-    // requires passing the oneshot sender into the collector task, done in a future iteration).
-    (response, None)
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +352,7 @@ async fn forward_streaming(
 
 async fn run_fork2_pipeline(
     state: Arc<ProxyState>,
+    audit_id: String,
     prompt: String,
     request_hash: String,
     prompt_hash: String,
@@ -339,8 +360,6 @@ async fn run_fork2_pipeline(
     tunnel_model: Option<String>,
     total_start: Instant,
 ) {
-    let _fork2_start = Instant::now();
-    let audit_id = Uuid::new_v4().to_string();
     let created_at = Utc::now().to_rfc3339();
 
     // Step 1: Intent extraction.
@@ -485,14 +504,17 @@ async fn run_fork2_pipeline(
 
     let match_status = if engine_err.is_some() {
         TunnelMatchStatus::Error
+    } else if diff_detected {
+        TunnelMatchStatus::Diverged
     } else {
         TunnelMatchStatus::Matched
     };
 
-    // Log first matched request.
-    if match_status == TunnelMatchStatus::Matched {
+    // Log matched/diverged requests.
+    if matches!(match_status, TunnelMatchStatus::Matched | TunnelMatchStatus::Diverged) {
         println!(
-            "[TUNNEL] Match: {} | route: {} | diff: {}",
+            "[TUNNEL] {}: {} | route: {} | diff: {}",
+            match_status.as_str(),
             intent.table,
             zemtik_engine.as_deref().unwrap_or("unknown"),
             diff_summary.as_deref().unwrap_or("-"),
@@ -513,7 +535,7 @@ async fn run_fork2_pipeline(
         diff_summary.as_deref(),
         diff_details.as_deref(),
         original.as_ref(),
-        engine_err.or_else(|| None),
+        engine_err,
         tunnel_model,
         total_start,
     );
@@ -525,6 +547,10 @@ async fn run_fork2_pipeline(
 
 /// Extract numbers from text and compare pairwise against zemtik_aggregate.
 /// Returns (diff_detected, diff_summary, diff_details_json).
+static NUMERIC_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\$?(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)").unwrap()
+});
+
 fn compute_diff(
     original_body: &str,
     zemtik_aggregate: i64,
@@ -532,7 +558,7 @@ fn compute_diff(
 ) -> (bool, Option<String>, Option<String>) {
     // Extract all numbers from response text.
     // Pattern matches: $1,234.56  1234567  1,234  etc.
-    let re = regex::Regex::new(r"\$?(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)").unwrap();
+    let re = &*NUMERIC_RE;
     let numbers: Vec<f64> = re.captures_iter(original_body)
         .filter_map(|c| c.get(1))
         .filter_map(|m| {
@@ -925,21 +951,34 @@ fn is_hop_by_hop(header: &str) -> bool {
 }
 
 fn check_dashboard_auth(state: &Arc<ProxyState>, headers: &HeaderMap) -> Result<(), Response> {
-    if let Some(ref expected_key) = state.config.dashboard_api_key {
-        let provided = headers.get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-        if provided != Some(expected_key.as_str()) {
-            return Err((
+    match state.config.dashboard_api_key {
+        None => {
+            // Deny by default when no key is configured — prevents accidental public exposure of
+            // audit records in misconfigured deployments.
+            Err((
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": {"message": "Unauthorized", "type": "auth_error"}})),
-            ).into_response());
+                Json(serde_json::json!({"error": {"message": "Dashboard API key not configured. Set ZEMTIK_DASHBOARD_API_KEY.", "type": "auth_error"}})),
+            ).into_response())
+        }
+        Some(ref expected_key) => {
+            let provided = headers.get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("");
+            if !constant_time_eq::constant_time_eq(provided.as_bytes(), expected_key.as_bytes()) {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": {"message": "Unauthorized", "type": "auth_error"}})),
+                ).into_response());
+            }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 fn csv_escape(s: &str) -> String {
+    // Strip leading formula-injection chars (=, +, -, @) to prevent spreadsheet injection.
+    let s = s.trim_start_matches(['=', '+', '-', '@']);
     if s.contains(',') || s.contains('"') || s.contains('\n') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {

@@ -607,10 +607,14 @@ pub fn load_from_sources(
         config.tunnel_model = Some(v.trim().to_owned());
     }
     if let Some(v) = env.get("ZEMTIK_TUNNEL_TIMEOUT_SECS") {
-        config.tunnel_timeout_secs = v.trim().parse::<u64>().context("parse ZEMTIK_TUNNEL_TIMEOUT_SECS")?;
+        let secs = v.trim().parse::<u64>().context("parse ZEMTIK_TUNNEL_TIMEOUT_SECS")?;
+        anyhow::ensure!(secs >= 10, "ZEMTIK_TUNNEL_TIMEOUT_SECS must be >= 10 (got {})", secs);
+        config.tunnel_timeout_secs = secs;
     }
     if let Some(v) = env.get("ZEMTIK_TUNNEL_SEMAPHORE_PERMITS") {
-        config.tunnel_semaphore_permits = v.trim().parse::<usize>().context("parse ZEMTIK_TUNNEL_SEMAPHORE_PERMITS")?;
+        let permits = v.trim().parse::<usize>().context("parse ZEMTIK_TUNNEL_SEMAPHORE_PERMITS")?;
+        anyhow::ensure!(permits >= 1, "ZEMTIK_TUNNEL_SEMAPHORE_PERMITS must be >= 1 (got {})", permits);
+        config.tunnel_semaphore_permits = permits;
     }
     if let Some(v) = env.get("ZEMTIK_DASHBOARD_API_KEY") {
         config.dashboard_api_key = Some(v.trim().to_owned());

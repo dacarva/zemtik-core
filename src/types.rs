@@ -345,8 +345,10 @@ pub struct EvidencePack {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelMatchStatus {
-    /// Intent matched + engine ran + zemtik response obtained.
+    /// Intent matched + engine ran + zemtik value agrees with OpenAI response (diff within tolerance).
     Matched,
+    /// Intent matched + engine ran + zemtik value diverges from OpenAI response (diff outside tolerance).
+    Diverged,
     /// Intent extraction failed (no table identified / ambiguous).
     Unmatched,
     /// Engine error or zemtik OpenAI call failed.
@@ -361,6 +363,7 @@ impl TunnelMatchStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Matched => "matched",
+            Self::Diverged => "diverged",
             Self::Unmatched => "unmatched",
             Self::Error => "error",
             Self::Timeout => "timeout",
