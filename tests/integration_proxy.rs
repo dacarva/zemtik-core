@@ -249,7 +249,7 @@ async fn fast_lane_count_roundtrip() {
     assert_eq!(engine, "fast_lane", "expected x-zemtik-engine: fast_lane");
 }
 
-/// POST /v1/embeddings returns 404 (passthrough — only /v1/chat/completions is intercepted).
+/// POST /v1/embeddings returns 501 (passthrough — only /v1/chat/completions is intercepted).
 #[tokio::test]
 async fn passthrough_returns_501() {
     let (addr, _mock) = spawn_test_proxy().await;

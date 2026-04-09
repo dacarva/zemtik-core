@@ -1417,60 +1417,59 @@ pub(crate) async fn run_avg_pipeline(
 
 /// Health check endpoint. Probes Supabase connectivity when DB_BACKEND=supabase.
 /// For SQLite (local dev), always returns 200 — in-memory DB is always up.
+/// Mode and tunnel telemetry fields are always included regardless of DB backend.
 async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
     let backend = std::env::var("DB_BACKEND").unwrap_or_default();
-    if backend == "supabase" {
+
+    // Step 1: probe DB reachability.
+    let db_ok = if backend == "supabase" {
         if let (Some(url), Some(key)) = (
             &state.config.supabase_url,
             &state.config.supabase_service_key,
         ) {
             let probe_url = format!("{}/rest/v1/", url.trim_end_matches('/'));
-            let result = state
-                .http_client
+            // Any HTTP response (even 401/403) means reachable; only network errors count as down.
+            state.http_client
                 .get(&probe_url)
                 .header("apikey", key.as_str())
                 .header("Authorization", format!("Bearer {}", key))
                 .send()
-                .await;
-            // Any HTTP response (even 401/403) means the server is reachable.
-            // Only a network-level error (timeout, DNS failure) means unreachable.
-            match result {
-                Ok(_) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})),
-                ),
-                Err(_) => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({"status": "degraded", "reason": "db_unreachable"})),
-                ),
-            }
+                .await
+                .is_ok()
         } else {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"status": "degraded", "reason": "db_unreachable"})),
-            )
+            false
         }
     } else {
-        let mut body = serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")});
-        if let Some(obj) = body.as_object_mut() {
-            let mode_str = match state.config.mode {
-                crate::config::ZemtikMode::Tunnel => "tunnel",
-                crate::config::ZemtikMode::Standard => "standard",
-            };
-            obj.insert("mode".to_string(), serde_json::json!(mode_str));
-            // Tunnel mode: expose semaphore utilization and backpressure counter.
-            if let Some(ref sem) = state.tunnel_semaphore {
-                use std::sync::atomic::Ordering;
-                obj.insert("tunnel_semaphore_available".to_string(),
-                    serde_json::json!(sem.available_permits()));
-                obj.insert("tunnel_semaphore_capacity".to_string(),
-                    serde_json::json!(state.config.tunnel_semaphore_permits));
-                obj.insert("tunnel_backpressure_count".to_string(),
-                    serde_json::json!(state.backpressure_count.load(Ordering::Relaxed)));
-            }
+        true // SQLite in-memory is always up
+    };
+
+    // Step 2: build base body.
+    let mut body = if db_ok {
+        serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")})
+    } else {
+        serde_json::json!({"status": "degraded", "reason": "db_unreachable"})
+    };
+
+    // Step 3: append mode + tunnel telemetry to every response (all backends).
+    if let Some(obj) = body.as_object_mut() {
+        let mode_str = match state.config.mode {
+            crate::config::ZemtikMode::Tunnel => "tunnel",
+            crate::config::ZemtikMode::Standard => "standard",
+        };
+        obj.insert("mode".to_string(), serde_json::json!(mode_str));
+        if let Some(ref sem) = state.tunnel_semaphore {
+            use std::sync::atomic::Ordering;
+            obj.insert("tunnel_semaphore_available".to_string(),
+                serde_json::json!(sem.available_permits()));
+            obj.insert("tunnel_semaphore_capacity".to_string(),
+                serde_json::json!(state.config.tunnel_semaphore_permits));
+            obj.insert("tunnel_backpressure_count".to_string(),
+                serde_json::json!(state.backpressure_count.load(Ordering::Relaxed)));
         }
-        (StatusCode::OK, Json(body))
     }
+
+    let status_code = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (status_code, Json(body))
 }
 
 /// Transparent passthrough for non-intercepted routes.

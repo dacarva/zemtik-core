@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zemtik::config::{AggFn, AppConfig, SchemaConfig, TableConfig, ZemtikMode};
 use zemtik::proxy::build_proxy_router;
@@ -403,11 +403,79 @@ async fn test_tunnel_audit_endpoint_returns_json() {
 #[tokio::test]
 async fn test_tunnel_audit_filter_by_status() {
     let (addr, mock) = spawn_tunnel_proxy().await;
-    mount_chat_mock(&mock).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Specific mock (priority 1 = highest): "neutral" prompt → digit-free response body →
+    // compute_diff finds no_numerical_data → diff_detected=false → match_status=matched.
+    // IMPORTANT: must omit all numeric JSON fields (index, token counts, model version digits)
+    // because NUMERIC_RE extracts ALL digits from the raw response JSON string.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("aws_spend neutral"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-neutral",
+            "object": "chat.completion",
+            "model": "gpt-test",
+            "choices": [{"message": {"role": "assistant",
+                "content": "Sorry, I cannot help with that request."}, "finish_reason": "stop"}]
+        })))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+
+    // Catch-all mock (priority 10 = lower) — "$1" won't match DB aggregate (2095800) →
+    // diff_detected=true and match_status=diverged.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-diverge",
+            "object": "chat.completion",
+            "model": "gpt-test",
+            "choices": [{"message": {"role": "assistant",
+                "content": "The total was $1."}, "finish_reason": "stop"}]
+        })))
+        .with_priority(10)
+        .mount(&mock)
+        .await;
 
     let client = reqwest::Client::new();
+
+    // Request 1: no-numbers prompt → Matched.
+    client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&json!({"model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend neutral"}]}))
+        .send()
+        .await
+        .expect("request 1 failed");
+
+    // Request 2: diverging prompt → Diverged.
+    client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&json!({"model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend total"}]}))
+        .send()
+        .await
+        .expect("request 2 failed");
+
+    // Wait for FORK 2 background tasks to write both audit records.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Unfiltered count — must be at least 2.
+    let unfiltered: Value = client
+        .get(format!("http://{}/tunnel/audit", addr))
+        .header("authorization", "Bearer test-dashboard-key")
+        .send()
+        .await
+        .expect("GET /tunnel/audit failed")
+        .json()
+        .await
+        .expect("parse unfiltered JSON");
+    let total_count = unfiltered["count"].as_u64().unwrap_or(0);
+    assert!(total_count >= 2, "expected at least 2 audit records, got {}", total_count);
+
+    // Filtered by match_status=matched — must be a strict subset.
     let resp = client
         .get(format!("http://{}/tunnel/audit?match_status=matched", addr))
         .header("authorization", "Bearer test-dashboard-key")
@@ -417,10 +485,19 @@ async fn test_tunnel_audit_filter_by_status() {
 
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.expect("parse audit JSON");
-    // All returned records must have match_status == "matched".
+    let filtered_count = body["count"].as_u64().unwrap_or(0);
+
+    // Filter must exclude at least one record (the diverged one).
+    assert!(
+        filtered_count < total_count,
+        "filter by match_status=matched should exclude diverged records (filtered={}, total={})",
+        filtered_count, total_count,
+    );
+    // Every returned record must have match_status == "matched".
     if let Some(records) = body["records"].as_array() {
+        assert!(!records.is_empty(), "filter=matched returned no records — expected at least one matched row");
         for r in records {
-            assert_eq!(r["match_status"], "matched", "filter by match_status failed");
+            assert_eq!(r["match_status"], "matched", "filter by match_status returned wrong record");
         }
     }
 }
@@ -431,9 +508,78 @@ async fn test_tunnel_audit_filter_by_status() {
 
 #[tokio::test]
 async fn test_tunnel_audit_filter_by_diff() {
-    let (addr, _mock) = spawn_tunnel_proxy().await;
+    let (addr, mock) = spawn_tunnel_proxy().await;
+
+    // Specific mock (priority 1 = highest): "neutral" prompt → digit-free response body →
+    // compute_diff finds no_numerical_data → diff_detected=false.
+    // IMPORTANT: must omit all numeric JSON fields (index, token counts, model version digits).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("aws_spend neutral"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-neutral-b",
+            "object": "chat.completion",
+            "model": "gpt-test",
+            "choices": [{"message": {"role": "assistant",
+                "content": "Sorry, I cannot help with that request."}, "finish_reason": "stop"}]
+        })))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+
+    // Catch-all mock (priority 10 = lower) — "$1" won't match DB aggregate → diff_detected=true.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-diff-b",
+            "object": "chat.completion",
+            "model": "gpt-test",
+            "choices": [{"message": {"role": "assistant",
+                "content": "The total was $1."}, "finish_reason": "stop"}]
+        })))
+        .with_priority(10)
+        .mount(&mock)
+        .await;
+
     let client = reqwest::Client::new();
 
+    // Request 1: no-numbers → diff_detected=false.
+    client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&json!({"model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend neutral"}]}))
+        .send()
+        .await
+        .expect("request 1 failed");
+
+    // Request 2: diverging → diff_detected=true.
+    client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&json!({"model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend total"}]}))
+        .send()
+        .await
+        .expect("request 2 failed");
+
+    // Wait for FORK 2 background tasks to write both audit records.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Unfiltered count.
+    let unfiltered: Value = client
+        .get(format!("http://{}/tunnel/audit", addr))
+        .header("authorization", "Bearer test-dashboard-key")
+        .send()
+        .await
+        .expect("GET /tunnel/audit failed")
+        .json()
+        .await
+        .expect("parse unfiltered JSON");
+    let total_count = unfiltered["count"].as_u64().unwrap_or(0);
+    assert!(total_count >= 2, "expected at least 2 audit records, got {}", total_count);
+
+    // Filter by diff_detected=true.
     let resp = client
         .get(format!("http://{}/tunnel/audit?diff_detected=true", addr))
         .header("authorization", "Bearer test-dashboard-key")
@@ -443,7 +589,21 @@ async fn test_tunnel_audit_filter_by_diff() {
 
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.expect("parse audit JSON");
-    assert!(body.get("records").is_some());
+    let filtered_count = body["count"].as_u64().unwrap_or(0);
+
+    // Filter must exclude at least one record (the no-diff one).
+    assert!(
+        filtered_count < total_count,
+        "filter by diff_detected=true should exclude non-diff records (filtered={}, total={})",
+        filtered_count, total_count,
+    );
+    // Every returned record must have diff_detected == true.
+    if let Some(records) = body["records"].as_array() {
+        assert!(!records.is_empty(), "filter=diff_detected=true returned no records — expected at least one");
+        for r in records {
+            assert_eq!(r["diff_detected"], true, "filter by diff_detected returned wrong record");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

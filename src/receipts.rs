@@ -500,7 +500,7 @@ pub fn tunnel_summary(conn: &Connection) -> anyhow::Result<TunnelSummary> {
         "SELECT COUNT(*) FROM tunnel_audit",
         [],
         |r| r.get(0),
-    ).unwrap_or(0);
+    )?;
 
     if total == 0 {
         return Ok(TunnelSummary {
@@ -515,19 +515,19 @@ pub fn tunnel_summary(conn: &Connection) -> anyhow::Result<TunnelSummary> {
         "SELECT COUNT(*) FROM tunnel_audit WHERE match_status = 'matched'",
         [],
         |r| r.get(0),
-    ).unwrap_or(0);
+    )?;
 
     let diff_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM tunnel_audit WHERE diff_detected = 1",
         [],
         |r| r.get(0),
-    ).unwrap_or(0);
+    )?;
 
     let avg_latency: f64 = conn.query_row(
         "SELECT COALESCE(AVG(CAST(zemtik_latency_ms AS REAL)), 0.0) FROM tunnel_audit WHERE zemtik_latency_ms IS NOT NULL",
         [],
         |r| r.get(0),
-    ).unwrap_or(0.0);
+    )?;
 
     Ok(TunnelSummary {
         total_requests: total as u64,
