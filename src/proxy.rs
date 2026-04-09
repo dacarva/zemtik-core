@@ -1473,7 +1473,7 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
 /// Transparent passthrough for non-intercepted routes.
 async fn handle_passthrough() -> impl IntoResponse {
     (
-        StatusCode::NOT_FOUND,
+        StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({
             "error": {
                 "message": "Zemtik proxy only intercepts POST /v1/chat/completions. \
