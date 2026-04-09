@@ -4591,7 +4591,7 @@ dependencies = [
 
 [[package]]
 name = "zemtik"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "axum",
