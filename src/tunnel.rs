@@ -1,13 +1,13 @@
-/// Tunnel mode — transparent verification proxy for pilot customers.
-///
-/// FORK 1: Forward the original request to OpenAI untouched; return response immediately.
-/// FORK 2: Run ZK verification pipeline in background; write audit record with diff.
-///
-/// Cardinal rules:
-/// - No zemtik error ever reaches the client. FORK 2 is fully isolated.
-/// - FORK 1 oneshot always sends: Some(data) on success, None on FORK 1 error.
-/// - Semaphore permit is RAII-scoped — always released regardless of exit path.
-/// - All SQLite access in sync scopes, never across .await.
+//! Tunnel mode — transparent verification proxy for pilot customers.
+//!
+//! FORK 1: Forward the original request to OpenAI untouched; return response immediately.
+//! FORK 2: Run ZK verification pipeline in background; write audit record with diff.
+//!
+//! Cardinal rules:
+//! - No zemtik error ever reaches the client. FORK 2 is fully isolated.
+//! - FORK 1 oneshot always sends: Some(data) on success, None on FORK 1 error.
+//! - Semaphore permit is RAII-scoped — always released regardless of exit path.
+//! - All SQLite access in sync scopes, never across .await.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -305,7 +305,7 @@ async fn forward_streaming(
                     let _ = chunk_tx.send(Ok(chunk)).await;
                 }
                 Err(e) => {
-                    let _ = chunk_tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))).await;
+                    let _ = chunk_tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     break;
                 }
             }
@@ -350,6 +350,7 @@ async fn forward_streaming(
 // FORK 2 — background verification pipeline
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_fork2_pipeline(
     state: Arc<ProxyState>,
     audit_id: String,
@@ -709,6 +710,7 @@ fn write_audit_record_simple(
     let _ = total_start; // used for timing if needed in future
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn write_audit_error(
     state: &Arc<ProxyState>,
     id: &str,
@@ -739,7 +741,7 @@ pub(crate) async fn handle_audit(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = check_dashboard_auth(&state, &headers) {
-        return resp;
+        return *resp;
     }
 
     let filters = TunnelAuditFilters {
@@ -782,7 +784,7 @@ pub(crate) async fn handle_audit_csv(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = check_dashboard_auth(&state, &headers) {
-        return resp;
+        return *resp;
     }
 
     let filters = TunnelAuditFilters {
@@ -851,7 +853,7 @@ pub(crate) async fn handle_summary(
     headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = check_dashboard_auth(&state, &headers) {
-        return resp;
+        return *resp;
     }
 
     match &state.tunnel_audit_db {
@@ -950,15 +952,15 @@ fn is_hop_by_hop(header: &str) -> bool {
     )
 }
 
-fn check_dashboard_auth(state: &Arc<ProxyState>, headers: &HeaderMap) -> Result<(), Response> {
+fn check_dashboard_auth(state: &Arc<ProxyState>, headers: &HeaderMap) -> Result<(), Box<Response>> {
     match state.config.dashboard_api_key {
         None => {
             // Deny by default when no key is configured — prevents accidental public exposure of
             // audit records in misconfigured deployments.
-            Err((
+            Err(Box::new((
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": {"message": "Dashboard API key not configured. Set ZEMTIK_DASHBOARD_API_KEY.", "type": "auth_error"}})),
-            ).into_response())
+            ).into_response()))
         }
         Some(ref expected_key) => {
             let provided = headers.get("authorization")
@@ -966,10 +968,10 @@ fn check_dashboard_auth(state: &Arc<ProxyState>, headers: &HeaderMap) -> Result<
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .unwrap_or("");
             if !constant_time_eq::constant_time_eq(provided.as_bytes(), expected_key.as_bytes()) {
-                return Err((
+                return Err(Box::new((
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({"error": {"message": "Unauthorized", "type": "auth_error"}})),
-                ).into_response());
+                ).into_response()));
             }
             Ok(())
         }

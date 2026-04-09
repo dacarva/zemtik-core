@@ -409,8 +409,8 @@ fn run_list_tunnel(config: config::AppConfig, limit: usize) -> anyhow::Result<()
     }
 
     println!(
-        "{:<10}  {:<10}  {:<25}  {:<12}  {:<20}  {:<6}  {}",
-        "ID", "Receipt", "Created At", "Status", "Table", "Diff", "Summary"
+        "{:<10}  {:<10}  {:<25}  {:<12}  {:<20}  {:<6}  Summary",
+        "ID", "Receipt", "Created At", "Status", "Table", "Diff"
     );
     println!("{}", "-".repeat(120));
 
