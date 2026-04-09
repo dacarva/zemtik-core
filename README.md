@@ -134,7 +134,7 @@ Unknown tables that are not in `schema_config.json` always route to ZK SlowLane 
 
 Tunnel Mode is designed for customers who want to evaluate Zemtik without any risk to their production traffic. Set `ZEMTIK_MODE=tunnel` and Zemtik becomes a **transparent passthrough proxy** — every request is forwarded to OpenAI exactly as received (FORK 1) while Zemtik runs its verification pipeline in the background (FORK 2) and logs a comparison audit record.
 
-```
+```text
 Client → Zemtik (tunnel mode) → OpenAI     ← FORK 1: customer traffic, unmodified
                       └→ ZK Pipeline       ← FORK 2: background verification, no customer impact
                       └→ tunnel_audit.db   ← Comparison logged: matched / divergence / unmatched

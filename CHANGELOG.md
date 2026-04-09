@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - `ZEMTIK_TUNNEL_API_KEY` missing in tunnel mode is now a hard startup error (prevents silent billing of the pilot customer's key).
-- `handle_tunnel_passthrough` now returns `501 NOT_IMPLEMENTED` for unrecognized routes, consistent with standard proxy mode.
+- `handle_tunnel_passthrough` now forwards unrecognized routes transparently to the upstream OpenAI base URL, preserving the tunnel mode design goal of zero customer impact.
 - Dashboard auth defaults to `401` when `ZEMTIK_DASHBOARD_API_KEY` is not configured (was silently allowing all requests).
 - Dashboard API key comparison now uses constant-time equality to prevent timing-oracle attacks.
 - Regex in `compute_diff` now compiled once at startup via `LazyLock` (was re-compiled per request).

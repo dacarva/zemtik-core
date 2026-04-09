@@ -108,6 +108,12 @@ pub(crate) async fn handle_tunnel(
             tokio::spawn(async move {
                 let _permit = permit; // RAII: released when closure exits in any branch
                 let timeout = Duration::from_secs(state2.config.tunnel_timeout_secs);
+                // Clone identifiers before moving into the future so the timeout branch can write an audit record.
+                let state_for_timeout = Arc::clone(&state2);
+                let audit_id_for_timeout = audit_id2.clone();
+                let request_hash_for_timeout = request_hash2.clone();
+                let prompt_hash_for_timeout = prompt_hash2.clone();
+                let tunnel_model_for_timeout = tunnel_model2.clone();
                 match tokio::time::timeout(
                     timeout,
                     run_fork2_pipeline(state2, audit_id2, prompt2, request_hash2, prompt_hash2, original_rx, tunnel_model2, total_start2),
@@ -115,6 +121,15 @@ pub(crate) async fn handle_tunnel(
                     Ok(()) => {}
                     Err(_elapsed) => {
                         eprintln!("[TUNNEL] FORK 2 timed out after {}s", timeout.as_secs());
+                        write_audit_record_simple(
+                            &state_for_timeout, &audit_id_for_timeout, &Utc::now().to_rfc3339(),
+                            &request_hash_for_timeout, &prompt_hash_for_timeout,
+                            TunnelMatchStatus::Timeout,
+                            None, None, None, None, None, None,
+                            false, None, None, None,
+                            Some(format!("FORK 2 timed out after {}s", timeout.as_secs())),
+                            tunnel_model_for_timeout, total_start2,
+                        );
                     }
                 }
             });
@@ -442,7 +457,19 @@ async fn run_fork2_pipeline(
                 // run_zk_pipeline creates DbBackend with RefCell (!Send), so it must not
                 // be held across tokio task boundaries in a tokio::spawn future.
                 let pipeline_result = if agg_fn == AggFn::Avg {
+                    // Match proxy.rs ordering: avg + sum + count to prevent concurrent
+                    // direct SUM/COUNT requests from corrupting shared circuit Prover.toml files.
                     let _avg_lock = state.avg_pipeline_lock.lock().await;
+                    let _sum_lock = state.pipeline_locks
+                        .get(&AggFn::Sum)
+                        .expect("pipeline_locks must contain Sum")
+                        .lock()
+                        .await;
+                    let _count_lock = state.pipeline_locks
+                        .get(&AggFn::Count)
+                        .expect("pipeline_locks must contain Count")
+                        .lock()
+                        .await;
                     let state2 = Arc::clone(&state);
                     tokio::task::spawn_blocking(move || {
                         let rt = tokio::runtime::Builder::new_current_thread()
@@ -505,6 +532,9 @@ async fn run_fork2_pipeline(
 
     let match_status = if engine_err.is_some() {
         TunnelMatchStatus::Error
+    } else if original.is_none() || diff_summary.as_deref() == Some("no_original_response") {
+        // No FORK 1 response to compare against — cannot be Matched.
+        TunnelMatchStatus::Unmatched
     } else if diff_detected {
         TunnelMatchStatus::Diverged
     } else {
@@ -665,12 +695,15 @@ fn write_audit_record_simple(
     total_start: Instant,
 ) {
     let (orig_status, orig_hash, orig_latency, orig_preview) = match original {
-        Some(o) => (
-            o.status_code,
-            o.response_body_hash.clone(),
-            o.latency_ms,
-            Some(o.response_body.chars().take(500).collect::<String>()),
-        ),
+        Some(o) => {
+            // Only store plaintext preview when explicitly enabled — avoids persisting customer LLM output.
+            let preview = if state.config.tunnel_debug_previews {
+                Some(o.response_body.chars().take(500).collect::<String>())
+            } else {
+                None
+            };
+            (o.status_code, o.response_body_hash.clone(), o.latency_ms, preview)
+        }
         None => (0u16, String::new(), 0u64, None),
     };
 

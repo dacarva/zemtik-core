@@ -405,8 +405,14 @@ pub struct AppConfig {
     #[serde(skip)]
     pub dashboard_api_key: Option<String>,
     /// Path to tunnel audit SQLite DB. Default: ~/.zemtik/tunnel_audit.db.
+    /// Env: ZEMTIK_TUNNEL_AUDIT_DB_PATH
     #[serde(skip)]
     pub tunnel_audit_db_path: PathBuf,
+    /// When true, store a 500-char plaintext preview of original OpenAI responses in the audit DB.
+    /// Default: false — previews are omitted in production to avoid persisting customer LLM output.
+    /// Env: ZEMTIK_TUNNEL_DEBUG_PREVIEWS=1
+    #[serde(skip)]
+    pub tunnel_debug_previews: bool,
 }
 
 impl AppConfig {
@@ -455,6 +461,7 @@ impl Default for AppConfig {
             tunnel_semaphore_permits: 50,
             dashboard_api_key: None,
             tunnel_audit_db_path: base.join("tunnel_audit.db"),
+            tunnel_debug_previews: false,
         }
     }
 }
@@ -618,6 +625,29 @@ pub fn load_from_sources(
     }
     if let Some(v) = env.get("ZEMTIK_DASHBOARD_API_KEY") {
         config.dashboard_api_key = Some(v.trim().to_owned());
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_DEBUG_PREVIEWS") {
+        let s = v.trim();
+        config.tunnel_debug_previews = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_TUNNEL_DEBUG_PREVIEWS: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_TUNNEL_AUDIT_DB_PATH") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+                home.join(rest)
+            } else {
+                PathBuf::from(trimmed)
+            };
+            config.tunnel_audit_db_path = expanded;
+        }
     }
 
     // Layer 4: CLI flags

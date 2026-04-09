@@ -132,8 +132,8 @@ Default tolerance when not set: `0.01` (1%).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | integer | Auto-increment primary key. |
-| `receipt_id` | string | UUID v4 — correlates with `x-zemtik-receipt-id` header. |
+| `id` | string | UUID v4 primary key — correlates with `x-zemtik-receipt-id` response header. |
+| `receipt_id` | string? | Optional. Reserved for future correlation with the `receipts` table; always `NULL` for tunnel audit records. |
 | `created_at` | string | ISO-8601 UTC timestamp. |
 | `match_status` | string | See `match_status` values above. |
 | `matched_table` | string? | Table key resolved by intent extraction, e.g. `"aws_spend"`. |
@@ -229,7 +229,7 @@ Response shape:
 ## `list-tunnel` CLI
 
 ```bash
-cargo run -- list-tunnel           # last 50 records
+cargo run -- list-tunnel           # last 20 records (default)
 cargo run -- list-tunnel --limit 10
 ```
 
@@ -250,7 +250,7 @@ Every `POST /v1/chat/completions` response in tunnel mode includes:
 |--------|--------|-------------|
 | `x-zemtik-mode` | `tunnel` | Always present in tunnel mode. |
 | `x-zemtik-verified` | `true`, `false` | `false` when backpressure prevented FORK 2. |
-| `x-zemtik-receipt-id` | UUID | Correlates with `receipt_id` in the audit database. |
+| `x-zemtik-receipt-id` | UUID | Correlates with the `id` column in the `tunnel_audit` database. |
 
 ---
 
