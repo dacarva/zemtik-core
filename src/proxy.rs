@@ -235,7 +235,15 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
         .unwrap_or_else(|| config.openai_model.clone());
     let tunnel_permits = config.tunnel_semaphore_permits;
     let tunnel_timeout = config.tunnel_timeout_secs;
-    let tunnel_api_key_missing = is_tunnel && config.tunnel_api_key.is_none();
+    if is_tunnel && config.tunnel_api_key.is_none() {
+        anyhow::bail!(
+            "ZEMTIK_TUNNEL_API_KEY is required in tunnel mode.\n\
+             Zemtik's verification calls must be billed to zemtik's account, not the \
+             pilot customer's.\n\
+             Set ZEMTIK_TUNNEL_API_KEY to a separate OpenAI API key before starting \
+             in tunnel mode."
+        );
+    }
 
     let app = build_proxy_router(config).await?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -253,11 +261,6 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
             "[TUNNEL MODE] ZEMTIK_TUNNEL_MODEL: {} | permits: {} | timeout: {}s",
             tunnel_model, tunnel_permits, tunnel_timeout
         );
-        if tunnel_api_key_missing {
-            println!("[WARN] ZEMTIK_TUNNEL_API_KEY not set — using OPENAI_API_KEY for verification calls.");
-            println!("[WARN]   Zemtik's verification calls will be billed to the customer's API account.");
-            println!("[WARN]   Set ZEMTIK_TUNNEL_API_KEY to use a separate billing account.");
-        }
         println!();
     } else {
         println!("[PROXY] Listening on http://{}", addr);
