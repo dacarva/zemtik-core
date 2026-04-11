@@ -22,7 +22,7 @@ All target v0.9.1. Ordered by pilot-blocking priority.
 
 ### Startup validation block log format (P1, v0.9.1)
 - **What:** Print schema validation as a single formatted block instead of interleaved log lines:
-  ```
+  ```text
   [ZEMTIK] Schema validation
   └ acme_transactions: 14,823 rows — OK
   └ acme_invoices: 0 rows — WARNING: empty table

@@ -24,7 +24,7 @@ docker compose run --rm zemtik-proxy env ZEMTIK_VALIDATE_ONLY=1
 ```
 
 **Expected output:**
-```
+```text
 [ZEMTIK] Schema validation
   └ your_table: N rows — OK
   └ ZK tools: nargo=✓ bb=✓

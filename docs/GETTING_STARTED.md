@@ -391,7 +391,8 @@ All responses are returned as a single buffered JSON object after pipeline compl
     "type": "zemtik_config_error",
     "code": "StreamingNotSupported",
     "message": "Set stream: false in your client configuration.",
-    "hint": "The ZK pipeline must complete before any part of the response can be sent."
+    "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
   }
 }
 ```
@@ -426,7 +427,7 @@ docker compose run --rm zemtik-proxy env ZEMTIK_VALIDATE_ONLY=1
 
 This prints a block like:
 
-```
+```text
 [ZEMTIK] Schema validation
   └ acme_transactions: 14,823 rows — OK
   └ acme_invoices: 0 rows — WARNING: empty table

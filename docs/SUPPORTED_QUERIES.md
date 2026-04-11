@@ -184,7 +184,7 @@ In short: FastLane is fast and private; ZK SlowLane is fast, private, *and* veri
 
 Zemtik extracts intent from the **last user message** only. Follow-up questions without full context will not resolve:
 
-```
+```text
 User: "What was payroll in Q1 2024?"   → OK (full context)
 User: "What about Q2?"                 → 400 NoTableIdentified (no table or time in message)
 ```

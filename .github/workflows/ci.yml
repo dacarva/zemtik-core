@@ -10,6 +10,9 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     services:
+      # Postgres service is scaffolding for future DB_BACKEND=supabase integration tests.
+      # Current tests use ZEMTIK_SKIP_DB_VALIDATION=1 (SQLite only); DATABASE_URL is not wired.
+      # Wire up with: DATABASE_URL=postgres://postgres:testpass@localhost:5432/zemtik_test
       postgres:
         image: postgres:16
         env:

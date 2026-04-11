@@ -289,9 +289,10 @@ fn write_startup_events(tables: &[TableValidationResult]) {
 }
 
 /// Returns true if the binary is found on PATH.
+/// Uses `--version` probe instead of `which` for portability (works on Windows too).
 fn which(cmd: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(cmd)
+    std::process::Command::new(cmd)
+        .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

@@ -114,7 +114,7 @@ docker compose up
 
 **What you see:**
 ```json
-{"error": {"type": "zemtik_db_error", "code": "QueryFailed", "message": "Database query failed: ...", "hint": "Check that physical_table, value_column, and timestamp_column match your schema."}}
+{"error": {"type": "zemtik_db_error", "code": "QueryFailed", "message": "Database query failed — check server logs for details.", "hint": "Check that physical_table, value_column, and timestamp_column match your schema."}}
 ```
 
 **Root cause:** The database rejected the query — wrong column name, table name, or RLS policy.
@@ -157,7 +157,7 @@ curl -H "apikey: $SUPABASE_SERVICE_KEY" "$SUPABASE_URL/rest/v1/"
 
 At startup, zemtik prints a validation summary:
 
-```
+```text
 [ZEMTIK] Schema validation
   └ acme_transactions: 14,823 rows — OK
   └ acme_invoices: 0 rows — WARNING: empty table
