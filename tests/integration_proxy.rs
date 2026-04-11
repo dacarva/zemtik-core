@@ -317,8 +317,16 @@ async fn ambiguous_prompt_returns_400() {
 
     let body: Value = resp.json().await.expect("response not JSON");
     assert_eq!(
-        body["error"]["type"], "zemtik_intent_rejection",
+        body["error"]["type"], "zemtik_intent_error",
         "unexpected error type: {body}"
+    );
+    assert_eq!(
+        body["error"]["code"], "NoTableIdentified",
+        "expected error.code == NoTableIdentified: {body}"
+    );
+    assert!(
+        body["error"]["hint"].is_string(),
+        "error.hint must be present: {body}"
     );
 }
 
@@ -371,4 +379,112 @@ async fn fast_lane_evidence_fields_are_correct() {
         evidence["proof_hash"].is_null(),
         "FastLane must NOT have proof_hash"
     );
+}
+
+/// stream:true in standard mode → HTTP 400 with StreamingNotSupported code.
+#[tokio::test]
+async fn streaming_guard_returns_400_in_standard_mode() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend"}]
+        }))
+        .send()
+        .await
+        .expect("streaming request failed");
+
+    assert_eq!(resp.status(), 400, "stream:true must return 400 in standard mode");
+
+    let body: Value = resp.json().await.expect("response not JSON");
+    assert_eq!(
+        body["error"]["code"], "StreamingNotSupported",
+        "expected error.code == StreamingNotSupported: {body}"
+    );
+    assert_eq!(
+        body["error"]["type"], "zemtik_config_error",
+        "expected error.type == zemtik_config_error: {body}"
+    );
+    assert!(body["error"]["hint"].is_string(), "error.hint must be present: {body}");
+}
+
+/// /health response must include schema_validation field.
+#[tokio::test]
+async fn health_includes_schema_validation_field() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.expect("health response not JSON");
+    assert!(
+        body.get("schema_validation").is_some(),
+        "/health must include schema_validation field: {body}"
+    );
+    let sv = &body["schema_validation"];
+    assert!(sv["status"].is_string(), "schema_validation.status must be a string: {body}");
+    assert!(sv["skipped"].is_boolean(), "schema_validation.skipped must be bool: {body}");
+}
+
+/// startup_validation_skipped_when_env_set: ZEMTIK_SKIP_DB_VALIDATION=1
+/// → /health schema_validation.status == "skipped".
+/// Uses #[serial] because std::env::set_var/remove_var is not safe under parallel test execution.
+#[tokio::test]
+#[serial_test::serial]
+async fn startup_validation_skipped_when_env_set() {
+    std::env::set_var("ZEMTIK_SKIP_DB_VALIDATION", "1");
+    let (addr, _mock) = spawn_test_proxy().await;
+    std::env::remove_var("ZEMTIK_SKIP_DB_VALIDATION");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    let body: Value = resp.json().await.expect("health response not JSON");
+    assert_eq!(
+        body["schema_validation"]["status"], "skipped",
+        "schema_validation.status must be 'skipped' when ZEMTIK_SKIP_DB_VALIDATION=1: {body}"
+    );
+    assert_eq!(
+        body["schema_validation"]["skipped"], true,
+        "schema_validation.skipped must be true: {body}"
+    );
+}
+
+/// structured_error_has_code_hint_doc_url: ambiguous prompt → 400 with code/hint/doc_url.
+#[tokio::test]
+async fn structured_error_has_code_hint_doc_url() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "summarize my emails from last week"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.expect("response not JSON");
+    let err = &body["error"];
+    assert!(err["code"].is_string(), "error.code must be present: {body}");
+    assert!(err["hint"].is_string(), "error.hint must be present: {body}");
+    assert!(err["doc_url"].is_string(), "error.doc_url must be present: {body}");
 }

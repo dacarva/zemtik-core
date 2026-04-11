@@ -1,6 +1,6 @@
 [package]
 name = "zemtik"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
@@ -66,3 +66,4 @@ required-features = ["eval"]
 tempfile = "3"
 wiremock = "0.6"
 reqwest = { version = "0.12", features = ["json", "stream"] }
+serial_test = "3"

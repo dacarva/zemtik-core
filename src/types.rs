@@ -338,6 +338,80 @@ pub struct EvidencePack {
 }
 
 // ---------------------------------------------------------------------------
+// Structured error types (v0.9.1+)
+// ---------------------------------------------------------------------------
+
+/// Typed error codes for all zemtik proxy errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ZemtikErrorCode {
+    NoTableIdentified,
+    StreamingNotSupported,
+    InvalidRequest,
+    QueryFailed,
+}
+
+impl std::fmt::Display for ZemtikErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoTableIdentified => write!(f, "NoTableIdentified"),
+            Self::StreamingNotSupported => write!(f, "StreamingNotSupported"),
+            Self::InvalidRequest => write!(f, "InvalidRequest"),
+            Self::QueryFailed => write!(f, "QueryFailed"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema validation types (v0.9.1+)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ZkToolsStatus {
+    pub nargo: bool,
+    pub bb: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableValidationResult {
+    pub table_key: String,
+    pub physical_table: String,
+    pub status: String,
+    pub row_count: Option<i64>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaValidationResult {
+    pub tables: Vec<TableValidationResult>,
+    pub zk_tools: ZkToolsStatus,
+    pub skipped: bool,
+}
+
+impl SchemaValidationResult {
+    pub fn skipped() -> Self {
+        Self {
+            tables: vec![],
+            zk_tools: ZkToolsStatus { nargo: false, bb: false },
+            skipped: true,
+        }
+    }
+
+    pub fn status_summary(&self) -> &'static str {
+        if self.skipped {
+            "skipped"
+        } else if self.tables.iter().any(|t| !t.warnings.is_empty())
+            || !self.zk_tools.nargo
+            || !self.zk_tools.bb
+        {
+            "warnings"
+        } else {
+            "ok"
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tunnel mode types
 // ---------------------------------------------------------------------------
 

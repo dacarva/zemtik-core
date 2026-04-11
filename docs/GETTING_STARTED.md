@@ -377,9 +377,146 @@ Response `evidence` field:
 
 ---
 
+---
+
+## Streaming
+
+The proxy does **not** support `stream: true`. Set `stream: false` in your client configuration.
+
+All responses are returned as a single buffered JSON object after pipeline completion. If `stream: true` is detected in the request body, the proxy returns HTTP 400 immediately:
+
+```json
+{
+  "error": {
+    "type": "zemtik_config_error",
+    "code": "StreamingNotSupported",
+    "message": "Set stream: false in your client configuration.",
+    "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+  }
+}
+```
+
+**LangChain / Vercel AI SDK:** these libraries default to `stream: true`. Override explicitly:
+
+```python
+# LangChain
+llm = ChatOpenAI(streaming=False, base_url="http://localhost:4000/v1")
+```
+
+```typescript
+// Vercel AI SDK
+const result = await generateText({ model, stream: false });
+```
+
+> **Tunnel mode** supports streaming — `stream: true` passes through to OpenAI unmodified. The streaming guard only applies in standard proxy mode.
+
+---
+
+## Bring Your Own Database (5-step guide)
+
+This section is for integrators connecting zemtik to their own Postgres database.
+
+### Step 0 — Validate before starting
+
+Run schema validation without starting the server:
+
+```bash
+docker compose run --rm zemtik-proxy env ZEMTIK_VALIDATE_ONLY=1
+```
+
+This prints a block like:
+
+```text
+[ZEMTIK] Schema validation
+  └ acme_transactions: 14,823 rows — OK
+  └ acme_invoices: 0 rows — WARNING: empty table
+  └ ZK tools: nargo=✓ bb=✓
+```
+
+Exit code 0 = all clear. Exit code 1 = warnings to fix. Run this before the customer demo.
+
+### Step 1 — Create `schema_config.json`
+
+Copy the example and configure your table:
+
+```bash
+cp schema_config.example.json ~/.zemtik/schema_config.json
+```
+
+Edit the table key, `physical_table`, `value_column`, `timestamp_column`:
+
+```json
+{
+  "tables": {
+    "company_transactions": {
+      "sensitivity": "low",
+      "physical_table": "financial_transactions",
+      "value_column": "amount_usd",
+      "timestamp_column": "ts_epoch",
+      "skip_client_id_filter": true,
+      "description": "Company financial transaction ledger",
+      "example_prompts": ["What was our revenue in Q1 2025?"]
+    }
+  }
+}
+```
+
+### Step 2 — Handle client_id (single-tenant)
+
+If your database does not have a `client_id` column, set `"skip_client_id_filter": true`. Without this, every query returns 0 rows because it filters for `client_id = 123` (the demo default).
+
+### Step 3 — Handle timestamps
+
+The `timestamp_column` must store **UNIX epoch seconds** (integer). For PostgreSQL `timestamp`/`timestamptz` columns, create a generated column:
+
+```sql
+ALTER TABLE financial_transactions
+  ADD COLUMN ts_epoch BIGINT GENERATED ALWAYS AS
+    (EXTRACT(EPOCH FROM created_at)::BIGINT) STORED;
+```
+
+### Step 4 — Build with ZK tools if needed
+
+If any table has `"sensitivity": "critical"`, install nargo and bb:
+
+```bash
+docker compose build --build-arg INSTALL_ZK_TOOLS=true
+```
+
+Or set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` to use FastLane-only mode (no ZK proofs).
+
+### Step 5 — Smoke-test
+
+```bash
+# 1. Start the proxy
+DATABASE_URL=postgresql://user:pass@host/db docker compose up
+
+# 2. Check startup logs for validation block
+# 3. Send a test query
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4-nano","stream":false,"messages":[{"role":"user","content":"What was our revenue in Q1 2025?"}]}'
+```
+
+### Common problems
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| 0-row aggregate | `client_id=123` default, no matching rows | Set `skip_client_id_filter: true` in schema_config.json |
+| Streaming hang | `stream: true` not supported in standard mode | Set `stream: false` |
+| `NoTableIdentified` 400 | Alias mismatch in schema_config.json | Add aliases matching your users' phrasing |
+| ZK tools absent | nargo/bb not on PATH | Set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` or `INSTALL_ZK_TOOLS=true` |
+| Column not found | `physical_table` or `value_column` name mismatch | Fix in schema_config.json, check DB schema |
+| DB connection refused | Wrong `SUPABASE_URL` or `DATABASE_URL` | Verify credentials, test connectivity |
+
+---
+
 ## What's next
 
 - **Configure your own tables** — [How to Add a Table](HOW_TO_ADD_TABLE.md)
 - **Understand the routing and engines** — [Architecture](ARCHITECTURE.md)
 - **Review all configuration options** — [Configuration Reference](CONFIGURATION.md)
 - **Understand supported query patterns** — [Supported Queries](SUPPORTED_QUERIES.md)
+- **Troubleshoot issues on-site** — [Troubleshooting](TROUBLESHOOTING.md)

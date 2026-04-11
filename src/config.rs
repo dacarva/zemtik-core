@@ -79,7 +79,7 @@ fn default_metric_label() -> String { "total_spend_usd".to_owned() }
 /// Returns true if `s` is a safe SQL/JSON identifier: non-empty, ASCII alphanumeric
 /// or underscore only, max 63 chars. Column/table names from schema_config are
 /// server-controlled, but this defends against misconfiguration.
-fn is_safe_identifier(s: &str) -> bool {
+pub(crate) fn is_safe_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
@@ -203,6 +203,13 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
         if key.trim().eq_ignore_ascii_case("__zemtik_dummy__") {
             anyhow::bail!(
                 "schema_config: table key '{}' is reserved as a padding sentinel — choose a different key",
+                key
+            );
+        }
+        if !is_safe_identifier(key) {
+            anyhow::bail!(
+                "schema_config: table key '{}' is not a safe SQL identifier \
+                 (must match [a-zA-Z_][a-zA-Z0-9_]*, max 63 chars)",
                 key
             );
         }

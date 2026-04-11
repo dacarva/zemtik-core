@@ -68,7 +68,7 @@ mod embed_impl {
             self.model
                 .lock()
                 .map_err(|e| anyhow::anyhow!("model mutex poisoned: {}", e))?
-                .embed(texts.to_vec(), None)
+                .embed(texts, None)
                 .context("embed texts")
         }
 

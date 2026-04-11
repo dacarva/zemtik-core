@@ -111,6 +111,35 @@ async fn spawn_tunnel_proxy() -> (SocketAddr, MockServer) {
     (addr, mock_openai)
 }
 
+/// Poll `/tunnel/audit` until `count >= min_count` or timeout.
+/// Returns the last response body received.
+async fn wait_for_audit_count(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    min_count: u64,
+    timeout_ms: u64,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let resp: Value = client
+            .get(format!("http://{}/tunnel/audit", addr))
+            .header("authorization", "Bearer test-dashboard-key")
+            .send()
+            .await
+            .expect("GET /tunnel/audit failed")
+            .json()
+            .await
+            .expect("parse audit JSON");
+        if resp["count"].as_u64().unwrap_or(0) >= min_count {
+            return resp;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return resp;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn mount_chat_mock(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -459,19 +488,8 @@ async fn test_tunnel_audit_filter_by_status() {
         .await
         .expect("request 2 failed");
 
-    // Wait for FORK 2 background tasks to write both audit records.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    // Unfiltered count — must be at least 2.
-    let unfiltered: Value = client
-        .get(format!("http://{}/tunnel/audit", addr))
-        .header("authorization", "Bearer test-dashboard-key")
-        .send()
-        .await
-        .expect("GET /tunnel/audit failed")
-        .json()
-        .await
-        .expect("parse unfiltered JSON");
+    // Wait for FORK 2 background tasks to write both audit records (poll up to 5s).
+    let unfiltered = wait_for_audit_count(&client, addr, 2, 5000).await;
     let total_count = unfiltered["count"].as_u64().unwrap_or(0);
     assert!(total_count >= 2, "expected at least 2 audit records, got {}", total_count);
 
@@ -563,19 +581,8 @@ async fn test_tunnel_audit_filter_by_diff() {
         .await
         .expect("request 2 failed");
 
-    // Wait for FORK 2 background tasks to write both audit records.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    // Unfiltered count.
-    let unfiltered: Value = client
-        .get(format!("http://{}/tunnel/audit", addr))
-        .header("authorization", "Bearer test-dashboard-key")
-        .send()
-        .await
-        .expect("GET /tunnel/audit failed")
-        .json()
-        .await
-        .expect("parse unfiltered JSON");
+    // Wait for FORK 2 background tasks to write both audit records (poll up to 5s).
+    let unfiltered = wait_for_audit_count(&client, addr, 2, 5000).await;
     let total_count = unfiltered["count"].as_u64().unwrap_or(0);
     assert!(total_count >= 2, "expected at least 2 audit records, got {}", total_count);
 
@@ -1039,3 +1046,45 @@ async fn test_tunnel_streaming_happy_path() {
     }
     assert!(found, "FORK 2 must write an audit record for streaming requests");
 }
+
+/// stream:true in tunnel mode must NOT be rejected with 400.
+/// Tunnel transparently forwards the request — streaming guard must not apply.
+#[tokio::test]
+async fn streaming_passthrough_in_tunnel_mode() {
+    let (addr, mock_openai) = spawn_tunnel_proxy().await;
+
+    // Mount a streaming SSE response.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"id\":\"chatcmpl-stream-001\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+                     data: [DONE]\n\n",
+                ),
+        )
+        .mount(&mock_openai)
+        .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&serde_json::json!({
+            "model": "gpt-5.4-nano",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Q1 2024 aws_spend"}]
+        }))
+        .send()
+        .await
+        .expect("streaming tunnel request failed");
+
+    // Must NOT return 400 — tunnel mode passes stream:true through to OpenAI.
+    assert_ne!(
+        resp.status().as_u16(),
+        400,
+        "tunnel mode must not reject stream:true requests with 400 (streaming guard must not apply)"
+    );
+}
+

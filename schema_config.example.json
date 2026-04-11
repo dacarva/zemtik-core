@@ -130,7 +130,7 @@
       "category_column": null,
       "agg_fn": "COUNT",
       "metric_label": "new_hires",
-      "skip_client_id_filter": true,
+      "skip_client_id_filter": false,
       "example_prompts": [
         "How many people were hired this quarter?",
         "What is our new hire count in Q1 2024?",
@@ -148,7 +148,7 @@
       "category_column": null,
       "agg_fn": "COUNT",
       "metric_label": "headcount",
-      "skip_client_id_filter": true,
+      "skip_client_id_filter": false,
       "example_prompts": [
         "How many employees were hired in Q1 2024?",
         "What is the headcount for this quarter?",

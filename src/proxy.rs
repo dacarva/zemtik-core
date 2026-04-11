@@ -19,7 +19,8 @@ use crate::config::{AggFn, AppConfig, ZemtikMode};
 use crate::intent::IntentBackend;
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
-    OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route, SignatureData, TokenUsage,
+    OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route, SchemaValidationResult,
+    SignatureData, TokenUsage, ZemtikErrorCode,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
 
@@ -57,6 +58,8 @@ pub(crate) struct ProxyState {
     pub(crate) tunnel_audit_db: Option<std::sync::Mutex<Connection>>,
     /// Count of requests where FORK 2 was skipped due to semaphore exhaustion.
     pub(crate) backpressure_count: std::sync::atomic::AtomicU64,
+    /// Schema validation result from startup. Exposed via /health.
+    pub(crate) schema_validation: Arc<SchemaValidationResult>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -171,6 +174,11 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         (None, None)
     };
 
+    // Run startup schema validation (Postgres only; SQLite and skipped modes return immediately).
+    let schema_validation = Arc::new(
+        crate::startup::run_startup_validation(&config, &schema).await
+    );
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_locks,
@@ -185,6 +193,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         tunnel_semaphore,
         tunnel_audit_db,
         backpressure_count: std::sync::atomic::AtomicU64::new(0),
+        schema_validation,
     });
 
     // If any configured origin is "*", use the wildcard policy.
@@ -333,12 +342,40 @@ async fn handle_chat_completions(
         })
         .unwrap_or_default();
 
+    // Streaming guard (standard mode only). Tunnel mode explicitly supports stream:true
+    // via forward_streaming — do NOT apply this guard in tunnel mode.
+    if state.config.mode == crate::config::ZemtikMode::Standard
+        && body.get("stream").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "zemtik_config_error",
+                    "code": ZemtikErrorCode::StreamingNotSupported,
+                    "message": "Set stream: false in your client configuration.",
+                    "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+                    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+                }
+            })),
+        ).into_response());
+    }
+
     // Reject empty prompts early — an empty string silently triggers the expensive
     // ZK slow lane (intent returns NoTableIdentified → ZK fallback). Return 400 instead.
     if prompt.trim().is_empty() {
-        return Err(ProxyError::BadRequest(
-            "user message content is empty or unreadable — ensure the last message has role 'user' with non-empty text content".to_owned(),
-        ));
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "zemtik_config_error",
+                    "code": ZemtikErrorCode::InvalidRequest,
+                    "message": "user message content is empty or unreadable",
+                    "hint": "Ensure the last message has role 'user' with non-empty text content.",
+                    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md"
+                }
+            })),
+        ).into_response());
     }
 
     // Extract intent using SchemaConfig
@@ -378,11 +415,11 @@ async fn handle_chat_completions(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": {
-                        "message": format!(
-                            "Intent extraction failed: {}. Supported patterns: 'Q[1-4] YYYY [table]', '[table] spend YYYY'.",
-                            e
-                        ),
-                        "type": "zemtik_intent_rejection"
+                        "type": "zemtik_intent_error",
+                        "code": ZemtikErrorCode::NoTableIdentified,
+                        "message": format!("Intent extraction failed: {}", e),
+                        "hint": "Add aliases matching your users' phrasing to your table config in schema_config.json.",
+                        "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/HOW_TO_ADD_TABLE.md"
                     }
                 })),
             ).into_response());
@@ -502,12 +539,26 @@ pub(crate) async fn run_fast_lane_engine(
     let fl = match engine_result {
         EngineResult::Ok(r) => r,
         EngineResult::DbError(e) => {
-            return Err(ProxyError::Internal(anyhow::anyhow!("FastLane DB error: {}", e)));
+            return Err(ProxyError::DbError(e));
         }
         EngineResult::SignError(e) => {
             return Err(ProxyError::Internal(anyhow::anyhow!("FastLane sign error: {}", e)));
         }
     };
+
+    // Warn when demo client_id=123 returns 0 rows and skip_client_id_filter is false.
+    // Production databases often have no rows for client_id=123 (the demo default).
+    // Use the parsed config value (not the raw env var) to also catch YAML-configured client_id.
+    if fl.row_count == 0
+        && !table_config.skip_client_id_filter
+        && state.config.client_id == 123
+    {
+        eprintln!(
+            "[PROXY] Warning: query returned 0 rows (table={}, client_id=123). \
+             If this is a single-tenant setup, set skip_client_id_filter=true in schema_config.json.",
+            table
+        );
+    }
 
     Ok(FastLaneEngineOutput { result: fl, table_config, metric_label })
 }
@@ -1468,6 +1519,27 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         }
     }
 
+    // Step 4: append schema_validation results.
+    if let Some(obj) = body.as_object_mut() {
+        let sv = &state.schema_validation;
+        let sv_json = serde_json::json!({
+            "status": sv.status_summary(),
+            "skipped": sv.skipped,
+            "tables": sv.tables.iter().map(|t| serde_json::json!({
+                "table_key": t.table_key,
+                "physical_table": t.physical_table,
+                "status": t.status,
+                "row_count": t.row_count,
+                "warnings": t.warnings,
+            })).collect::<Vec<_>>(),
+            "zk_tools": {
+                "nargo": sv.zk_tools.nargo,
+                "bb": sv.zk_tools.bb,
+            }
+        });
+        obj.insert("schema_validation".to_string(), sv_json);
+    }
+
     let status_code = if db_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status_code, Json(body))
 }
@@ -1493,8 +1565,8 @@ async fn handle_passthrough() -> impl IntoResponse {
 pub(crate) enum ProxyError {
     Internal(anyhow::Error),
     Timeout(String),
-    BadRequest(String),
     UnprocessableEntity(String),
+    DbError(String),
 }
 
 impl std::fmt::Debug for ProxyError {
@@ -1502,8 +1574,8 @@ impl std::fmt::Debug for ProxyError {
         match self {
             ProxyError::Internal(e) => write!(f, "ProxyError::Internal({:?})", e),
             ProxyError::Timeout(s) => write!(f, "ProxyError::Timeout({:?})", s),
-            ProxyError::BadRequest(s) => write!(f, "ProxyError::BadRequest({:?})", s),
             ProxyError::UnprocessableEntity(s) => write!(f, "ProxyError::UnprocessableEntity({:?})", s),
+            ProxyError::DbError(s) => write!(f, "ProxyError::DbError({:?})", s),
         }
     }
 }
@@ -1511,18 +1583,6 @@ impl std::fmt::Debug for ProxyError {
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
         match self {
-            ProxyError::BadRequest(msg) => {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": msg,
-                            "type": "invalid_request_error"
-                        }
-                    })),
-                )
-                    .into_response()
-            }
             ProxyError::UnprocessableEntity(msg) => {
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -1556,6 +1616,22 @@ impl IntoResponse for ProxyError {
                         "error": {
                             "message": format!("Zemtik ZK pipeline error: {}", e),
                             "type": "zemtik_pipeline_error"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+            ProxyError::DbError(msg) => {
+                eprintln!("[PROXY] DB error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "type": "zemtik_db_error",
+                            "code": ZemtikErrorCode::QueryFailed,
+                            "message": "Database query failed — check server logs for details.",
+                            "hint": "Check that physical_table, value_column, and timestamp_column match your schema.",
+                            "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/TROUBLESHOOTING.md"
                         }
                     })),
                 )

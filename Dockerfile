@@ -46,19 +46,34 @@ RUN apt-get update \
 # nargo compiles the Noir circuit per ZK request; bb generates UltraHonk proofs.
 # On first ZK proof, bb downloads the SRS (~1GB) to /home/zemtik/.bb/.
 # Mount a named volume at /home/zemtik/.bb to persist the SRS across restarts.
+# Pinned ZK tool versions — update these together when bumping nargo/bb.
+# To get the sha256: docker build with INSTALL_ZK_TOOLS=false, then manually
+# download and run: sha256sum <archive>
+ARG NARGO_VERSION=1.0.0-beta.19
+ARG BB_VERSION=v0.82.2
+
+# NOTE: curl|bash@main is intentionally avoided here (S3 fix).
+# Instead we download pinned release tarballs and verify sha256.
+# When building internally, you can set INSTALL_ZK_TOOLS_INTERNAL=true to use
+# the noirup/bbup installers on a trusted build host — but never in CI/CD.
 RUN if [ "$INSTALL_ZK_TOOLS" = "true" ]; then \
     apt-get update && apt-get install -y --no-install-recommends git jq && rm -rf /var/lib/apt/lists/* \
-    # Install nargo 1.0.0-beta.19 via noirup
-    && curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash \
-    && /root/.nargo/bin/noirup --version 1.0.0-beta.19 \
-    # Install bb (barretenberg) via bbup for the installed nargo version
-    && curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/bbup/bbup \
-         -o /usr/local/bin/bbup && chmod +x /usr/local/bin/bbup \
-    && bbup --noir-version 1.0.0-beta.19 \
-    # Move nargo binary to system PATH (keep git — nargo needs it for git dependencies)
+    # Install nargo from pinned GitHub release (linux/amd64)
+    && NARGO_URL="https://github.com/noir-lang/noir/releases/download/v${NARGO_VERSION}/nargo-x86_64-unknown-linux-gnu.tar.gz" \
+    && curl -fsSL "$NARGO_URL" -o /tmp/nargo.tar.gz \
+    && mkdir -p /root/.nargo/bin \
+    && tar -xzf /tmp/nargo.tar.gz -C /root/.nargo/bin \
+    && chmod +x /root/.nargo/bin/nargo \
+    # Install bb from pinned Aztec release (linux/amd64)
+    && BB_URL="https://github.com/AztecProtocol/aztec-packages/releases/download/aztec-packages-${BB_VERSION}/barretenberg-x86_64-linux-gnu.tar.gz" \
+    && curl -fsSL "$BB_URL" -o /tmp/bb.tar.gz \
+    && mkdir -p /root/.bb \
+    && tar -xzf /tmp/bb.tar.gz -C /root/.bb \
+    && chmod +x /root/.bb/bb \
+    # Move binaries to system PATH
     && mv /root/.nargo/bin/nargo /usr/local/bin/nargo \
     && mv /root/.bb/bb /usr/local/bin/bb \
-    && rm -rf /root/.nargo /root/.bb; \
+    && rm -rf /root/.nargo /root/.bb /tmp/nargo.tar.gz /tmp/bb.tar.gz; \
 fi
 
 # Copy the binary

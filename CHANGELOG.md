@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-04-11
+
+### Added
+- **Startup schema validation** — on proxy start, zemtik validates each table in `schema_config.json` against the connected Postgres database (if `DATABASE_URL` is set). Prints a formatted block showing row counts and any warnings. SQLite mode skips validation (demo-only). Set `ZEMTIK_SKIP_DB_VALIDATION=1` to suppress.
+- **`ZEMTIK_VALIDATE_ONLY=1`** — run full startup validation, print results, then exit 0 (all OK) or exit 1 (any warning). Enables pre-demo validation: `docker compose run --rm zemtik-proxy env ZEMTIK_VALIDATE_ONLY=1`
+- **Streaming guard** — `stream: true` in standard proxy mode now returns HTTP 400 with `error.code: StreamingNotSupported` immediately, instead of hanging. Tunnel mode is unaffected (streaming passes through).
+- **Structured error bodies** — all 400/500 responses now include `error.type`, `error.code`, `error.hint`, and `error.doc_url` fields. Error codes: `NoTableIdentified`, `StreamingNotSupported`, `InvalidRequest`, `QueryFailed`.
+- **`/health` schema_validation field** — `/health` now includes `schema_validation.status`, `schema_validation.tables`, and `schema_validation.zk_tools` from the startup validation run.
+- **Startup events log** — appends JSONL events to `~/.zemtik/startup_events.jsonl` after each startup validation. Enables post-deployment review.
+- **`docs/TROUBLESHOOTING.md`** — 6-symptom → cause → fix reference for on-site use.
+- **`docs/INTEGRATION_CHECKLIST.md`** — 7-step executable checklist with curl commands + expected outputs.
+- **"Streaming" and "Bring Your Own Database" sections** in `docs/GETTING_STARTED.md`.
+- **"Conversation patterns" section** in `docs/SUPPORTED_QUERIES.md` — explains multi-turn limitation with three workarounds.
+- **`ZemtikErrorCode` enum** in `src/types.rs` — typed error codes with `Display` impl.
+- **`.github/CODEOWNERS`** — requires owner review for any CI/CD workflow changes.
+
+### Fixed
+- **S1 — Security:** Removed `danger_accept_invalid_certs(true)` from `ensure_supabase_table()` in `src/db.rs`. Supabase uses valid CA-signed certs — bypassing TLS verification was unnecessary and created MitM risk at customer deployments.
+- **S2 — Security:** Table key (used as SQL identifier in startup validation) is now validated with `is_safe_identifier` in `validate_schema_config`. Previously, a malformed `schema_config.json` key could inject arbitrary SQL into the startup Postgres count query.
+- **S3 — Security:** DB error strings are no longer echoed in HTTP 500 response bodies. Raw Postgres errors (which include table/column names and constraint details) are logged server-side only; the API response says "check server logs."
+- **`ZEMTIK_VALIDATE_ONLY=1` + `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1`** — when circuit validation is suppressed, `VALIDATE_ONLY` no longer exits 1 due to missing nargo/bb. Both flags now stack correctly.
+- **`/health` `schema_validation.status`** — now reports `"warnings"` when ZK tools (nargo/bb) are missing, instead of silently reporting `"ok"`.
+- **client_id=123 warning** — when demo default `client_id=123` returns 0 rows and `skip_client_id_filter=false`, a warning is logged pointing to the fix. Now uses the parsed config value (catches YAML-configured `client_id`, not just env var).
+- **Test safety:** `startup_validation_skipped_when_env_set` now uses `#[serial]` to prevent undefined behavior from concurrent `set_var`/`remove_var` in parallel test execution.
+
+### Changed
+- `schema_config.example.json` — default `skip_client_id_filter` changed to `true` for `aws_spend` and `travel` tables (single-tenant is the common case for new integrations).
+- Dockerfile ZK tool installation now uses pinned release tarballs instead of `curl | bash @main` (S3 security fix).
+- Tunnel integration tests now run in CI alongside proxy tests.
+
+### Upgrading to v0.9.1
+
+New `[ZEMTIK] Schema validation` output appears in startup logs. This is intentional.
+
+- **Warnings at startup** = real config issues to fix (empty table, missing table, missing ZK tools). Fix them or set `ZEMTIK_SKIP_DB_VALIDATION=1` to suppress.
+- **Both suppression flags** stack correctly: `ZEMTIK_SKIP_DB_VALIDATION=1 ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` → clean startup with no validation output.
+
+---
+
 ## [0.9.0] - 2026-04-09
 
 ### Added
