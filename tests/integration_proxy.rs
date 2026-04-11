@@ -438,7 +438,9 @@ async fn health_includes_schema_validation_field() {
 
 /// startup_validation_skipped_when_env_set: ZEMTIK_SKIP_DB_VALIDATION=1
 /// → /health schema_validation.status == "skipped".
+/// Uses #[serial] because std::env::set_var/remove_var is not safe under parallel test execution.
 #[tokio::test]
+#[serial_test::serial]
 async fn startup_validation_skipped_when_env_set() {
     std::env::set_var("ZEMTIK_SKIP_DB_VALIDATION", "1");
     let (addr, _mock) = spawn_test_proxy().await;

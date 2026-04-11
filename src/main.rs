@@ -81,9 +81,10 @@ async fn main() -> anyhow::Result<()> {
                 let schema = app_config.schema_config.clone().unwrap();
                 let config = std::sync::Arc::new(app_config);
                 let result = zemtik::startup::run_startup_validation(&config, &schema).await;
+                let zk_missing = !config.skip_circuit_validation
+                    && (!result.zk_tools.nargo || !result.zk_tools.bb);
                 let has_warnings = result.tables.iter().any(|t| !t.warnings.is_empty())
-                    || !result.zk_tools.nargo
-                    || !result.zk_tools.bb;
+                    || zk_missing;
                 if has_warnings {
                     eprintln!("[VALIDATE] Schema validation completed with warnings. Fix the issues above before starting the proxy.");
                     std::process::exit(1);

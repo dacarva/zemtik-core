@@ -1,6 +1,9 @@
 /// Startup validation: schema column checks, ZK tools detection, startup event log.
 ///
-/// Runs once inside `build_proxy_router` before the server starts accepting requests.
+/// Called from two sites:
+/// - `build_proxy_router` (once at server startup before accepting requests)
+/// - `main.rs` ZEMTIK_VALIDATE_ONLY path (validate-then-exit, no server started)
+///
 /// All failures are WARNINGs — the proxy starts regardless. Pilot operators see the
 /// validation block in startup logs and know exactly what to fix before the first query.
 use std::sync::Arc;
@@ -31,6 +34,20 @@ pub async fn run_startup_validation(
     let bb_ok = which("bb");
     let zk_tools = ZkToolsStatus { nargo: nargo_ok, bb: bb_ok };
 
+    if skip_db || is_sqlite {
+        if skip_db {
+            println!("[ZEMTIK] Schema validation skipped (ZEMTIK_SKIP_DB_VALIDATION=1)");
+        } else {
+            println!("[ZEMTIK] Schema validation skipped (SQLite backend — demo mode)");
+        }
+        return SchemaValidationResult {
+            tables: vec![],
+            zk_tools,
+            skipped: true,
+        };
+    }
+
+    // Warn about missing ZK tools only when validation is actually running (not in skip/SQLite modes).
     if !config.skip_circuit_validation && (!nargo_ok || !bb_ok) {
         let missing: Vec<&str> = [(!nargo_ok).then_some("nargo"), (!bb_ok).then_some("bb")]
             .into_iter()
@@ -43,19 +60,6 @@ pub async fn run_startup_validation(
              or rebuild with INSTALL_ZK_TOOLS=true to enable ZK SlowLane.",
             missing.join(", ")
         );
-    }
-
-    if skip_db || is_sqlite {
-        if skip_db {
-            println!("[ZEMTIK] Schema validation skipped (ZEMTIK_SKIP_DB_VALIDATION=1)");
-        } else {
-            println!("[ZEMTIK] Schema validation skipped (SQLite backend — demo mode)");
-        }
-        return SchemaValidationResult {
-            tables: vec![],
-            zk_tools,
-            skipped: true,
-        };
     }
 
     // Validate example_prompts presence (warns when embedding backend falls back to regex).
@@ -166,11 +170,6 @@ async fn validate_table(
                      If this is a single-tenant setup, verify data exists.",
                     physical_table
                 ));
-            }
-            // Physical table warns in SQLite; here log it if no physical_table override set
-            // but physical_table != table_key (edge case — usually caught by config validator).
-            if tc.physical_table.is_none() {
-                // physical_table defaults to key; no warning needed
             }
             let status = if warnings.is_empty() { "ok" } else { "warning" };
             TableValidationResult {

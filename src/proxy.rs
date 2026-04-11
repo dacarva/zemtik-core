@@ -539,7 +539,6 @@ pub(crate) async fn run_fast_lane_engine(
     let fl = match engine_result {
         EngineResult::Ok(r) => r,
         EngineResult::DbError(e) => {
-            eprintln!("[PROXY] FastLane DB error: {}", e);
             return Err(ProxyError::DbError(e));
         }
         EngineResult::SignError(e) => {
@@ -549,10 +548,10 @@ pub(crate) async fn run_fast_lane_engine(
 
     // Warn when demo client_id=123 returns 0 rows and skip_client_id_filter is false.
     // Production databases often have no rows for client_id=123 (the demo default).
+    // Use the parsed config value (not the raw env var) to also catch YAML-configured client_id.
     if fl.row_count == 0
         && !table_config.skip_client_id_filter
-        && client_id == 123
-        && std::env::var("ZEMTIK_CLIENT_ID").unwrap_or_default() == "123"
+        && state.config.client_id == 123
     {
         eprintln!(
             "[PROXY] Warning: query returned 0 rows (table={}, client_id=123). \
@@ -1630,7 +1629,7 @@ impl IntoResponse for ProxyError {
                         "error": {
                             "type": "zemtik_db_error",
                             "code": ZemtikErrorCode::QueryFailed,
-                            "message": format!("Database query failed: {}", msg),
+                            "message": "Database query failed — check server logs for details.",
                             "hint": "Check that physical_table, value_column, and timestamp_column match your schema.",
                             "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/TROUBLESHOOTING.md"
                         }

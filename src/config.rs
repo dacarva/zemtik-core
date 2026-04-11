@@ -206,6 +206,13 @@ pub fn validate_schema_config(config: &SchemaConfig, require_embed_fields: bool)
                 key
             );
         }
+        if !is_safe_identifier(key) {
+            anyhow::bail!(
+                "schema_config: table key '{}' is not a safe SQL identifier \
+                 (must match [a-zA-Z_][a-zA-Z0-9_]*, max 63 chars)",
+                key
+            );
+        }
         if tc.sensitivity != "critical" && tc.sensitivity != "low" {
             anyhow::bail!(
                 "schema_config: table '{}' has invalid sensitivity '{}' (must be 'critical' or 'low')",

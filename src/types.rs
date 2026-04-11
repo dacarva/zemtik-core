@@ -400,7 +400,10 @@ impl SchemaValidationResult {
     pub fn status_summary(&self) -> &'static str {
         if self.skipped {
             "skipped"
-        } else if self.tables.iter().any(|t| !t.warnings.is_empty()) {
+        } else if self.tables.iter().any(|t| !t.warnings.is_empty())
+            || !self.zk_tools.nargo
+            || !self.zk_tools.bb
+        {
             "warnings"
         } else {
             "ok"
