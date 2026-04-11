@@ -17,6 +17,18 @@ Zemtik resolves configuration in this order, with later sources overriding earli
 
 You can mix layers freely. Most deployments use only `.env` + `schema_config.json`.
 
+```mermaid
+flowchart LR
+    D["Hardcoded defaults\n~/.zemtik/ paths"]
+    Y["~/.zemtik/config.yaml"]
+    E["Environment variables\nZEMTIK_* · OPENAI_API_KEY\nDB_BACKEND · SUPABASE_*"]
+    C["CLI flags\n--port · --circuit-dir"]
+
+    D -->|overridden by| Y
+    Y -->|overridden by| E
+    E -->|overridden by| C
+```
+
 ---
 
 ## Environment variables
@@ -51,7 +63,7 @@ You can mix layers freely. Most deployments use only `.env` + `schema_config.jso
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
 | `ZEMTIK_INTENT_BACKEND` | `embed` | `embed`, `regex` | Intent extraction backend. `embed` uses BGE-small-en ONNX for semantic matching. `regex` uses keyword substring matching. Case-insensitive. |
-| `ZEMTIK_INTENT_THRESHOLD` | `0.65` | `0.0`–`1.0` | Cosine similarity threshold for the embedding backend. Prompts below this confidence score are routed to ZK SlowLane. |
+| `ZEMTIK_INTENT_THRESHOLD` | `0.65` | `0.0`–`1.0` | Cosine similarity threshold for the embedding backend. Prompts below this confidence score return HTTP 400 `NoTableIdentified` — they are not routed to ZK SlowLane. |
 
 ### OpenAI client
 
@@ -73,6 +85,13 @@ Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNN
 | `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` | `50` | positive integer | Max concurrent background verifications. Excess requests get `x-zemtik-verified: false`. |
 | `ZEMTIK_DASHBOARD_API_KEY` | — | string | If set, `/tunnel/audit`, `/tunnel/audit/csv`, and `/tunnel/summary` require `Authorization: Bearer <key>`. |
 | `ZEMTIK_TUNNEL_AUDIT_DB_PATH` | `~/.zemtik/tunnel_audit.db` | file path | Path to the SQLite audit database (WAL mode, separate from receipts.db). |
+
+### Startup validation (v0.9.1+)
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_SKIP_DB_VALIDATION` | `0` | `0`, `1`, `true`, `yes`, `on` | When set, skips all startup Postgres schema validation (per-table column/row checks). Required in Docker and integration tests where `DATABASE_URL` is absent. FastLane and ZK queries are unaffected. |
+| `ZEMTIK_VALIDATE_ONLY` | `0` | `0`, `1`, `true` | When set, runs the full startup validation, prints results, then exits with code `0` (all OK) or `1` (any warnings found). No server is started. Analogous to `nginx -t`. |
 
 ### ZK pipeline
 
@@ -201,7 +220,7 @@ The routing decision is made per-request based on the intent result and `schema_
 | `sensitivity = "critical"` | ZK SlowLane |
 | Table not found in `schema_config.json` | ZK SlowLane (fail-secure) |
 | Intent extraction fails (`NoTableIdentified`) | HTTP 400 |
-| Time range ambiguous (`TimeRangeAmbiguous`) | ZK SlowLane |
+| Time range ambiguous (`TimeRangeAmbiguous`) | HTTP 400 (treated as `NoTableIdentified`) |
 | Confidence below `ZEMTIK_INTENT_THRESHOLD` | HTTP 400 (same as `NoTableIdentified`) |
 
 ---

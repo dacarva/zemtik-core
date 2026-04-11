@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.8.2** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults. v0.7.0 adds the universal FastLane engine: any table in `schema_config.json` with `"sensitivity": "low"` automatically routes through FastLane; `AggFn` enum (SUM/COUNT); new `TableConfig` fields (`value_column`, `timestamp_column`, `category_column`, `agg_fn`, `metric_label`, `skip_client_id_filter`, `physical_table`); `attest_fast_lane()` public API; `signing_version: 2`; and fixes ISSUE-001 (`DB_BACKEND=sqlite` ignored when Supabase creds were set). v0.8.0 (Universal ZK Engine) adds `AggFn::Avg` (ZK composite: two sequential proofs + attestation), mini-circuit layout (`circuit/sum/`, `circuit/count/`, `circuit/lib/`), variable row-count padding with sentinel transactions, `actual_row_count` field added alongside `row_count`, `evidence_version: 2` on all proxy responses, receipts DB v5 migration, and per-agg pipeline locks (SUM and COUNT run concurrently). v0.8.2 adds Docker support (multi-stage build, non-root user), `docker-compose.yml`, CI pipeline (`ci.yml`: unit + integration tests, clippy, Docker build), Docker multi-platform publish in `release.yml`, `build_proxy_router()` extracted from `run_proxy()` for testability, `ZEMTIK_OPENAI_BASE_URL` + `ZEMTIK_OPENAI_MODEL` + `ZEMTIK_SKIP_CIRCUIT_VALIDATION` env vars, and 7 integration tests in `tests/integration_proxy.rs`.
+**Scope note:** This document is aligned with **v0.9.1** (see `CHANGELOG.md`). The ZK slow-lane cryptography described here is unchanged in spirit from earlier releases; middleware around intent extraction, routing, and FastLane landed in v0.3.0–v0.4.0. v0.5.x adds timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, and a configurable `bb verify` timeout. v0.6.0 adds Supabase FastLane connector, configurable bind/CORS, multi-client support, `bb` process kill on timeout, and hardened Supabase defaults. v0.7.0 adds the universal FastLane engine: any table in `schema_config.json` with `"sensitivity": "low"` automatically routes through FastLane; `AggFn` enum (SUM/COUNT); new `TableConfig` fields (`value_column`, `timestamp_column`, `category_column`, `agg_fn`, `metric_label`, `skip_client_id_filter`, `physical_table`); `attest_fast_lane()` public API; `signing_version: 2`; and fixes ISSUE-001 (`DB_BACKEND=sqlite` ignored when Supabase creds were set). v0.8.0 (Universal ZK Engine) adds `AggFn::Avg` (ZK composite: two sequential proofs + attestation), mini-circuit layout (`circuit/sum/`, `circuit/count/`, `circuit/lib/`), variable row-count padding with sentinel transactions, `actual_row_count` field added alongside `row_count`, `evidence_version: 2` on all proxy responses, receipts DB v5 migration, and per-agg pipeline locks (SUM and COUNT run concurrently). v0.8.2 adds Docker support (multi-stage build, non-root user), `docker-compose.yml`, CI pipeline (`ci.yml`: unit + integration tests, clippy, Docker build), Docker multi-platform publish in `release.yml`, `build_proxy_router()` extracted from `run_proxy()` for testability, `ZEMTIK_OPENAI_BASE_URL` + `ZEMTIK_OPENAI_MODEL` + `ZEMTIK_SKIP_CIRCUIT_VALIDATION` env vars, and 7 integration tests in `tests/integration_proxy.rs`. v0.9.0 adds Tunnel Mode (`ZEMTIK_MODE=tunnel`): transparent passthrough proxy with background ZK verification (FORK 1 + FORK 2), `TunnelAuditRecord` persistence, `TunnelMatchStatus` with six variants (`Matched`, `Diverged`, `Unmatched`, `Error`, `Timeout`, `Backpressure`), and dashboard endpoints (`/tunnel/audit`, `/tunnel/summary`). v0.9.1 adds `src/startup.rs` (startup schema validation: Postgres column/row checks per table, ZK tools detection, `example_prompts` warnings, JSONL event log at `~/.zemtik/startup_events.jsonl`), `ZEMTIK_SKIP_DB_VALIDATION` and `ZEMTIK_VALIDATE_ONLY` env vars, `ZemtikErrorCode` structured error enum (`NoTableIdentified`, `StreamingNotSupported`, `InvalidRequest`, `QueryFailed`), streaming guard (standard mode rejects `stream:true` with HTTP 400; tunnel mode passes through), `/health` extended with `schema_validation` object, and three security fixes: S1 (removed `danger_accept_invalid_certs`), S2 (`is_safe_identifier` applied to schema config keys), S3 (raw Postgres errors no longer appear in HTTP responses).
 
 ---
 
@@ -32,44 +32,28 @@ The mathematical mechanism for the **ZK slow lane** is described below. The **Fa
 
 The diagram below is the trust boundary for **critical** queries: batches of signed transactions stay inside the perimeter until reduced to a single verified sum.
 
-```
-Bank Perimeter
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  ┌──────────────┐    sign     ┌───────────────────────┐    │
-│  │  Transaction │ ──────────► │  Bank KMS (Mock)       │    │
-│  │  DB (SQLite  │             │  BabyJubJub EdDSA      │    │
-│  │  or Supabase)│             │  Poseidon hash tree    │    │
-│  └──────────────┘             └───────────┬───────────┘    │
-│         │                                 │                 │
-│         │ raw rows (private)              │ signature       │
-│         ▼                                 ▼                 │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │              Noir ZK Circuit                          │   │
-│  │                                                       │   │
-│  │  1. Verify EdDSA signature over transaction hash      │   │
-│  │     assert(eddsa_verify(bank_pub_key, sig, hash))     │   │
-│  │                                                       │   │
-│  │  2. Aggregate: SUM(amount) WHERE category matches     │   │
-│  │     AND timestamp IN [start, end]                     │   │
-│  │                                                       │   │
-│  │  Private witness: 10 batches × 50 rows, EdDSA/batch   │   │
-│  │  Public output: verified aggregate (Field)            │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                             │                               │
-│                             │ $158,100  (one number)        │
-└─────────────────────────────┼───────────────────────────────┘
-                              │
-                              ▼
-                   ┌─────────────────────┐
-                   │  OpenAI API         │
-                   │  (Chat Completions) │
-                   │                     │
-                   │  Payload (example): │
-                   │  { category,        │
-                   │    total_spend_usd, │
-                   │    data_provenance }│
-                   └─────────────────────┘
+```mermaid
+flowchart LR
+    subgraph perimeter["Bank Perimeter"]
+        DB["Transaction DB\n(SQLite or Supabase)"]
+        KMS["Bank KMS\nBabyJubJub EdDSA\nPoseidon hash tree"]
+        subgraph circuit["Noir ZK Circuit  (src/prover.rs)"]
+            direction TB
+            C1["1. assert eddsa_verify\n(bank_pub_key, sig, batch_hash)"]
+            C2["2. Masked accumulation\nSUM/COUNT WHERE category\nAND timestamp IN range"]
+            C1 --> C2
+        end
+        DB -->|"raw rows\n(private witnesses)"| circuit
+        DB -->|"batch sign"| KMS
+        KMS -->|"EdDSA signature\nper batch"| circuit
+    end
+
+    circuit -->|"single aggregate Field\ne.g. $158,100"| OpenAI
+
+    OpenAI["OpenAI API\nChat Completions\n{ category, total, data_provenance }"]
+
+    style perimeter fill:#f0f4ff,stroke:#4a6fa5,stroke-width:2px
+    style circuit fill:#e8f0e8,stroke:#3a7a3a,stroke-width:1px
 ```
 
 ---
@@ -82,6 +66,8 @@ Bank Perimeter
 | Proxy | `cargo run -- proxy` | Axum server (default `:4000`): intercepts `POST /v1/chat/completions`, runs intent → router → FastLane or ZK slow lane |
 | Verify | `cargo run -- verify <bundle.zip>` | Offline `bb verify` on a portable proof bundle |
 | List | `cargo run -- list` | Prints recent rows from `~/.zemtik/receipts.db` (includes `intent_confidence` where present) |
+| List-tunnel | `cargo run -- list-tunnel` | Prints recent tunnel audit records from `~/.zemtik/tunnel_audit.db` |
+| Tunnel proxy | `ZEMTIK_MODE=tunnel cargo run -- proxy` | Transparent passthrough proxy: FORK 1 forwards all traffic unmodified; FORK 2 runs ZK verification in background and logs `TunnelAuditRecord` |
 
 External toolchain on PATH: **Noir** `nargo` (1.0.0-beta.19), **Barretenberg** `bb` (v4.x / UltraHonk; project docs use `v4.0.0-nightly`).
 
@@ -91,18 +77,47 @@ External toolchain on PATH: **Noir** `nargo` (1.0.0-beta.19), **Barretenberg** `
 
 Natural-language prompts are interpreted **without calling an LLM** for routing. v0.4.0 adds an embedding-based matcher; v0.3.0 regex logic remains available as fallback.
 
-```
-POST /v1/chat/completions (user prompt)
-  → Intent extraction (intent.rs: IntentBackend trait, no LLM)
-      ├── EmbeddingBackend (default): fastembed + BGE-small-en ONNX, cosine similarity
-      │     over schema index (table keys, aliases, descriptions, example_prompts)
-      │     → DeterministicTimeParser (time_parser.rs) for time range
-      │     → low confidence / ambiguous time → secure fallback toward ZK SlowLane
-      └── RegexBackend (ZEMTIK_INTENT_BACKEND=regex or embed init failure):
-            keyword / substring matching against schema
-  → Routing (router.rs: sensitivity from schema_config.json)
-      ├── FastLane: DB aggregate — SUM or COUNT (SQLite or Supabase) → BabyJubJub attestation → EvidencePack → OpenAI
-      └── ZK SlowLane (critical tables or unknown table): full batch ZK pipeline → OpenAI
+```mermaid
+flowchart TD
+    POST["POST /v1/chat/completions\n(user prompt)"]
+    POST --> IntentBackend
+
+    subgraph intent["Intent Extraction  (src/intent.rs — no LLM)"]
+        IntentBackend{{"ZEMTIK_INTENT_BACKEND?"}}
+        Embed["EmbeddingBackend\nBGE-small-en ONNX\ncosine similarity"]
+        Regex["RegexBackend\nkeyword/substring\n(fallback)"]
+        TimeParser["DeterministicTimeParser\n(src/time_parser.rs)"]
+        IntentBackend -->|embed| Embed
+        IntentBackend -->|regex| Regex
+        Embed --> TimeParser
+        Regex --> TimeParser
+    end
+
+    TimeParser --> Router
+
+    subgraph routing["Routing  (src/router.rs)"]
+        Router{{"schema_config.json\nsensitivity?"}}
+    end
+
+    Router -->|"low"| FastLane
+    Router -->|"critical or unknown\n(fail-secure)"| ZKSlow
+
+    subgraph fl["FastLane  (src/engine_fast.rs)"]
+        FastLane["DB aggregate\nSUM or COUNT\n(SQLite or Supabase)"]
+        Attest["BabyJubJub attestation\nattestation_hash"]
+        FastLane --> Attest
+    end
+
+    subgraph zk["ZK SlowLane  (src/prover.rs)"]
+        ZKSlow["Fetch 500 rows\n(private witnesses)"]
+        Sign["Batch sign\nEdDSA × 10 batches"]
+        Prove["nargo execute\n+ bb prove\n+ bb verify"]
+        ZKSlow --> Sign --> Prove
+    end
+
+    Attest -->|"aggregate + attestation_hash\ndata_exfiltrated: 0"| OpenAI
+    Prove -->|"aggregate + proof_hash\ndata_exfiltrated: 0"| OpenAI
+    OpenAI["OpenAI API\ngpt-5.4-nano"]
 ```
 
 **Configuration:** `schema_config.json` lives at `~/.zemtik/schema_config.json` in normal deployments; `schema_config.example.json` is the template. Embedding mode expects each table to include `description` and `example_prompts`; missing fields warn and fall back to `RegexBackend`.
@@ -115,7 +130,7 @@ POST /v1/chat/completions (user prompt)
 
 | Module | Responsibility |
 |--------|------------------|
-| `main.rs` | CLI routing: pipeline, `proxy`, `verify`, `list` |
+| `main.rs` | CLI routing: pipeline, `proxy`, `verify`, `list`, `list-tunnel`; `ZEMTIK_VALIDATE_ONLY` exit path |
 | `proxy.rs` | HTTP proxy, FastLane / ZK dispatch, receipt headers |
 | `intent.rs` | `IntentBackend` trait, `RegexBackend`, dispatch to embed backend |
 | `intent_embed.rs` | `EmbeddingBackend`, schema index, cosine match |
@@ -130,8 +145,10 @@ POST /v1/chat/completions (user prompt)
 | `config.rs` | Layered config + schema load |
 | `receipts.rs` | SQLite receipts (v5: adds `actual_row_count`; v3: `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
 | `keys.rs` | BabyJubJub key at `~/.zemtik/keys/bank_sk` (0600) |
-| `types.rs` | `IntentResult`, `Route`, `EngineResult`, `EvidencePack`, … |
+| `types.rs` | `IntentResult`, `Route`, `EngineResult`, `EvidencePack`, `ZemtikErrorCode`, `TunnelMatchStatus`, … |
 | `audit.rs` | JSON audit records under `audit/` |
+| `startup.rs` | Startup schema validation: Postgres column/row checks per table, ZK tools detection, `example_prompts` warnings, JSONL event log |
+| `tunnel.rs` | Tunnel mode: FORK 1 (transparent forward, streaming), FORK 2 (background ZK verification), `TunnelAuditRecord` persistence, diff computation |
 
 Layered config order: defaults → `~/.zemtik/config.yaml` → env (`ZEMTIK_*`, `OPENAI_API_KEY`, `DB_BACKEND`, …) → CLI flags (`--port`, `--circuit-dir`).
 
@@ -248,7 +265,29 @@ Per batch: reconstruct 4-level Poseidon tree → `eddsa_verify::<PoseidonHasher>
 
 ZK slow lane writes portable ZIP bundles under `~/.zemtik/receipts/` and rows in `receipts.db` (engine used, proof hash, prompt/request hashes, `intent_confidence` in v2, `outgoing_prompt_hash` in v3). Bundles at `bundle_version >= 2` include a `manifest.json` sidecar (SHA-256 of `public_inputs_readable.json`); `zemtik verify` enforces manifest presence for these bundles. **`cargo run -- verify`** replays `bb verify` on a bundle. The HTTP proxy also exposes a receipt viewer route for bundle ids (see `proxy.rs`).
 
-### 10. The OpenAI Client (`src/openai.rs` and proxy injection)
+### 10. Health Endpoint (`GET /health`)
+
+Returns a JSON object with proxy status, version, and (v0.9.1+) the startup validation result:
+
+```json
+{
+  "status": "ok",
+  "version": "0.9.1",
+  "schema_validation": {
+    "status": "ok",
+    "skipped": false,
+    "zk_tools": { "nargo": true, "bb": true },
+    "tables": [
+      { "table": "aws_spend", "status": "ok", "row_count": 500, "warnings": [] },
+      { "table": "payroll",   "status": "warn", "row_count": 0,   "warnings": ["table is empty"] }
+    ]
+  }
+}
+```
+
+`schema_validation.skipped: true` when `ZEMTIK_SKIP_DB_VALIDATION=1` or the backend is SQLite.
+
+### 11. The OpenAI Client (`src/openai.rs` and proxy injection)
 
 **CLI pipeline** sends a JSON payload including `period_start` / `period_end` and `data_provenance: "ZEMTIK_VALID_ZK_PROOF"` (see `openai.rs`).
 
@@ -614,6 +653,111 @@ Policy (`schema_config.json` `"sensitivity"` field) is the only control that det
 8. **FastLane data source:** FastLane supports two backends. With `DB_BACKEND=sqlite` (default), it queries the in-memory seeded SQLite ledger via `aggregate_table()`. With `DB_BACKEND=supabase` (and `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` set), it queries PostgREST via `query_aggregate_table()` and signs the aggregate. The Supabase path is now fully generic (SUM/COUNT, any table) as of v0.7.0. Note: `DB_BACKEND=supabase` must be set explicitly — having Supabase credentials without this env var keeps the SQLite path active (ISSUE-001 fix, v0.7.0).
 
 9. **Embedding model:** First proxy start may download ~130MB ONNX to `~/.zemtik/models/`; air-gapped deploys can set `ZEMTIK_INTENT_BACKEND=regex`.
+
+---
+
+## Startup Validation (v0.9.1)
+
+`src/startup.rs::run_startup_validation()` runs once at proxy startup (before accepting requests) and exposes results via `/health`. It is non-blocking — warnings do not prevent the server from starting.
+
+```mermaid
+flowchart TD
+    Start["run_startup_validation()\nsrc/startup.rs"]
+    Start --> SkipCheck{{"ZEMTIK_SKIP_DB_VALIDATION\nor DB_BACKEND != supabase?"}}
+    SkipCheck -->|yes| Skipped["Return SchemaValidationResult\n(skipped: true)"]
+    SkipCheck -->|no| ZKTools
+
+    ZKTools["Probe ZK tools\nnargo --version\nbb --version"]
+    ZKTools --> ExPrompts
+
+    ExPrompts["Warn: tables without\nexample_prompts\n(embedding fallback risk)"]
+    ExPrompts --> DBCheck
+
+    DBCheck{{"DATABASE_URL\nset?"}}
+    DBCheck -->|no| NoURL["Warn, return partial result\n(no Postgres checks)"]
+    DBCheck -->|yes| ForEach
+
+    ForEach["For each table in schema_config.json"]
+    ForEach --> Validate["is_safe_identifier(physical_table)\n(SQL injection guard)"]
+    Validate --> Connect["Connect Postgres\n500ms timeout"]
+    Connect --> Count["SELECT COUNT\n500ms timeout"]
+    Count --> Result["TableValidationResult\n{status, row_count, warnings}"]
+    Result --> ForEach
+
+    ForEach -->|"all done"| Print["Print validation block\n[ZEMTIK] Schema validation..."]
+    Print --> JSONL["Append to\n~/.zemtik/startup_events.jsonl"]
+    JSONL --> Return["Return SchemaValidationResult\n→ ProxyState → /health"]
+```
+
+**Skip paths:** `ZEMTIK_SKIP_DB_VALIDATION=1` skips all validation (required in Docker and integration tests where Postgres is unavailable). Non-Supabase backends (SQLite) skip automatically.
+
+**`ZEMTIK_VALIDATE_ONLY=1`:** Runs the full startup validation, prints results, then exits with code `0` (all OK) or `1` (any warnings). Analogous to `nginx -t` — useful for pre-deployment config verification.
+
+---
+
+## Structured Error Codes (v0.9.1)
+
+All proxy error responses (`4xx` / `5xx`) include a structured body:
+
+```json
+{
+  "error": {
+    "type": "zemtik_intent_error",
+    "code": "NoTableIdentified",
+    "message": "Could not identify a target table from the prompt.",
+    "hint": "Check that schema_config.json has a table matching your query.",
+    "doc_url": "https://github.com/.../docs/TROUBLESHOOTING.md"
+  }
+}
+```
+
+| Code | HTTP | Trigger | `type` |
+|------|------|---------|--------|
+| `StreamingNotSupported` | 400 | `stream: true` in standard proxy mode | `zemtik_config_error` |
+| `InvalidRequest` | 400 | Empty or unreadable user message | `zemtik_config_error` |
+| `NoTableIdentified` | 400 | Intent extraction returns no table | `zemtik_intent_error` |
+| `QueryFailed` | 500 | Database query error | `zemtik_db_error` |
+
+Raw Postgres error strings are **never** included in HTTP responses (S3 fix). Server-side errors are logged to stderr; the response body says "check server logs" with a link to `TROUBLESHOOTING.md`.
+
+**Streaming note:** `stream: true` in standard mode returns HTTP 400 with `StreamingNotSupported`. Tunnel mode is excluded from this guard — it forwards streaming requests (including SSE) to OpenAI unmodified via FORK 1.
+
+---
+
+## Security Hardening (v0.9.1)
+
+Three security fixes landed in v0.9.1:
+
+- **S1 — TLS verification restored (`src/db.rs`):** `danger_accept_invalid_certs(true)` was removed from the Supabase client in `ensure_supabase_table()`. Supabase uses valid CA-signed certificates; the prior bypass created a MitM window for anyone on the network path.
+- **S2 — SQL identifier validation on schema keys (`src/config.rs`):** `is_safe_identifier()` (now `pub(crate)`) is applied to all `schema_config.json` table keys during `validate_schema_config()` at startup, not just to column names. A malformed key such as `"aws; DROP TABLE transactions--"` is rejected before it can reach a SQL query.
+- **S3 — No raw Postgres errors in HTTP responses (`src/proxy.rs`):** Database errors caught by the proxy are logged to stderr with full detail; the HTTP response body contains only a generic `QueryFailed` code and a doc link. No raw `pq: ...` or driver error strings are exposed to callers.
+
+---
+
+## CI/CD Pipeline
+
+```mermaid
+flowchart TD
+    subgraph ci["ci.yml — every push / PR"]
+        Tests["cargo test\n--no-default-features --features regex-only\nZEMTIK_SKIP_CIRCUIT_VALIDATION=1\nZEMTIK_SKIP_DB_VALIDATION=1"]
+        Tunnel["cargo test --test integration_tunnel\n--no-default-features --features regex-only\nZEMTIK_SKIP_CIRCUIT_VALIDATION=1"]
+        Docker["Docker build\nlinux/amd64\n(smoke test, no push)"]
+        Clippy["cargo clippy\n-D warnings"]
+        Tests & Tunnel & Docker & Clippy
+    end
+
+    subgraph release["release.yml — on tag v*"]
+        Eval["Intent eval gate\ncargo run --bin intent-eval\n≥95% accuracy required"]
+        Build["Cross-compile\nx86_64-linux\naarch64-darwin"]
+        DockerPush["Docker build + push\nGHCR multi-arch\nlinux/amd64 + linux/arm64"]
+        Release["GitHub Release\nauto release notes\npre-release if tag contains '-'"]
+        Eval --> Build
+        Eval --> DockerPush
+        Build --> Release
+    end
+```
+
+Postgres 16 service container is available in CI for future DB integration tests. `ZEMTIK_SKIP_DB_VALIDATION=1` is set in all test jobs to skip startup schema validation when `DATABASE_URL` is absent.
 
 ---
 

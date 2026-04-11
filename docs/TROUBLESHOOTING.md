@@ -11,7 +11,7 @@
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Every query returns `$0.00` or `0` | Demo `client_id=123` with no matching rows in customer DB | Set `"skip_client_id_filter": true` in `schema_config.json` |
-| JS client hangs indefinitely | `stream: true` sent to standard proxy — not supported | Set `stream: false` in client config |
+| JS client hangs or HTTP 400 `StreamingNotSupported` | `stream: true` sent to standard proxy — not supported | Set `stream: false` in client config. Tunnel mode supports streaming. |
 | HTTP 400 `NoTableIdentified` | Prompt alias mismatch in `schema_config.json` | Add aliases matching how users phrase queries |
 | HTTP 500 on critical-sensitivity tables | `nargo` or `bb` not on PATH | Set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` (FastLane-only) or `INSTALL_ZK_TOOLS=true` |
 | HTTP 500 `QueryFailed` | Wrong `physical_table`, `value_column`, or `timestamp_column` | Verify column names match actual DB schema |

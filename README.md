@@ -36,7 +36,7 @@ The response includes an `evidence` block with `data_exfiltrated: 0` and `attest
 
 To use your own data: mount a custom `schema_config.json` — see the commented volume in `docker-compose.yml`.
 
-> **POC status (v0.8.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.9.1):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -44,42 +44,36 @@ To use your own data: mount a custom `schema_config.json` — see the commented 
 
 Zemtik runs as a local proxy on `localhost:4000`. Point your application at it instead of `api.openai.com` — the HTTP interface is OpenAI-compatible, so no client-side code changes are required. Server-side setup requires a conforming database schema and `schema_config.json` (see [Getting Started](docs/GETTING_STARTED.md)).
 
-```
-Your Application
-      │
-      │  POST /v1/chat/completions
-      │  (natural-language query)
-      ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                     Zemtik Proxy (localhost:4000)                    │
-│                                                                      │
-│      Intent extraction + routing (schema_config.json sensitivity)    │
-│                               │                                      │
-│         ┌─────────────────────┴──────────────────────────┐           │
-│    sensitivity: "low"                    sensitivity: "critical"      │
-│         ▼                                               ▼            │
-│  ┌─────────────────────┐               ┌────────────────────────┐   │
-│  │      FastLane        │               │      ZK SlowLane        │   │
-│  │                     │               │                        │   │
-│  │  DB aggregate query  │               │  Transaction DB        │   │
-│  │  (SUM or COUNT)      │               │  (raw rows as private  │   │
-│  │        │             │               │  witnesses — never sent)│   │
-│  │        ▼             │               │        │               │   │
-│  │  BabyJubJub EdDSA   │               │        ▼               │   │
-│  │  sign(aggregate +   │               │  BabyJubJub batch sign │   │
-│  │  query descriptor)  │               │  + Noir ZK Circuit     │   │
-│  │  ── NO ZK PROOF ──  │               │  + UltraHonk proof     │   │
-│  │  < 50ms             │               │  (~17s on CPU)         │   │
-│  └──────────┬──────────┘               └────────────┬───────────┘   │
-│             │ attestation_hash                       │ proof_hash    │
-└─────────────┼───────────────────────────────────────┼───────────────┘
-              │                                       │
-              └────────────────┬──────────────────────┘
-                               │  aggregate only — zero raw rows
-                               ▼
-                          OpenAI API
-                          { aggregate, provenance:
-                            "ZEMTIK_FAST_LANE" or "ZEMTIK_ZK" }
+```mermaid
+flowchart TD
+    App["Your Application"]
+    App -->|"POST /v1/chat/completions\nnatural-language query"| Proxy
+
+    subgraph Proxy["Zemtik Proxy  (localhost:4000)"]
+        Intent["Intent extraction\n+ routing\nschema_config.json sensitivity"]
+
+        subgraph FastLane["FastLane  (sensitivity: low)"]
+            FL1["DB aggregate query\nSUM or COUNT"]
+            FL2["BabyJubJub EdDSA\nsign(aggregate +\nquery descriptor)\nNO ZK proof"]
+            FL3["< 50ms"]
+            FL1 --> FL2 --> FL3
+        end
+
+        subgraph ZKSlow["ZK SlowLane  (sensitivity: critical)"]
+            ZK1["Transaction DB\nraw rows as private\nwitnesses — never sent"]
+            ZK2["BabyJubJub batch sign\n+ Noir ZK Circuit\n+ UltraHonk proof"]
+            ZK3["~17s on CPU"]
+            ZK1 --> ZK2 --> ZK3
+        end
+
+        Intent -->|"sensitivity: low"| FastLane
+        Intent -->|"sensitivity: critical"| ZKSlow
+    end
+
+    FL3 -->|"aggregate + attestation_hash\ndata_exfiltrated: 0"| OpenAI
+    ZK3 -->|"aggregate + proof_hash\ndata_exfiltrated: 0"| OpenAI
+
+    OpenAI["OpenAI API\n{ aggregate, provenance:\nZEMTIK_FAST_LANE or ZEMTIK_ZK }"]
 ```
 
 In both paths, raw transaction rows **never leave the Zemtik process**. Which path runs is determined by the `sensitivity` field in `schema_config.json`. See [Two Lanes: FastLane vs ZK SlowLane](#two-lanes-fastlane-vs-zk-slowlane) below.
@@ -134,10 +128,12 @@ Unknown tables that are not in `schema_config.json` always route to ZK SlowLane 
 
 Tunnel Mode is designed for customers who want to evaluate Zemtik without any risk to their production traffic. Set `ZEMTIK_MODE=tunnel` and Zemtik becomes a **transparent passthrough proxy** — every request is forwarded to OpenAI exactly as received (FORK 1) while Zemtik runs its verification pipeline in the background (FORK 2) and logs a comparison audit record.
 
-```text
-Client → Zemtik (tunnel mode) → OpenAI     ← FORK 1: customer traffic, unmodified
-                      └→ ZK Pipeline       ← FORK 2: background verification, no customer impact
-                      └→ tunnel_audit.db   ← Comparison logged: matched / divergence / unmatched
+```mermaid
+flowchart LR
+    Client --> Proxy["Zemtik\ntunnel mode"]
+    Proxy -->|"FORK 1: forward unmodified\n(zero customer impact)"| OpenAI["OpenAI API"]
+    Proxy -. "FORK 2: background ZK verification\n(semaphore-gated)" .-> ZK["ZK Pipeline"]
+    ZK --> AuditDB["tunnel_audit.db\nMatched / Diverged / Unmatched"]
 ```
 
 The customer sees zero latency penalty and zero risk of broken requests. Zemtik learns how well its verification matches real responses before any enforcement is turned on.
@@ -396,8 +392,9 @@ zemtik-core/
 │   ├── receipts.rs       # Receipts ledger (CRUD + v5 migration: actual_row_count; v3: outgoing_prompt_hash; v2: engine_used, intent_confidence)
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
+│   ├── startup.rs        # Startup validation: Postgres checks, ZK tools detection, JSONL event log
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
-│   └── types.rs          # Shared types
+│   └── types.rs          # Shared types; ZemtikErrorCode; TunnelMatchStatus
 ├── tests/
 │   ├── integration_proxy.rs  # Integration tests: full proxy with mock OpenAI (7 tests)
 │   └── test_*.rs             # Unit tests per module

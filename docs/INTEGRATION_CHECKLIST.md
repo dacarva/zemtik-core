@@ -6,6 +6,18 @@
 
 Print this page. Check each item. Run each curl command and verify the expected output.
 
+```mermaid
+flowchart TD
+    V["Step 0: Validate schema\nZEMTIK_VALIDATE_ONLY=1"]
+    Start["Step 1: Start proxy\ndocker compose up"]
+    Health["Step 2: Health check\nGET /health\nschema_validation.status = ok"]
+    Intent["Step 3: Test intent matching\nPOST query → verify table matched"]
+    Evidence["Step 4: Verify evidence block\ndata_exfiltrated: 0\nattestation_hash or proof_hash"]
+    Receipts["Step 5: Check receipts\ncargo run -- list"]
+
+    V --> Start --> Health --> Intent --> Evidence --> Receipts
+```
+
 ---
 
 ## Pre-flight: what you need
