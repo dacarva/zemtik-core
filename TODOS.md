@@ -571,3 +571,21 @@ All target v0.9.1. Ordered by pilot-blocking priority.
 - **Effort:** S (human: ~2h / CC: ~20min)
 - **Priority:** P2 — build in week 2 of pilot if requested
 - **Depends on:** tunnel mode shipped, pilot customer onboarded
+
+---
+
+## Completed — v0.9.1 (2026-04-11)
+
+All items below shipped in `fix/integration-issues` → PR merged to main.
+
+- **ZEMTIK_VALIDATE_ONLY=1 env var** — pre-demo schema validation (`nginx -t` for zemtik). Exit 0/1 based on warnings.
+- **Startup validation block log format** — formatted `[ZEMTIK] Schema validation` block at startup.
+- **example_prompts startup validation** — warns when `example_prompts` is missing, signals regex fallback.
+- **Startup event log (`~/.zemtik/startup_events.jsonl`)** — JSONL audit trail of every startup validation run.
+- **Structured DB error 500** — `EngineResult::DbError` now returns structured JSON with `type`, `code`, `hint`, `doc_url`. Raw DB error strings no longer exposed in HTTP responses (S3 security fix).
+- **TROUBLESHOOTING.md** — 6-symptom diagnostic reference for on-site deployments.
+- **v0.9.1 upgrade note** — CHANGELOG.md upgrade section explaining new startup warnings.
+- **S2 security fix** — table key validated with `is_safe_identifier` in `validate_schema_config` (SQL injection in startup Postgres count query).
+- **VALIDATE_ONLY + SKIP_CIRCUIT_VALIDATION** — both flags now stack correctly; VALIDATE_ONLY no longer exits 1 when circuit validation is suppressed.
+- **`/health` status_summary** — reports `"warnings"` when ZK tools are absent, not `"ok"`.
+- **Test safety** — `startup_validation_skipped_when_env_set` uses `#[serial]` to prevent env var race in parallel tests.

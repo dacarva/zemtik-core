@@ -20,7 +20,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **S1 — Security:** Removed `danger_accept_invalid_certs(true)` from `ensure_supabase_table()` in `src/db.rs`. Supabase uses valid CA-signed certs — bypassing TLS verification was unnecessary and created MitM risk at customer deployments.
-- **client_id=123 warning** — when demo default `client_id=123` returns 0 rows and `skip_client_id_filter=false`, a warning is logged pointing to the fix.
+- **S2 — Security:** Table key (used as SQL identifier in startup validation) is now validated with `is_safe_identifier` in `validate_schema_config`. Previously, a malformed `schema_config.json` key could inject arbitrary SQL into the startup Postgres count query.
+- **S3 — Security:** DB error strings are no longer echoed in HTTP 500 response bodies. Raw Postgres errors (which include table/column names and constraint details) are logged server-side only; the API response says "check server logs."
+- **`ZEMTIK_VALIDATE_ONLY=1` + `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1`** — when circuit validation is suppressed, `VALIDATE_ONLY` no longer exits 1 due to missing nargo/bb. Both flags now stack correctly.
+- **`/health` `schema_validation.status`** — now reports `"warnings"` when ZK tools (nargo/bb) are missing, instead of silently reporting `"ok"`.
+- **client_id=123 warning** — when demo default `client_id=123` returns 0 rows and `skip_client_id_filter=false`, a warning is logged pointing to the fix. Now uses the parsed config value (catches YAML-configured `client_id`, not just env var).
+- **Test safety:** `startup_validation_skipped_when_env_set` now uses `#[serial]` to prevent undefined behavior from concurrent `set_var`/`remove_var` in parallel test execution.
 
 ### Changed
 - `schema_config.example.json` — default `skip_client_id_filter` changed to `true` for `aws_spend` and `travel` tables (single-tenant is the common case for new integrations).
