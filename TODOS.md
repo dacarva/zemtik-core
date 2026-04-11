@@ -7,6 +7,57 @@
 
 ---
 
+## DX additions — fix/integration-issues DX review (2026-04-10)
+
+These items were added during `/plan-devex-review` of the pilot readiness plan.
+All target v0.9.1. Ordered by pilot-blocking priority.
+
+### ZEMTIK_VALIDATE_ONLY=1 env var (P1, v0.9.1)
+- **What:** If `ZEMTIK_VALIDATE_ONLY=1` is set at startup, run full schema validation, print results as a block, exit 0 (all OK) or exit 1 (any WARNING). Enables pre-demo validation: `docker compose run --rm zemtik-proxy env ZEMTIK_VALIDATE_ONLY=1`
+- **Why:** Zemtik engineer can validate schema_config.json before the customer demo starts — not discover failures live on-site. Like `nginx -t`.
+- **Pros:** Zero new commands to learn (env var). Enables CI validation of schema_config.json.
+- **Cons:** Minimal — ~20 lines in main.rs/proxy.rs.
+- **Context:** Add to INTEGRATION_GUIDE.md as step 0 in the BYODB flow.
+- **Effort:** S (CC: ~5 min)
+
+### Startup validation block log format (P1, v0.9.1)
+- **What:** Print schema validation as a single formatted block instead of interleaved log lines:
+  ```
+  [ZEMTIK] Schema validation
+  └ acme_transactions: 14,823 rows — OK
+  └ acme_invoices: 0 rows — WARNING: empty table
+  ```
+- **Why:** In Docker, interleaved log lines scroll past. The Zemtik engineer can't narrate the validation result to the customer's IT team if they can't find it in the log stream.
+- **Pros:** Scannable. Customer-readable. Narrate-able.
+- **Effort:** XS (CC: ~5 min)
+
+### example_prompts startup validation (P2, v0.9.1)
+- **What:** During startup schema validation, warn if any table in schema_config.json has an absent or empty `example_prompts` field. Warning: "table X: example_prompts missing — embedding backend will fall back to regex matching (lower intent accuracy)."
+- **Why:** A Zemtik engineer adding a new table for a future pilot and forgetting example_prompts gets silent regex fallback. No error. Queries route incorrectly with no indication why.
+- **Effort:** XS (CC: ~5 min)
+
+### Startup event log (~/.zemtik/startup_events.jsonl) (P2, v0.9.1)
+- **What:** At each startup validation step, append a JSONL event: `{"ts": "ISO", "table": "...", "status": "ok|warning", "row_count": N, "warnings": [...]}`. One file, one entry per table per startup.
+- **Why:** After a customer deployment, the Zemtik team can review exactly what happened and when. Structured data beats memory. Enables learning across pilot deployments.
+- **Effort:** S (CC: ~10 min)
+
+### Structured DB error 500 (P1, v0.9.1)
+- **What:** The `EngineResult::DbError` path in proxy.rs:504 returns a raw 500. Add structured body: `{"error": {"type": "zemtik_db_error", "code": "QueryFailed", "message": "<db error>", "hint": "Check physical_table, value_column, timestamp_column against your schema."}}`.
+- **Why:** If the customer's Postgres rejects a query (RLS, wrong column, network blip), the Zemtik engineer sees nothing useful. Pilot-blocking if this happens mid-demo.
+- **Effort:** S (CC: ~10 min)
+
+### TROUBLESHOOTING.md (P1, v0.9.1)
+- **What:** New `docs/TROUBLESHOOTING.md` — 6-entry symptom → cause → fix table covering: 0-row aggregate, streaming hang, NoTableIdentified, ZK tools absent, column not found, DB connection refused.
+- **Why:** During a live customer deployment the Zemtik engineer needs to diagnose fast. Currently they'd grep through 10 docs files. One reference doc eliminates that.
+- **Effort:** S (CC: ~15 min doc writing)
+
+### v0.9.1 upgrade note in CHANGELOG.md (P1, v0.9.1)
+- **What:** Add a brief "Upgrading to v0.9.1" section: what's new, what WARNINGs to expect at startup, what they mean. Existing customers who upgrade and have misconfigured schema_config.json will see new WARNINGs they've never seen before.
+- **Why:** Without context, a Zemtik engineer upgrading a customer deployment might think the proxy is broken when it logs a startup warning for the first time.
+- **Effort:** XS (CC: ~5 min)
+
+---
+
 ## DX debt — added from feat/universal-zk-engine DX review (2026-04-07)
 
 ### Structured JSON error responses (P3, v2)
@@ -483,6 +534,32 @@
 - **Effort:** XS (human: ~15min / CC: ~5min)
 - **Priority:** P3 — not blocking for pilot, useful for week 2+ monitoring
 - **Depends on:** tunnel mode shipped
+
+---
+
+## Integration Validation deferred items — added from fix/integration-issues (2026-04-10)
+
+### PostgREST smoke-test at startup (P2, before standard-mode launch)
+- **What:** After DATABASE_URL column validation, also attempt a PostgREST aggregate query (using SUPABASE_URL + SUPABASE_SERVICE_KEY) against each configured table. Store the result in `SchemaValidationResult` alongside the Postgres validation.
+- **Why:** DATABASE_URL checks validate that the table exists in Postgres. It does NOT confirm that PostgREST can aggregate it (auth, RLS, column syntax differences). A table can pass startup validation and still fail every real FastLane request if PostgREST returns 401/403/400.
+- **Pros:** Complete startup validation for the Supabase FastLane path. DBA gets full signal before any query runs.
+- **Cons:** Additional startup round-trip. Requires SUPABASE_URL to be set (skipped when absent).
+- **Context:** Identified during eng review. For tunnel-mode-only pilots, this gap doesn't matter — tunnel mode doesn't run FastLane. For standard-mode launch, this is blocking. The INTEGRATION_CHECKLIST.md manual step covers this gap in the meantime.
+- **Effort:** S (human: ~2h / CC: ~20min)
+- **Priority:** P2 — required before standard-mode pilot launch
+- **Depends on:** fix/integration-issues startup validation merged, SUPABASE_URL configured
+
+### x-zemtik-warning response header (P3, v2)
+- **What:** When the proxy emits a startup warning (client_id=123, schema_validation warnings, ZK tools absent), include a `x-zemtik-warning: <code>` response header on subsequent chat completions responses. Clients can inspect this header programmatically during integration testing.
+- **Why:** Current warnings are log-only. An API caller running automated integration tests cannot observe warnings without reading server logs. A response header gives immediate, programmatic signal.
+- **Pros:** No breaking change. Additive header. Enables automated integration test assertions on warning paths.
+- **Cons:** Slightly increases response size. Requires deciding which warnings propagate to per-request headers (startup warnings vs. per-query).
+- **Context:** Identified during eng review. Particularly useful for testing client_id=123 warning path (log-only today, no HTTP observable signal).
+- **Effort:** S (human: ~1h / CC: ~10min)
+- **Priority:** P3 — post-pilot, DX improvement
+- **Depends on:** fix/integration-issues merged
+
+---
 
 ### HTML dashboard /tunnel/audit (P2, post-pilot)
 

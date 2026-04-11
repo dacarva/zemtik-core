@@ -11,7 +11,7 @@
       "category_column": "category_name",
       "agg_fn": "SUM",
       "metric_label": "total_spend_usd",
-      "skip_client_id_filter": false,
+      "skip_client_id_filter": true,
       "example_prompts": [
         "What was our total AWS spend last quarter?",
         "Show me cloud costs for Q1 2024",
@@ -85,7 +85,7 @@
       "category_column": "category_name",
       "agg_fn": "SUM",
       "metric_label": "travel_expense_usd",
-      "skip_client_id_filter": false,
+      "skip_client_id_filter": true,
       "example_prompts": [
         "What was our travel and expense spend last quarter?",
         "Show me T&E costs for 2024",

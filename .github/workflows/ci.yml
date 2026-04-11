@@ -9,6 +9,19 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: zemtik_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +48,15 @@ jobs:
         env:
           ZEMTIK_SKIP_CIRCUIT_VALIDATION: "1"
           ZEMTIK_INTENT_BACKEND: regex
+          ZEMTIK_SKIP_DB_VALIDATION: "1"
+
+      - name: Run tunnel integration tests
+        run: cargo test --test integration_tunnel --no-default-features --features regex-only
+        env:
+          ZEMTIK_SKIP_CIRCUIT_VALIDATION: "1"
+          ZEMTIK_INTENT_BACKEND: regex
+          ZEMTIK_SKIP_DB_VALIDATION: "1"
+          ZEMTIK_TUNNEL_API_KEY: ci-test-tunnel-key
 
   docker:
     name: Docker Build (linux/amd64)

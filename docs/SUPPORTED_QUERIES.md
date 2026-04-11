@@ -176,3 +176,44 @@ Both paths guarantee that **zero raw rows are sent to OpenAI**. The difference i
 | Use case | Non-sensitive aggregates (e.g., public revenue totals) | Sensitive aggregates where correctness must be cryptographically proven |
 
 In short: FastLane is fast and private; ZK SlowLane is fast, private, *and* verifiably correct. The right choice depends on whether the aggregate itself is sensitive and whether you need a proof that survives external audit.
+
+
+---
+
+## Conversation patterns (multi-turn)
+
+Zemtik extracts intent from the **last user message** only. Follow-up questions without full context will not resolve:
+
+```
+User: "What was payroll in Q1 2024?"   → OK (full context)
+User: "What about Q2?"                 → 400 NoTableIdentified (no table or time in message)
+```
+
+This is by design — the ZK pipeline processes each request independently; there is no session state.
+
+### Workaround A: client-side templating
+
+Have the client always include the full query context:
+
+```python
+def build_query(table: str, period: str, prior_context: str = "") -> str:
+    return f"What was our {table} in {period}?"
+```
+
+### Workaround B: server-side context injection
+
+Inject context into the system prompt from your application layer:
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "Context: user is analyzing Q1 2024 payroll data."},
+    {"role": "user", "content": "What about Q2?"}
+  ]
+}
+```
+Zemtik extracts intent from the last user message — the system prompt injection ensures the routing engine has enough signal.
+
+### Workaround C: suggested queries
+
+Surface pre-built query buttons in your UI so users don't need to type follow-ups. Each button sends a complete, self-contained query. This is the recommended UX pattern for enterprise dashboard deployments.

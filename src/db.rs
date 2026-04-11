@@ -646,9 +646,7 @@ async fn ensure_supabase_table() -> anyhow::Result<()> {
     let db_url = std::env::var("DATABASE_URL")
         .context("DATABASE_URL env var required when DB_BACKEND=supabase")?;
 
-    let tls_connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
+    let tls_connector = native_tls::TlsConnector::new()
         .context("create TLS connector")?;
     let tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
 

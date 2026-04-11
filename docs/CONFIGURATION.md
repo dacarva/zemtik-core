@@ -136,7 +136,7 @@ Required for proxy mode. Zemtik loads this file from `~/.zemtik/schema_config.js
 | `sensitivity` | string | Yes | `"low"` routes to FastLane. `"critical"` routes to ZK SlowLane. Any other value is treated as `"critical"`. |
 | `agg_fn` | string | No | Aggregation function. Default: `"SUM"`. Valid values: `"SUM"`, `"COUNT"`, `"AVG"` (uppercase, case-sensitive). SUM and COUNT route to ZK SlowLane for critical tables; AVG uses a composite ZK proof (SUM + COUNT proofs + BabyJubJub attestation). AVG is not supported on FastLane (low sensitivity) tables. |
 | `value_column` | string | No | Column to aggregate. Default: `"amount"`. For COUNT, use a non-nullable column (primary key recommended). |
-| `timestamp_column` | string | No | Column for time range filtering. Default: `"timestamp"`. |
+| `timestamp_column` | string | No | Column for time range filtering. Default: `"timestamp"`. **Must store time as UNIX epoch seconds (integer).** For PostgreSQL `timestamp`/`timestamptz` columns, add a generated column: `ALTER TABLE t ADD COLUMN ts_epoch BIGINT GENERATED ALWAYS AS (EXTRACT(EPOCH FROM created_at)::BIGINT) STORED;` then set `"timestamp_column": "ts_epoch"`. |
 | `category_column` | string | No | Column for category filtering within the table. `null` = aggregate entire table. |
 | `metric_label` | string | No | Label for the aggregate field in the LLM payload. Default: `"total_spend_usd"`. |
 | `physical_table` | string | No | Physical DB table name. Default: the schema key. Supabase/PostgREST only — SQLite always uses `transactions`. |
