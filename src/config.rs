@@ -79,7 +79,7 @@ fn default_metric_label() -> String { "total_spend_usd".to_owned() }
 /// Returns true if `s` is a safe SQL/JSON identifier: non-empty, ASCII alphanumeric
 /// or underscore only, max 63 chars. Column/table names from schema_config are
 /// server-controlled, but this defends against misconfiguration.
-fn is_safe_identifier(s: &str) -> bool {
+pub(crate) fn is_safe_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}

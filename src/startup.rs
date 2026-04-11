@@ -27,14 +27,14 @@ pub async fn run_startup_validation(
         .unwrap_or(false);
 
     let backend = std::env::var("DB_BACKEND").unwrap_or_default();
-    let is_sqlite = backend.to_lowercase() != "supabase";
+    let is_supabase = backend.to_lowercase() == "supabase";
 
     // Check ZK tools presence.
     let nargo_ok = which("nargo");
     let bb_ok = which("bb");
     let zk_tools = ZkToolsStatus { nargo: nargo_ok, bb: bb_ok };
 
-    if skip_db || is_sqlite {
+    if skip_db || !is_supabase {
         if skip_db {
             println!("[ZEMTIK] Schema validation skipped (ZEMTIK_SKIP_DB_VALIDATION=1)");
         } else {
@@ -150,6 +150,22 @@ async fn validate_table(
             };
         }
     };
+
+    // Defense-in-depth: re-validate the identifier before interpolating into SQL.
+    // validate_schema_config() already checks this at config-load time, but an
+    // extra guard here makes the construction site safe in isolation.
+    if !crate::config::is_safe_identifier(physical_table) {
+        return TableValidationResult {
+            table_key: table_key.to_owned(),
+            physical_table: physical_table.to_owned(),
+            status: "invalid_identifier".to_owned(),
+            row_count: None,
+            warnings: vec![format!(
+                "physical_table '{}' is not a safe SQL identifier — skipping query",
+                physical_table
+            )],
+        };
+    }
 
     // Check table existence + row count in one query.
     let query = format!(
@@ -278,6 +294,11 @@ fn write_startup_events(tables: &[TableValidationResult]) {
     }
     if !lines.is_empty() {
         use std::io::Write;
+        // Ensure parent directory exists before opening — ~/.zemtik/ may not yet
+        // exist on first run or in a fresh Docker image.
+        if let Some(parent) = events_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
