@@ -4,6 +4,17 @@
 **Audience:** Developers integrating Zemtik for the first time
 **Goal:** Run the full ZK pipeline locally and send your first privacy-preserving query to OpenAI
 
+```mermaid
+flowchart LR
+    App["Your App\n(any OpenAI client)"]
+    Proxy["Zemtik Proxy\nlocalhost:4000"]
+    OpenAI["OpenAI API\napi.openai.com"]
+
+    App -->|"POST /v1/chat/completions\nno code changes required"| Proxy
+    Proxy -->|"aggregate only\ndata_exfiltrated: 0"| OpenAI
+    OpenAI -->|"LLM response\n+ evidence block"| App
+```
+
 ---
 
 ## Option A — Docker Quick Start (recommended)

@@ -27,8 +27,10 @@ These terms are related but not interchangeable.
 
 A circuit that **verifies another proof inside itself**. The output is a single proof that attests to both the inner verification and any additional logic in the outer circuit.
 
-```
-Proof_A  ──►  Outer circuit (verifies Proof_A + own logic)  ──►  Proof_B
+```mermaid
+flowchart LR
+    A["Proof_A"] -->|"inner proof"| Outer["Outer circuit\nverifies Proof_A\n+ own logic"]
+    Outer --> B["Proof_B\n(same size as Proof_A)"]
 ```
 
 The key property: Proof_B is the same size as Proof_A regardless of how many inner proofs were verified. This enables **proof compression** — a chain of N computations collapses into a single constant-size proof.
@@ -39,10 +41,12 @@ Noir exposes this via `std::verify_proof()`. The verification key of the inner c
 
 A technique for **accumulating multiple proofs without fully verifying each one immediately**. Each proof contributes to a shared mathematical object (the aggregation object). A single verification operation at the end checks all accumulated proofs simultaneously.
 
-```
-Proof_1 ─┐
-Proof_2 ─┼──►  aggregation_object  ──►  single final verification
-Proof_3 ─┘
+```mermaid
+flowchart LR
+    P1["Proof_1"] --> Agg["aggregation_object\n(accumulated)"]
+    P2["Proof_2"] --> Agg
+    P3["Proof_3"] --> Agg
+    Agg --> Final["single final verification\n(cost paid once)"]
 ```
 
 The key property: verification cost is paid once at the end, not once per proof. This is more efficient than recursive proofs when batching many proofs of the **same circuit**.
@@ -73,10 +77,26 @@ Zemtik's scaling problem is batching: as the number of transactions grows, the s
 
 Split transactions into fixed-size batches. Each batch uses the current circuit (`TX_COUNT = 50`) and produces a proof locally, within the bank perimeter.
 
-```
-Batch_1: tx[0..49]    → nargo execute + bb prove  →  Proof_1  (inside perimeter)
-Batch_2: tx[50..99]   → nargo execute + bb prove  →  Proof_2  (inside perimeter)
-Batch_3: tx[100..149] → nargo execute + bb prove  →  Proof_3  (inside perimeter)
+```mermaid
+flowchart TD
+    subgraph perimeter["Bank Perimeter"]
+        Txns["Transactions\n(unlimited)"]
+        B1["Batch 1\ntx[0..49]"]
+        B2["Batch 2\ntx[50..99]"]
+        B3["Batch 3\ntx[100..149]"]
+        P1["nargo execute\n+ bb prove\n→ Proof_1"]
+        P2["nargo execute\n+ bb prove\n→ Proof_2"]
+        P3["nargo execute\n+ bb prove\n→ Proof_3"]
+        Fold["bb prove -s client_ivc\n(#[fold] + Client IVC)\n→ Proof_final"]
+
+        Txns --> B1 & B2 & B3
+        B1 --> P1
+        B2 --> P2
+        B3 --> P3
+        P1 & P2 & P3 --> Fold
+    end
+
+    Fold -->|"single aggregate\ndata_exfiltrated: 0"| OpenAI["OpenAI API"]
 ```
 
 Each leaf circuit fits within the local CRS (50 transactions is the current limit before the CRS is exceeded). The EdDSA signature verification happens in the first leaf; subsequent leaves verify a chain commitment.

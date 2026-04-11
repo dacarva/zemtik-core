@@ -94,20 +94,20 @@ All queries run against `client_id = 123` in the demo dataset. Per-client filter
 
 ### Ambiguous time expressions
 
-Time expressions that do not match any recognized pattern cause `TimeRangeAmbiguous`, which routes conservatively to ZK SlowLane.
+Time expressions that do not match any recognized pattern cause `TimeRangeAmbiguous`, which returns **HTTP 400** (`NoTableIdentified`). The ZK SlowLane is not invoked — the proxy requires a precise time bound to construct a valid ZK witness.
 
 | Expression | Recognized? |
 |------------|------------|
 | "Q1 2024" | Yes |
 | "last quarter" | Yes |
-| "before the acquisition" | No — `TimeRangeAmbiguous` → ZK SlowLane |
-| "previously" | No — `TimeRangeAmbiguous` → ZK SlowLane |
+| "before the acquisition" | No — `TimeRangeAmbiguous` → HTTP 400 |
+| "previously" | No — `TimeRangeAmbiguous` → HTTP 400 |
 | "last year" | **Yes** — resolves to prior calendar year |
 | "prior year" | **Yes** — resolves to prior calendar year |
 | "prior quarter" | **Yes** — resolves to previous full quarter |
 | "prior month" | **Yes** — resolves to previous full calendar month |
-| "current year" | No — `TimeRangeAmbiguous` → ZK SlowLane (use `YTD` instead) |
-| "in the old fiscal year" | No — `TimeRangeAmbiguous` → ZK SlowLane |
+| "current year" | No — `TimeRangeAmbiguous` → HTTP 400 (use `YTD` instead) |
+| "in the old fiscal year" | No — `TimeRangeAmbiguous` → HTTP 400 |
 
 ---
 
