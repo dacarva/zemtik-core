@@ -13,9 +13,9 @@ flowchart TD
     Health["Step 2: Health check\nGET /health\nschema_validation.status = ok"]
     Intent["Step 3: Test intent matching\nPOST query → verify table matched"]
     Evidence["Step 4: Verify evidence block\ndata_exfiltrated: 0\nattestation_hash or proof_hash"]
-    Receipts["Step 5: Check receipts\ncargo run -- list"]
+    Errors["Step 5: Test error handling\nerror.code = NoTableIdentified"]
 
-    V --> Start --> Health --> Intent --> Evidence --> Receipts
+    V --> Start --> Health --> Intent --> Evidence --> Errors
 ```
 
 ---

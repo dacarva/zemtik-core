@@ -164,7 +164,7 @@ RegexBackend
   └── NoTableIdentified                          →  HTTP 400
 ```
 
-> **Note:** Low confidence does **not** route to ZK SlowLane. It produces `NoTableIdentified` and the proxy returns HTTP 400. ZK SlowLane is only invoked when a table is identified but the time expression is ambiguous, or when the table is identified but has `critical` sensitivity (or is unknown).
+> **Note:** Low confidence does **not** route to `ZK SlowLane`. It produces `NoTableIdentified` and the proxy returns HTTP 400. `TimeRangeAmbiguous` also produces HTTP 400, regardless of whether a table was identified during the process — the proxy requires a precise time bound to construct a valid ZK witness. `ZK SlowLane` is only invoked when intent extraction succeeds completely (table identified via `EmbeddingBackend` or `RegexBackend` + time range unambiguous or absent), and the table has `critical` sensitivity or is unknown to `schema_config.json`.
 
 
 ---

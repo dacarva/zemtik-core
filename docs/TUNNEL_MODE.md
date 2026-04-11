@@ -158,7 +158,7 @@ Default tolerance when not set: `0.01` (1%).
 ```json
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "receipt_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "receipt_id": null,
   "created_at": "2026-04-08T15:01:23Z",
   "match_status": "matched",
   "matched_table": "aws_spend",
