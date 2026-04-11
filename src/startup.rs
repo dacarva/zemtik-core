@@ -117,7 +117,7 @@ async fn validate_table(
     database_url: &str,
     table_key: &str,
     physical_table: &str,
-    tc: &crate::config::TableConfig,
+    _tc: &crate::config::TableConfig,
 ) -> TableValidationResult {
     let mut warnings: Vec<String> = Vec::new();
 
