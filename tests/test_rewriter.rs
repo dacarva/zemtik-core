@@ -189,6 +189,55 @@ fn deterministic_resolve_returns_none_for_last_year_phrase() {
     );
 }
 
+#[test]
+fn deterministic_resolve_returns_none_with_single_user_message() {
+    // Only one user message — no prior to scan after skip(1). Must return None.
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[("user", "How about Q2 2024?")]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    assert!(result.is_none(), "single user message — no prior to scan, must return None");
+}
+
+#[test]
+fn deterministic_resolve_returns_none_for_same_quarter_phrase() {
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[
+        ("user", "What was aws_spend in Q1 2024?"),
+        ("assistant", "AWS spend Q1 2024 was $12M."),
+        ("user", "same quarter last year"),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    assert!(result.is_none(), "'same quarter' must return None — needs LLM");
+}
+
+#[test]
+fn deterministic_resolve_returns_none_for_same_month_phrase() {
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[
+        ("user", "What was aws_spend in January 2024?"),
+        ("assistant", "AWS spend January 2024 was $4M."),
+        ("user", "same month last year"),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    assert!(result.is_none(), "'same month' must return None — needs LLM");
+}
+
+#[test]
+fn deterministic_resolve_returns_none_for_prior_year_phrase() {
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[
+        ("user", "What was aws_spend in Q3 2024?"),
+        ("assistant", "AWS spend Q3 2024 was $8M."),
+        ("user", "what about prior year?"),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    assert!(result.is_none(), "'prior year' must return None — needs LLM for quarter pivot");
+}
+
 // ---------------------------------------------------------------------------
 // rewrite_query tests (using mock server via wiremock)
 // ---------------------------------------------------------------------------

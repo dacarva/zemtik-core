@@ -345,3 +345,75 @@ fn receipts_v6_rewrite_fields_written_and_retrieved() {
     let llm_row = list.iter().find(|r| r.id == "v6-llm-uuid").unwrap();
     assert_eq!(llm_row.rewrite_method, Some("llm".to_owned()));
 }
+
+#[test]
+fn test_migration_v5_to_v6_adds_rewrite_columns() {
+    // Simulate a v5 database and verify that run_migration adds the v6 columns.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipts (
+            receipt_id   TEXT PRIMARY KEY,
+            bundle_path  TEXT NOT NULL,
+            proof_status TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            bb_version   TEXT NOT NULL,
+            prompt_hash  TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN engine_used TEXT DEFAULT 'zk_slow_lane_legacy';
+        ALTER TABLE receipts ADD COLUMN proof_hash TEXT;
+        ALTER TABLE receipts ADD COLUMN data_exfiltrated INTEGER DEFAULT 0;
+        CREATE TABLE IF NOT EXISTS intent_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt TEXT NOT NULL,
+            error TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN intent_confidence REAL DEFAULT NULL;
+        PRAGMA user_version = 2;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN outgoing_prompt_hash TEXT DEFAULT NULL;
+        PRAGMA user_version = 3;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN signing_version INTEGER DEFAULT NULL;
+        PRAGMA user_version = 4;
+        COMMIT;
+        BEGIN;
+        ALTER TABLE receipts ADD COLUMN actual_row_count INTEGER DEFAULT NULL;
+        PRAGMA user_version = 5;
+        COMMIT;",
+    )
+    .unwrap();
+
+    let version_before: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_before, 5);
+
+    run_migration(&conn).unwrap();
+
+    let version_after: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_after, 6, "v5→v6 migration must bump to version 6");
+
+    for col in &["rewrite_method", "rewritten_query"] {
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('receipts') WHERE name='{col}'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "column '{col}' must exist after v5→v6 migration");
+    }
+}
