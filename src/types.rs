@@ -272,6 +272,7 @@ pub enum RewriteMethod {
     /// Prior conversation context resolved table+time deterministically (no LLM call).
     Deterministic,
     /// LLM rewrote the query to include explicit table and time range.
+    #[serde(rename = "llm")]
     LlmRewrite,
 }
 
