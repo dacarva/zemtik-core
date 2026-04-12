@@ -150,6 +150,45 @@ fn deterministic_resolve_respects_max_scan() {
     assert!(result.is_none(), "max_scan=1 should not reach the valid prior");
 }
 
+// Regression: ISSUE-001 — context-dependent time phrases must trigger LLM rewriter
+// Found by /qa on 2026-04-12
+// Report: .gstack/qa-reports/qa-report-zemtik-proxy-2026-04-12.md
+#[test]
+fn deterministic_resolve_returns_none_for_same_period_phrase() {
+    // "same period" requires knowing the prior quarter — deterministic can't resolve it.
+    // Must return None so the LLM rewriter handles it.
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[
+        ("user", "What was aws_spend in Q1 2024?"),
+        ("assistant", "AWS spend Q1 2024 was $12M."),
+        ("user", "same thing but for last year same period"),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    assert!(
+        result.is_none(),
+        "'same period' + 'last year' must return None — LLM rewriter required"
+    );
+}
+
+#[test]
+fn deterministic_resolve_returns_none_for_last_year_phrase() {
+    // "last year" relative year shift also requires LLM resolution to preserve
+    // sub-year granularity from prior context.
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[
+        ("user", "What was aws_spend in Q1 2024?"),
+        ("assistant", "AWS spend Q1 2024 was $12M."),
+        ("user", "how about last year?"),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    assert!(
+        result.is_none(),
+        "'last year' must return None — LLM rewriter required for correct year pivot"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // rewrite_query tests (using mock server via wiremock)
 // ---------------------------------------------------------------------------
