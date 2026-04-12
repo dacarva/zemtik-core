@@ -145,6 +145,13 @@ pub struct TableConfig {
     /// Override per-table when the default tolerance doesn't fit the column's scale.
     #[serde(default)]
     pub tunnel_diff_tolerance: Option<f64>,
+
+    /// Per-table query rewriting control. Three-state:
+    /// - absent (None) → follow ZEMTIK_QUERY_REWRITER global setting
+    /// - true  → force enable rewriting for this table
+    /// - false → force disable rewriting for this table (fail-secure override)
+    #[serde(default)]
+    pub query_rewriting: Option<bool>,
 }
 
 impl Default for TableConfig {
@@ -163,6 +170,7 @@ impl Default for TableConfig {
             metric_label: default_metric_label(),
             skip_client_id_filter: false,
             tunnel_diff_tolerance: None,
+            query_rewriting: None,
         }
     }
 }
@@ -420,6 +428,33 @@ pub struct AppConfig {
     /// Env: ZEMTIK_TUNNEL_DEBUG_PREVIEWS=1
     #[serde(skip)]
     pub tunnel_debug_previews: bool,
+
+    // --- Query rewriter fields ---
+
+    /// Enable hybrid query rewriter (deterministic + LLM fallback). Default: false.
+    /// Env: ZEMTIK_QUERY_REWRITER=1|true
+    #[serde(skip)]
+    pub query_rewriter_enabled: bool,
+    /// Model for LLM rewrite calls. Default: "gpt-5.4-nano".
+    /// Env: ZEMTIK_QUERY_REWRITER_MODEL
+    #[serde(skip)]
+    pub query_rewriter_model: String,
+    /// Prior turns included in the LLM rewriter context. Default: 6.
+    /// Env: ZEMTIK_QUERY_REWRITER_TURNS
+    #[serde(skip)]
+    pub query_rewriter_context_turns: usize,
+    /// Max prior user messages scanned by deterministic_resolve. Default: 5.
+    /// Env: ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES
+    #[serde(skip)]
+    pub query_rewriter_scan_messages: usize,
+    /// Per-request timeout for LLM rewrite call (seconds). Default: 10.
+    /// Env: ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS
+    #[serde(skip)]
+    pub query_rewriter_timeout_secs: u64,
+    /// Token budget for LLM context (estimated as chars/4). Default: 2000.
+    /// Env: ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS
+    #[serde(skip)]
+    pub query_rewriter_max_context_tokens: usize,
 }
 
 impl AppConfig {
@@ -469,8 +504,38 @@ impl Default for AppConfig {
             dashboard_api_key: None,
             tunnel_audit_db_path: base.join("tunnel_audit.db"),
             tunnel_debug_previews: false,
+            query_rewriter_enabled: false,
+            query_rewriter_model: "gpt-5.4-nano".to_owned(),
+            query_rewriter_context_turns: 6,
+            query_rewriter_scan_messages: 5,
+            query_rewriter_timeout_secs: 10,
+            query_rewriter_max_context_tokens: 2000,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// RewriterConfig — built from AppConfig when ZEMTIK_QUERY_REWRITER=1
+// ---------------------------------------------------------------------------
+
+/// Configuration for the hybrid query rewriter (deterministic + LLM fallback).
+/// Built from `AppConfig` at proxy startup when `query_rewriter_enabled` is true.
+#[derive(Debug, Clone)]
+pub struct RewriterConfig {
+    /// OpenAI base URL (reuses ZEMTIK_OPENAI_BASE_URL).
+    pub base_url: String,
+    /// Model for LLM rewrite calls. Default: "gpt-5.4-nano".
+    pub model: String,
+    /// API key for LLM rewrite calls (reuses OPENAI_API_KEY).
+    pub api_key: String,
+    /// Number of prior turns to include in the LLM prompt context.
+    pub context_window_turns: usize,
+    /// Max prior user messages scanned by `deterministic_resolve`.
+    pub max_scan_messages: usize,
+    /// Per-request timeout for the LLM rewrite call (seconds).
+    pub timeout_secs: u64,
+    /// Token budget for LLM context (estimated as chars/4).
+    pub max_context_tokens: usize,
 }
 
 pub enum Command {
@@ -655,6 +720,41 @@ pub fn load_from_sources(
             };
             config.tunnel_audit_db_path = expanded;
         }
+    }
+
+    // Query rewriter env vars
+    if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER") {
+        let s = v.trim();
+        config.query_rewriter_enabled = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_QUERY_REWRITER: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_MODEL") {
+        let trimmed = v.trim().to_owned();
+        if !trimmed.is_empty() {
+            config.query_rewriter_model = trimmed;
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_TURNS") {
+        config.query_rewriter_context_turns =
+            v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_TURNS")?;
+    }
+    if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES") {
+        config.query_rewriter_scan_messages =
+            v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES")?;
+    }
+    if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS") {
+        config.query_rewriter_timeout_secs =
+            v.trim().parse::<u64>().context("parse ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS")?;
+    }
+    if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS") {
+        config.query_rewriter_max_context_tokens =
+            v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS")?;
     }
 
     // Layer 4: CLI flags

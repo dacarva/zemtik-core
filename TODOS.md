@@ -87,6 +87,22 @@ All target v0.9.1. Ordered by pilot-blocking priority.
 
 ---
 
+## DX additions — query rewriting DX review (2026-04-12)
+
+Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-greedy-drifting-reddy).
+
+### Deterministic-only rewriting mode (P2, v1.0)
+
+- **What:** Add `ZEMTIK_QUERY_REWRITER_LLM_FALLBACK=0` — enables deterministic context propagation (`deterministic_resolve`) without LLM rewrite fallback. When set, failing queries that the deterministic path can't resolve return 400 (no LLM call made).
+- **Why:** The LLM rewriter sends prior conversation turns to an external LLM endpoint. For deployments with strict data residency requirements where query text cannot leave the proxy boundary, the LLM fallback is unacceptable. The deterministic path is zero-cost, stays within the proxy boundary, and handles the majority of simple time-only follow-ups.
+- **Pros:** Data residency compliance without disabling rewriting entirely. The deterministic path covers ~70% of multi-turn cases at zero cost.
+- **Cons:** ~5 LOC config change + docs update. Table-switching follow-ups ("And for payroll?") won't resolve without LLM.
+- **Context:** The data residency note in CONFIGURATION.md (DX Fix 9) mentions this as option (a). Engineering work is minimal — it's a conditional check at the `rewrite_query` call site in `proxy.rs`.
+- **Effort:** XS (CC: ~15 min)
+- **Depends on:** query rewriting feature shipped
+
+---
+
 ## Tunnel Mode deferred items — added from feat/tunnel-mode (2026-04-08)
 
 ### Drift alert webhook (P3, v2)
@@ -571,6 +587,19 @@ All target v0.9.1. Ordered by pilot-blocking priority.
 - **Effort:** S (human: ~2h / CC: ~20min)
 - **Priority:** P2 — build in week 2 of pilot if requested
 - **Depends on:** tunnel mode shipped, pilot customer onboarded
+
+---
+
+---
+
+## PostgREST smoke-test at startup (P2, v0.9.2)
+
+- **What:** After Postgres column/row validation, if `DB_BACKEND=supabase`, fire a `GET {SUPABASE_URL}/rest/v1/{table}?select={value_column}&limit=1` against each table via PostgREST. Record result (200 vs 4xx/5xx) in startup event log and print to the formatted validation block.
+- **Why:** `startup.rs` validates the Postgres direct connection only. FastLane queries go through PostgREST (SUPABASE_URL). A table can pass startup validation and still fail every query at runtime if PostgREST has RLS, auth, or aggregate permission issues. This gap has caused silent failures in past sessions (prior learning: `startup-validation-postgrest-gap`).
+- **Pros:** Catches RLS/PostgREST auth misconfiguration before the demo starts. Pairs with `ZEMTIK_VALIDATE_ONLY=1` for pre-demo smoke-test.
+- **Cons:** Makes startup slower when Supabase is configured (~1 HTTP call per table). Add `ZEMTIK_SKIP_POSTGREST_VALIDATION` env var to suppress for offline environments.
+- **Context:** `startup.rs` already has the formatted validation block and event log. PostgREST check follows same pattern — call, record result, print summary line. Start in `validate_table()` in startup.rs.
+- **Depends on / blocked by:** Requires `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` to be set. Skip gracefully if absent (sqlite path).
 
 ---
 

@@ -37,6 +37,7 @@
     },
     "payroll": {
       "sensitivity": "critical",
+      "query_rewriting": false,
       "description": "Employee salary, wages, compensation, benefits, bonuses, headcount costs, and HR spend.",
       "example_prompts": [
         "What was our total payroll cost last quarter?",

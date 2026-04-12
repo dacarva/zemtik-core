@@ -38,6 +38,8 @@ fn sample_receipt(id: &str) -> Receipt {
         outgoing_prompt_hash: None,
         signing_version: None,
         actual_row_count: None,
+        rewrite_method: None,
+        rewritten_query: None,
     }
 }
 
@@ -91,7 +93,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5, "expected migration to reach version 5");
+    assert_eq!(version, 6, "expected migration to reach version 6");
 }
 
 #[test]
@@ -101,7 +103,7 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5, "migration should be idempotent at version 5");
+    assert_eq!(version, 6, "migration should be idempotent at version 6");
 }
 
 #[test]
@@ -148,7 +150,7 @@ fn test_migration_v2_to_v3() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 5, "v2→v5 migration must bump to version 5");
+    assert_eq!(version_after, 6, "v2→v6 migration must bump to version 6");
 
     // Verify the column exists
     let col_count: i64 = conn
@@ -213,7 +215,7 @@ fn test_migration_v4_to_v5() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 5, "v4→v5 migration must bump to version 5");
+    assert_eq!(version_after, 6, "v4→v6 migration must bump to version 6");
 
     // Regression: ISSUE-001 — actual_row_count column missing after v4→v5 migration
     // Found by /qa on 2026-04-07
@@ -307,4 +309,39 @@ fn test_insert_intent_rejection() {
         .query_row("SELECT COUNT(*) FROM intent_rejections", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn receipts_v6_rewrite_fields_written_and_retrieved() {
+    let conn = open_in_memory().unwrap();
+
+    // Insert a receipt that was produced by the LLM rewriter path.
+    let mut r = sample_receipt("v6-llm-uuid");
+    r.rewrite_method = Some("llm".to_owned());
+    r.rewritten_query = Some("What was aws_spend in Q1 2024?".to_owned());
+    insert_receipt(&conn, &r).unwrap();
+
+    // get_receipt must return both fields.
+    let found = get_receipt(&conn, "v6-llm-uuid").unwrap().unwrap();
+    assert_eq!(
+        found.rewrite_method,
+        Some("llm".to_owned()),
+        "rewrite_method must round-trip"
+    );
+    assert_eq!(
+        found.rewritten_query,
+        Some("What was aws_spend in Q1 2024?".to_owned()),
+        "rewritten_query must round-trip"
+    );
+
+    // Insert a direct (non-rewritten) receipt — both fields must be None.
+    insert_receipt(&conn, &sample_receipt("v6-direct-uuid")).unwrap();
+    let direct = get_receipt(&conn, "v6-direct-uuid").unwrap().unwrap();
+    assert_eq!(direct.rewrite_method, None, "direct receipt rewrite_method must be None");
+    assert_eq!(direct.rewritten_query, None, "direct receipt rewritten_query must be None");
+
+    // list_receipts must return the rewrite fields.
+    let list = list_receipts(&conn).unwrap();
+    let llm_row = list.iter().find(|r| r.id == "v6-llm-uuid").unwrap();
+    assert_eq!(llm_row.rewrite_method, Some("llm".to_owned()));
 }

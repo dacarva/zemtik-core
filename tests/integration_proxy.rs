@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use serde_json::{json, Value};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zemtik::config::{AggFn, AppConfig, SchemaConfig, TableConfig};
 use zemtik::proxy::build_proxy_router;
@@ -487,4 +487,221 @@ async fn structured_error_has_code_hint_doc_url() {
     assert!(err["code"].is_string(), "error.code must be present: {body}");
     assert!(err["hint"].is_string(), "error.hint must be present: {body}");
     assert!(err["doc_url"].is_string(), "error.doc_url must be present: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// Rewriter helpers
+// ---------------------------------------------------------------------------
+
+/// Spin up a zemtik proxy with ZEMTIK_QUERY_REWRITER=1 enabled.
+/// Both the main OpenAI completion and the rewriter LLM share the same mock server.
+///
+/// Rewriter calls are distinguished from main completion calls by the presence of
+/// "AVAILABLE TABLES" in the request body (injected by the hardened rewriter prompt).
+async fn spawn_test_proxy_with_rewriter() -> (SocketAddr, MockServer) {
+    let mock_openai = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+
+    // Enable the hybrid rewriter.
+    config.query_rewriter_enabled = true;
+    config.query_rewriter_model = "gpt-5.4-nano".to_owned();
+    config.query_rewriter_context_turns = 6;
+    config.query_rewriter_scan_messages = 5;
+    config.query_rewriter_timeout_secs = 10;
+    config.query_rewriter_max_context_tokens = 2000;
+
+    let app = build_proxy_router(config)
+        .await
+        .expect("build_proxy_router failed");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum serve failed");
+    });
+
+    (addr, mock_openai)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-turn integration tests
+// ---------------------------------------------------------------------------
+
+/// Deterministic time-pivot: a two-turn conversation where the follow-up provides
+/// only a time expression ("How about Q2 2024?"). deterministic_resolve must carry
+/// the `aws_spend` table from the prior turn and apply the new time range.
+///
+/// Expected: HTTP 200, `rewrite_method: "deterministic"` in the evidence envelope.
+/// The mock OpenAI server is called exactly once (main completion), never by the rewriter.
+#[tokio::test]
+async fn multi_turn_deterministic_time_pivot_integration() {
+    let (addr, mock_openai) = spawn_test_proxy_with_rewriter().await;
+
+    // Main completion mock — matches requests that do NOT contain "AVAILABLE TABLES"
+    // (i.e. the normal chat completion, not the rewriter LLM call).
+    // The rewriter does NOT call OpenAI for the deterministic path, so this mock
+    // should be hit exactly once (for the follow-up that resolves deterministically).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-deterministic-test",
+            "object": "chat.completion",
+            "model": "gpt-5.4-nano",
+            "choices": [{"index": 0, "message": {"role": "assistant",
+                "content": "AWS spend in Q2 2024 was within budget."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 12, "total_tokens": 62}
+        })))
+        .mount(&mock_openai)
+        .await;
+
+    let client = reqwest::Client::new();
+
+    // Turn 1: explicit table + time — succeeds directly (no rewriter involved).
+    let resp1 = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "aws_spend in Q1 2024"}]
+        }))
+        .send()
+        .await
+        .expect("turn-1 request failed");
+    assert_eq!(resp1.status(), 200, "turn-1 must succeed: {}", resp1.status());
+
+    // Turn 2: follow-up with only a time expression — intent extraction fails on its own,
+    // but deterministic_resolve carries `aws_spend` from the prior turn and applies Q2 2024.
+    let resp2 = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [
+                {"role": "user",    "content": "aws_spend in Q1 2024"},
+                {"role": "assistant","content": "AWS spend in Q1 2024 was $12,345."},
+                {"role": "user",    "content": "How about Q2 2024?"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("turn-2 request failed");
+
+    assert_eq!(resp2.status(), 200, "turn-2 must succeed via deterministic rewriter");
+
+    let body: Value = resp2.json().await.expect("turn-2 body not JSON");
+
+    // The evidence envelope is injected as body["evidence"] (see build_fast_lane_response).
+    let rewrite_method = body
+        .get("evidence")
+        .and_then(|ev| ev.get("rewrite_method"))
+        .and_then(|m| m.as_str());
+
+    assert_eq!(
+        rewrite_method,
+        Some("deterministic"),
+        "expected rewrite_method: deterministic in evidence envelope, body: {body}"
+    );
+}
+
+/// LLM rewrite path: a three-turn conversation where the prior user message has a
+/// table keyword but NO explicit time (rejected by Fix-0 in deterministic_resolve),
+/// and the follow-up adds only a time expression ("For Q1 2024 specifically").
+///
+/// deterministic_resolve rejects the prior (no explicit time) and returns None,
+/// so the LLM rewriter fires. The mock LLM returns a self-contained query naming
+/// both table and time; intent extraction then succeeds.
+///
+/// The mock distinguishes rewriter calls from main completions by checking for
+/// "AVAILABLE TABLES" in the request body (present only in the rewriter system prompt).
+///
+/// Expected: HTTP 200, `rewrite_method: "llm"` in the evidence envelope.
+#[tokio::test]
+async fn multi_turn_llm_table_switch_integration() {
+    let (addr, mock_openai) = spawn_test_proxy_with_rewriter().await;
+
+    // Rewriter LLM mock: request body contains "AVAILABLE TABLES" (injected by
+    // the hardened rewriter prompt). Returns a self-contained aws_spend query so
+    // that intent extraction succeeds on a FastLane (low-sensitivity) table.
+    //
+    // Pattern: body_string_contains("AVAILABLE TABLES") identifies rewriter calls.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("AVAILABLE TABLES"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-rewriter-call",
+            "object": "chat.completion",
+            "model": "gpt-5.4-nano",
+            "choices": [{"index": 0, "message": {"role": "assistant",
+                "content": "What was aws_spend in Q1 2024?"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 80, "completion_tokens": 9, "total_tokens": 89}
+        })))
+        .mount(&mock_openai)
+        .await;
+
+    // Main completion mock: all other POST requests (no "AVAILABLE TABLES" in body).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-main-completion",
+            "object": "chat.completion",
+            "model": "gpt-5.4-nano",
+            "choices": [{"index": 0, "message": {"role": "assistant",
+                "content": "AWS spend in Q1 2024 was $12,345."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 60, "completion_tokens": 10, "total_tokens": 70}
+        })))
+        .mount(&mock_openai)
+        .await;
+
+    let client = reqwest::Client::new();
+
+    // The conversation to send: prior user message has aws_spend but NO explicit
+    // time — Fix-0 rejects it in deterministic_resolve because
+    // parse_time_range_explicit returns Ok(None) for "How is our aws_spend doing?".
+    // The follow-up "For Q1 2024 specifically" has explicit time but no table name.
+    //
+    // Flow: intent fails on "For Q1 2024 specifically" (no table) →
+    //   deterministic_resolve scans prior → prior has no explicit time → None →
+    //   LLM fires → "What was aws_spend in Q1 2024?" → intent succeeds → FastLane.
+    let resp3 = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [
+                {"role": "user",    "content": "How is our aws_spend doing in general?"},
+                {"role": "assistant","content": "I need a time period to answer that."},
+                {"role": "user",    "content": "For Q1 2024 specifically"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("turn-3 failed");
+
+    assert_eq!(resp3.status(), 200, "turn-3 must succeed via LLM rewriter");
+
+    let body: Value = resp3.json().await.expect("turn-3 body not JSON");
+    let rewrite_method = body
+        .get("evidence")
+        .and_then(|ev| ev.get("rewrite_method"))
+        .and_then(|m| m.as_str());
+
+    assert_eq!(
+        rewrite_method,
+        Some("llm"),
+        "expected rewrite_method: llm in evidence envelope, body: {body}"
+    );
 }

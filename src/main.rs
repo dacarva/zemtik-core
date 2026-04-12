@@ -288,6 +288,8 @@ async fn main() -> anyhow::Result<()> {
                         outgoing_prompt_hash: None, // CLI pipeline: hash computed from query_openai result
                         signing_version: None,
                         actual_row_count: None,    // CLI pipeline uses exactly 500 seeded rows
+                        rewrite_method: None,      // CLI pipeline has no query rewriting
+                        rewritten_query: None,
                     },
                 )?;
                 Some(br)
@@ -425,6 +427,17 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
         );
     }
     println!("\n{} receipt(s) total.", list.len());
+
+    // Rewriting summary — only shown when at least one rewritten request exists.
+    let det_count = list.iter().filter(|r| r.rewrite_method.as_deref() == Some("deterministic")).count();
+    let llm_count = list.iter().filter(|r| r.rewrite_method.as_deref() == Some("llm")).count();
+    let direct_count = list.len() - det_count - llm_count;
+    if det_count > 0 || llm_count > 0 {
+        println!(
+            "Rewriting summary: {} direct | {} deterministic | {} llm (total: {} requests)",
+            direct_count, det_count, llm_count, list.len()
+        );
+    }
     Ok(())
 }
 

@@ -249,6 +249,54 @@ The proxy logs in the server terminal show the routing decision:
 
 ---
 
+## Step 5.5 — Multi-turn follow-up with the query rewriter
+
+By default, Zemtik extracts intent from the last user message only. Enable the hybrid query rewriter to resolve follow-up questions that omit the table name or time range:
+
+```bash
+ZEMTIK_QUERY_REWRITER=1 cargo run -- proxy
+```
+
+With the rewriter enabled, send a two-turn conversation. Turn 1 establishes the table and time context; Turn 2 references only a new time expression:
+
+```bash
+# Turn 1 — explicit query (full context)
+curl -s -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"aws_spend in Q1 2024"}]}'
+
+# Turn 2 — follow-up with only a time expression
+curl -s -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [
+      {"role": "user",      "content": "aws_spend in Q1 2024"},
+      {"role": "assistant", "content": "AWS spend was $12,345."},
+      {"role": "user",      "content": "How about Q2 2024?"}
+    ]
+  }'
+```
+
+The Turn 2 response includes `rewrite_method: "deterministic"` in the evidence envelope, confirming the table was carried forward from the prior message without an LLM call:
+
+```json
+"evidence": {
+  "engine": "FastLane",
+  "attestation_hash": "b7e2...",
+  "data_exfiltrated": 0,
+  "rewrite_method": "deterministic"
+}
+```
+
+If the deterministic pass cannot determine the table or time, the rewriter falls back to an LLM call and sets `rewrite_method: "llm"`. If neither path succeeds, the request returns HTTP 400 `RewritingFailed`. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and [CONFIGURATION.md](CONFIGURATION.md#query-rewriting-v0100) for tuning options.
+
+> **Data residency:** when `rewrite_method: "llm"`, the full conversation history in the request body was sent to the OpenAI endpoint configured by `ZEMTIK_OPENAI_BASE_URL`. Review the data residency section in [CONFIGURATION.md](CONFIGURATION.md#data-residency) before enabling the LLM fallback in production.
+
+---
+
 ## Step 6 — Try a critical table
 
 Query payroll (sensitivity = `critical`) to see the ZK slow lane in action:

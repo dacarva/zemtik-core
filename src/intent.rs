@@ -186,6 +186,8 @@ pub fn extract_intent_with_backend(
             start_unix_secs: time_range.start_unix_secs,
             end_unix_secs: time_range.end_unix_secs,
             confidence: 1.0,
+            rewritten_query: None,
+            rewrite_method: None,
         });
     }
 
@@ -215,6 +217,8 @@ pub fn extract_intent_with_backend(
         start_unix_secs: time_range.start_unix_secs,
         end_unix_secs: time_range.end_unix_secs,
         confidence,
+        rewritten_query: None,
+        rewrite_method: None,
     })
 }
 

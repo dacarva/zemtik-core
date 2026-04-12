@@ -32,6 +32,11 @@ pub struct Receipt {
     /// Number of real (non-dummy padding) transactions in the ZK proof.
     /// None for FastLane path or legacy rows (pre-v5).
     pub actual_row_count: Option<usize>,
+    /// How the query rewriter resolved this intent. "deterministic" | "llm" | None.
+    /// None when no rewriting was performed. Added in v6.
+    pub rewrite_method: Option<String>,
+    /// The original (pre-rewrite) query text. None when no rewriting was performed. Added in v6.
+    pub rewritten_query: Option<String>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -72,6 +77,7 @@ pub fn open_receipts_db(db_path: &std::path::Path) -> anyhow::Result<Connection>
 /// Version 2 → 3: adds outgoing_prompt_hash column.
 /// Version 3 → 4: adds signing_version column.
 /// Version 4 → 5: adds actual_row_count column (pre-padding real row count for ZK path).
+/// Version 5 → 6: adds rewrite_method and rewritten_query columns (hybrid rewriter audit trail).
 pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -135,6 +141,17 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v5")?;
     }
 
+    if version < 6 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN rewrite_method TEXT DEFAULT NULL;
+             ALTER TABLE receipts ADD COLUMN rewritten_query TEXT DEFAULT NULL;
+             PRAGMA user_version = 6;
+             COMMIT;",
+        )
+        .context("apply migration v6")?;
+    }
+
     Ok(())
 }
 
@@ -145,8 +162,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
              data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
-             actual_row_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             actual_row_count, rewrite_method, rewritten_query)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -163,6 +180,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.outgoing_prompt_hash,
             r.signing_version.map(|v| v as i64),
             r.actual_row_count.map(|v| v as i64),
+            r.rewrite_method,
+            r.rewritten_query,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -201,7 +220,9 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     intent_confidence,
                     outgoing_prompt_hash,
                     signing_version,
-                    actual_row_count
+                    actual_row_count,
+                    rewrite_method,
+                    rewritten_query
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -226,6 +247,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
                 actual_row_count: arc.map(|v| v as usize),
+                rewrite_method: row.get(15)?,
+                rewritten_query: row.get(16)?,
             })
         })
         .context("query receipts")?;
@@ -246,7 +269,9 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     intent_confidence,
                     outgoing_prompt_hash,
                     signing_version,
-                    actual_row_count
+                    actual_row_count,
+                    rewrite_method,
+                    rewritten_query
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -271,6 +296,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 outgoing_prompt_hash: row.get(12)?,
                 signing_version: sv.map(|v| v as u8),
                 actual_row_count: arc.map(|v| v as usize),
+                rewrite_method: row.get(15)?,
+                rewritten_query: row.get(16)?,
             })
         })
         .context("query receipt")?;

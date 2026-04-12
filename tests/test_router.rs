@@ -35,6 +35,8 @@ fn intent(table: &str) -> IntentResult {
         start_unix_secs: 0,
         end_unix_secs: 0,
         confidence: 1.0,
+        rewritten_query: None,
+        rewrite_method: None,
     }
 }
 

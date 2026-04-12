@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{AppConfig, SchemaConfig};
+use crate::config::{AppConfig, SchemaConfig, ZemtikMode};
 use crate::types::{SchemaValidationResult, TableValidationResult, ZkToolsStatus};
 
 /// Run all startup validations and return the combined result.
@@ -45,6 +45,15 @@ pub async fn run_startup_validation(
             zk_tools,
             skipped: true,
         };
+    }
+
+    // Warn when ZEMTIK_QUERY_REWRITER=1 in tunnel mode — rewriter is a no-op there.
+    if config.query_rewriter_enabled && config.mode == ZemtikMode::Tunnel {
+        eprintln!(
+            "[REWRITER] ZEMTIK_QUERY_REWRITER=1 has no effect in tunnel mode.\n\
+             \x20          Tunnel mode is passthrough — intent extraction does not run.\n\
+             \x20          Remove ZEMTIK_QUERY_REWRITER from your tunnel deployment config."
+        );
     }
 
     // Warn about missing ZK tools only when validation is actually running (not in skip/SQLite modes).
