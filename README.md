@@ -418,7 +418,8 @@ zemtik-core/
 │   ├── HOW_TO_ADD_TABLE.md   # Add a new table to the schema (step-by-step)
 │   ├── INTENT_ENGINE.md      # How EmbeddingBackend + DeterministicTimeParser work
 │   ├── SCALING.md            # Recursive proofs, production path, why remote proving breaks ZK
-│   └── SUPPORTED_QUERIES.md  # v1 query contract: supported patterns, error reference
+│   ├── SUPPORTED_QUERIES.md  # v1 query contract: supported patterns, error reference
+│   └── ZK_CIRCUITS.md  # Deep explanation on the zk circuits
 ├── Dockerfile            # Multi-stage build; non-root user; FastLane only (no nargo/bb)
 ├── docker-compose.yml    # Compose file for local Docker runs
 └── .env.example
