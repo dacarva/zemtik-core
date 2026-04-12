@@ -182,14 +182,16 @@ In short: FastLane is fast and private; ZK SlowLane is fast, private, *and* veri
 
 ## Conversation patterns (multi-turn)
 
-Zemtik extracts intent from the **last user message** only. Follow-up questions without full context will not resolve:
+Zemtik extracts intent from the **last user message** only. Follow-up questions without full context will not resolve without the rewriter enabled:
 
 ```text
 User: "What was payroll in Q1 2024?"   → OK (full context)
 User: "What about Q2?"                 → 400 NoTableIdentified (no table or time in message)
 ```
 
-This is by design — the ZK pipeline processes each request independently; there is no session state.
+With `ZEMTIK_QUERY_REWRITER=1`, Zemtik resolves follow-up queries using conversation history. When intent extraction fails on the current message, the rewriter first runs a fast deterministic pass over prior user messages to carry the table forward and merge any explicit time expression from the current message. If that does not succeed, it falls back to an LLM rewrite call using the full conversation context. The response `evidence` object includes `rewrite_method: "deterministic"` or `rewrite_method: "llm"` to record which path was used.
+
+Workarounds A, B, and C below still apply when `ZEMTIK_QUERY_REWRITER` is disabled (the default).
 
 ### Workaround A: client-side templating
 

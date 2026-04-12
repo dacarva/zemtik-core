@@ -29,6 +29,9 @@ audit/
 # Debugging
 *.log
 debug/
+
+# Local QA and scratch files (not committed)
+tmp/
 .gstack/
 zemtik-course/
 skills-lock.json

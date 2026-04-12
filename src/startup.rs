@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{AppConfig, SchemaConfig};
+use crate::config::{AppConfig, SchemaConfig, ZemtikMode};
 use crate::types::{SchemaValidationResult, TableValidationResult, ZkToolsStatus};
 
 /// Run all startup validations and return the combined result.
@@ -33,6 +33,17 @@ pub async fn run_startup_validation(
     let nargo_ok = which("nargo");
     let bb_ok = which("bb");
     let zk_tools = ZkToolsStatus { nargo: nargo_ok, bb: bb_ok };
+
+    // Warn when ZEMTIK_QUERY_REWRITER=1 in tunnel mode — rewriter is a no-op there.
+    // Placed before the early return so the warning appears even when DB validation is skipped
+    // (e.g., SQLite demo mode or ZEMTIK_SKIP_DB_VALIDATION=1).
+    if config.query_rewriter_enabled && config.mode == ZemtikMode::Tunnel {
+        eprintln!(
+            "[REWRITER] ZEMTIK_QUERY_REWRITER=1 has no effect in tunnel mode.\n\
+             \x20          Tunnel mode is passthrough — intent extraction does not run.\n\
+             \x20          Remove ZEMTIK_QUERY_REWRITER from your tunnel deployment config."
+        );
+    }
 
     if skip_db || !is_supabase {
         if skip_db {

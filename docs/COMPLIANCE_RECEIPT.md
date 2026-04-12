@@ -75,6 +75,27 @@ SHA-256 of the institution's BabyJubJub public key (`pub_key_x:pub_key_y`). Use 
 
 SHA-256 of the `schema_config.json` file in use at the time of the query. Allows auditors to confirm which table definitions and sensitivity classifications governed the routing decision.
 
+### `rewrite_method`
+
+**Values: `"deterministic"`, `"llm"`, or absent**
+
+Present only when the hybrid query rewriter resolved the request (v0.10.0+, requires `ZEMTIK_QUERY_REWRITER=1`).
+
+- `"deterministic"` — the rewriter carried the table forward from a prior user message and merged the time expression from the current message. No LLM call was made during rewriting.
+- `"llm"` — the deterministic pass could not resolve the request; the rewriter called `gpt-5.4-nano` (or the model in `ZEMTIK_QUERY_REWRITER_MODEL`) with the conversation history to produce a self-contained query, which was then re-run through intent extraction.
+- absent — intent extraction succeeded directly from the current message; no rewriting occurred.
+
+**ZK guarantee:** The rewrite method does not affect the ZK proof. The ZK proof (or BabyJubJub attestation for FastLane) covers the aggregated database result — not the query text. A rewritten query that resolves to the same table and time range produces an identical, independently verifiable proof. The `data_exfiltrated: 0` guarantee holds regardless of `rewrite_method`.
+
+**Data residency when `rewrite_method: "llm"`:** The conversation history in the request body was sent to the OpenAI endpoint configured by `ZEMTIK_OPENAI_BASE_URL`, using `OPENAI_API_KEY`. This is the same endpoint used for the main LLM request. The rewritten query text is stored in `rewritten_query TEXT` in `receipts.db` alongside the `rewrite_method TEXT` column (both added in the v6 receipts DB migration).
+
+**Receipts DB columns (v6+):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `rewrite_method` | `TEXT` | `"deterministic"`, `"llm"`, or `NULL` when no rewriting occurred |
+| `rewritten_query` | `TEXT` | The rewritten query string sent to intent extraction, or `NULL` when no rewriting occurred |
+
 ### `zemtik_confidence`
 
 Intent matching confidence score (0.0–1.0). For the regex backend, this is always 1.0 (exact substring match). For the embedding backend, this is the cosine similarity between the prompt and the matched table's description vector.

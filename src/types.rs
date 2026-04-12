@@ -265,6 +265,26 @@ pub struct OpenAiResult {
 // Routing engine types
 // ---------------------------------------------------------------------------
 
+/// How a failing query was resolved by the rewriter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewriteMethod {
+    /// Prior conversation context resolved table+time deterministically (no LLM call).
+    Deterministic,
+    /// LLM rewrote the query to include explicit table and time range.
+    #[serde(rename = "llm")]
+    LlmRewrite,
+}
+
+impl std::fmt::Display for RewriteMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Deterministic => write!(f, "deterministic"),
+            Self::LlmRewrite => write!(f, "llm"),
+        }
+    }
+}
+
 /// Resolved intent extracted from a user prompt.
 #[derive(Clone)]
 pub struct IntentResult {
@@ -274,6 +294,11 @@ pub struct IntentResult {
     pub end_unix_secs: i64,
     /// Cosine similarity score from embedding match (1.0 for regex backend).
     pub confidence: f32,
+    /// Self-contained query produced by the rewriter (canonical form used for audit).
+    /// None for direct intent extraction.
+    pub rewritten_query: Option<String>,
+    /// How the rewriter resolved this intent. None for direct intent extraction.
+    pub rewrite_method: Option<RewriteMethod>,
 }
 
 /// Routing decision: fast BabyJubJub attestation vs. full ZK proof.
@@ -349,6 +374,7 @@ pub enum ZemtikErrorCode {
     StreamingNotSupported,
     InvalidRequest,
     QueryFailed,
+    RewritingFailed,
 }
 
 impl std::fmt::Display for ZemtikErrorCode {
@@ -358,6 +384,7 @@ impl std::fmt::Display for ZemtikErrorCode {
             Self::StreamingNotSupported => write!(f, "StreamingNotSupported"),
             Self::InvalidRequest => write!(f, "InvalidRequest"),
             Self::QueryFailed => write!(f, "QueryFailed"),
+            Self::RewritingFailed => write!(f, "RewritingFailed"),
         }
     }
 }

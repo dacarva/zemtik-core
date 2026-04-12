@@ -2,7 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-04-11
+## [0.10.0] - 2026-04-12
+
+### Added
+- **Hybrid query rewriter** (`ZEMTIK_QUERY_REWRITER=1`) — resolves multi-turn follow-up queries that fail standalone intent extraction. Two-step pipeline: (1) deterministic resolve scans prior user messages and carries forward table + time; (2) LLM rewriter fallback calls `gpt-5.4-nano` with conversation history. Feature is off by default; all failures remain fail-secure (HTTP 400).
+- **New env vars**: `ZEMTIK_QUERY_REWRITER`, `ZEMTIK_QUERY_REWRITER_MODEL`, `ZEMTIK_QUERY_REWRITER_TURNS`, `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES`, `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS`, `ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS`.
+- **Per-table rewriter override**: `query_rewriting` field in `schema_config.json` per table — absent (follow global), `true` (force enable), `false` (fail-secure disable).
+- **`rewrite_method` in evidence envelope**: `"deterministic"` or `"llm"` injected into `body.evidence.rewrite_method` for rewritten requests. Absent for direct-extraction requests.
+- **Receipts DB v6 migration**: adds `rewrite_method TEXT` and `rewritten_query TEXT` columns (backward compatible — existing rows get `NULL`).
+- **`RewritingFailed` error code**: returned when rewriting fails. Two distinct hints: `unresolvable` (table or time cannot be determined) and `timeout` (LLM rewriter timed out; increase `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS`).
+- **Startup WARN**: `ZEMTIK_QUERY_REWRITER=1` with `ZEMTIK_MODE=tunnel` emits a warning — rewriter has no effect in tunnel mode.
+- **`zemtik list` rewriting summary**: footer line showing direct / deterministic / llm request counts when any rewritten requests are present.
 
 ### Changed
 - **Documentation overhaul** — replaced all ASCII art diagrams (9 diagrams across 8 files) with GitHub-native Mermaid diagrams. Added 7 new diagrams covering startup validation, CI/CD pipeline, config resolution, and verification flow.
@@ -10,12 +20,25 @@ All notable changes to this project will be documented in this file.
 - **`README.md`** — replaced 38-line ASCII "How It Works" and tunnel mode diagrams with Mermaid flowcharts; updated project file tree to include `startup.rs`.
 - **`docs/TUNNEL_MODE.md`** — replaced ASCII data flow with `sequenceDiagram`; fixed audit record `id` type (UUID string, not integer); fixed dead link (`debug/MANUAL_TUNNEL_QA.md` → `INTEGRATION_CHECKLIST.md`).
 - **`docs/INTENT_ENGINE.md`** — added full intent extraction flowchart; fixed `TimeRangeAmbiguous` routing (routes to HTTP 400, not ZK SlowLane — 5 locations corrected).
-- **`docs/CONFIGURATION.md`** — added config resolution flowchart; added v0.9.1 env vars (`ZEMTIK_SKIP_DB_VALIDATION`, `ZEMTIK_VALIDATE_ONLY`); fixed routing rules table (TimeRangeAmbiguous → HTTP 400).
+- **`docs/CONFIGURATION.md`** — added config resolution flowchart; added v0.9.1 env vars (`ZEMTIK_SKIP_DB_VALIDATION`, `ZEMTIK_VALIDATE_ONLY`); updated routing rules table with rewriter entries.
 - **`docs/SUPPORTED_QUERIES.md`** — fixed `TimeRangeAmbiguous` error description (was incorrectly documented as routing to ZK SlowLane).
 - **`docs/SCALING.md`** — replaced 3 ASCII recursive proof/aggregation/batch diagrams with Mermaid.
 - **`docs/GETTING_STARTED.md`** — added orientation flowchart.
 - **`docs/INTEGRATION_CHECKLIST.md`** — added verification flow diagram.
 - **`docs/TROUBLESHOOTING.md`** — updated quick table with `StreamingNotSupported` error code.
+
+### Fixed
+- **SEC-3**: internal ZK pipeline error messages are no longer leaked in HTTP response bodies. Replaced with `"Internal pipeline error — see server logs for details."`.
+- **ISSUE-001**: `deterministic_resolve` now returns `None` for context-dependent time phrases (`same period`, `same quarter`, `same month`, `last year`) instead of applying a year-level time pivot. These phrases trigger LLM rewriter fallback (or HTTP 400 if rewriter disabled).
+
+### Upgrading to v0.10.0
+
+Receipts DB v6 migration adds two nullable columns to the `receipts` table (`rewrite_method`, `rewritten_query`). The migration runs automatically at startup — no action required. All rows created before v0.10.0 have `NULL` in these columns.
+
+`ZEMTIK_QUERY_REWRITER` is off by default. Existing deployments are unaffected. To opt in:
+1. Set `ZEMTIK_QUERY_REWRITER=1`.
+2. Review the data residency note in [docs/CONFIGURATION.md](docs/CONFIGURATION.md#data-residency) before enabling the LLM fallback path in production. The LLM rewrite call sends conversation history to `ZEMTIK_OPENAI_BASE_URL`.
+3. Add `"query_rewriting": false` to any table in `schema_config.json` where you want to prevent conversation history from being sent externally, even if the global flag is on.
 
 ---
 

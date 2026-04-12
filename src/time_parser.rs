@@ -97,9 +97,132 @@ static RE_BARE_YEAR: LazyLock<Regex> =
 
 /// Patterns that signal a time expression without being a supported format.
 /// When any of these match but no supported pattern did, we return TimeAmbiguousError.
+///
+/// Includes "same (quarter|period|month|week)" — these require carrying sub-year granularity
+/// from conversation context and must be routed to the LLM rewriter (not resolved by
+/// the deterministic parser). Checked before RE_LAST_YEAR so that compound phrases like
+/// "same quarter last year" are classified as Ambiguous rather than matching "last year".
 static RE_AMBIGUOUS_TIME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier)\b").unwrap()
+    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier|same\s+(quarter|period|month|week))\b").unwrap()
 });
+
+// ---------------------------------------------------------------------------
+// Internal helper
+// ---------------------------------------------------------------------------
+
+/// Three-way result for pattern matching — used internally by `parse_time_range_inner`.
+enum TimeParseResult {
+    /// A supported time expression was found and resolved.
+    Matched(TimeRange),
+    /// An unrecognized time-signaling word was found (triggers ZK SlowLane routing).
+    Ambiguous,
+    /// No time expression at all — callers decide the default.
+    NotFound,
+}
+
+/// Core pattern-matching logic shared by `parse_time_range` and `parse_time_range_explicit`.
+fn parse_time_range_inner(prompt: &str, fiscal_offset_months: i64) -> TimeParseResult {
+    let now = Utc::now();
+
+    // Q[1-4] YYYY — highest priority
+    if let Some(cap) = RE_QUARTER.captures(prompt) {
+        let quarter: u32 = cap[1].parse().unwrap();
+        let year: i32 = cap[2].parse().unwrap();
+        let (start, end) = quarter_to_unix(quarter, year, fiscal_offset_months);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // H[1-2] YYYY
+    if let Some(cap) = RE_HALF_YEAR.captures(prompt) {
+        let half: u32 = cap[1].parse().unwrap();
+        let year: i32 = cap[2].parse().unwrap();
+        let (start_month, end_month) = if half == 1 { (1u32, 6u32) } else { (7u32, 12u32) };
+        let start = month_start_unix(year, start_month);
+        let end = month_end_unix(year, end_month);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // FY YYYY / FYYYYY
+    if let Some(cap) = RE_FISCAL_YEAR.captures(prompt) {
+        let year: i32 = cap[1].parse().unwrap();
+        let (start, end) = year_to_unix(year, fiscal_offset_months);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // MMM YYYY / MMMM YYYY
+    if let Some(cap) = RE_MONTH_NAME.captures(prompt) {
+        let month = month_name_to_number(&cap[1]).unwrap_or(1);
+        let year: i32 = cap[2].parse().unwrap();
+        let start = month_start_unix(year, month);
+        let end = month_end_unix(year, month);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // past N days (cap at 36500 days / ~100 years to prevent Duration overflow)
+    if let Some(cap) = RE_PAST_N_DAYS.captures(prompt) {
+        let n: i64 = cap[1].parse().unwrap_or(1).clamp(1, 36500);
+        let end = now.timestamp();
+        let start = (now - Duration::days(n)).timestamp();
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // last quarter
+    if RE_LAST_QUARTER.is_match(prompt) {
+        let (start, end) = last_quarter_range(now.year(), now.month(), fiscal_offset_months);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // this quarter
+    if RE_THIS_QUARTER.is_match(prompt) {
+        let q = month_to_quarter(now.month());
+        let (start, end) = quarter_to_unix(q, now.year(), fiscal_offset_months);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // last month
+    if RE_LAST_MONTH.is_match(prompt) {
+        let (prev_year, prev_month) = prev_month(now.year(), now.month());
+        let start = month_start_unix(prev_year, prev_month);
+        let end = month_end_unix(prev_year, prev_month);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // this month
+    if RE_THIS_MONTH.is_match(prompt) {
+        let start = month_start_unix(now.year(), now.month());
+        let end = month_end_unix(now.year(), now.month());
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // Check for ambiguous time signals BEFORE relative-year patterns so that compound phrases
+    // like "same quarter last year" are classified Ambiguous rather than matching as "last year".
+    // RE_BARE_YEAR and other explicit matches still run afterward for non-ambiguous prompts.
+    if RE_AMBIGUOUS_TIME.is_match(prompt) {
+        return TimeParseResult::Ambiguous;
+    }
+
+    // last year / prior year → full prior calendar year
+    if RE_LAST_YEAR.is_match(prompt) {
+        let (start, end) = year_to_unix(now.year() - 1, fiscal_offset_months);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // YTD / year to date
+    if RE_YTD.is_match(prompt) {
+        let start = month_start_unix(now.year(), 1);
+        let end = now.timestamp();
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    // Bare YYYY (lowest explicit priority, checked after all named patterns)
+    if let Some(cap) = RE_BARE_YEAR.captures(prompt) {
+        let year: i32 = cap[1].parse().unwrap();
+        let (start, end) = year_to_unix(year, fiscal_offset_months);
+        return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    }
+
+    TimeParseResult::NotFound
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -114,106 +237,31 @@ pub fn parse_time_range(
     prompt: &str,
     fiscal_offset_months: i64,
 ) -> Result<TimeRange, TimeAmbiguousError> {
-    let now = Utc::now();
-
-    // Q[1-4] YYYY — highest priority
-    if let Some(cap) = RE_QUARTER.captures(prompt) {
-        let quarter: u32 = cap[1].parse().unwrap();
-        let year: i32 = cap[2].parse().unwrap();
-        let (start, end) = quarter_to_unix(quarter, year, fiscal_offset_months);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
+    match parse_time_range_inner(prompt, fiscal_offset_months) {
+        TimeParseResult::Matched(r) => Ok(r),
+        TimeParseResult::Ambiguous => Err(TimeAmbiguousError),
+        TimeParseResult::NotFound => {
+            // Default to current calendar year — behavior unchanged for all existing callers.
+            let (start, end) = year_to_unix(Utc::now().year(), 0);
+            Ok(TimeRange { start_unix_secs: start, end_unix_secs: end })
+        }
     }
+}
 
-    // H[1-2] YYYY
-    if let Some(cap) = RE_HALF_YEAR.captures(prompt) {
-        let half: u32 = cap[1].parse().unwrap();
-        let year: i32 = cap[2].parse().unwrap();
-        let (start_month, end_month) = if half == 1 { (1u32, 6u32) } else { (7u32, 12u32) };
-        let start = month_start_unix(year, start_month);
-        let end = month_end_unix(year, end_month);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
+/// Like `parse_time_range`, but returns `Ok(None)` when no time expression is present,
+/// instead of defaulting to the current calendar year.
+///
+/// Used by `deterministic_resolve` to distinguish "explicit time" from "defaulted time."
+/// All other callers continue to use `parse_time_range` unchanged.
+pub fn parse_time_range_explicit(
+    prompt: &str,
+    fiscal_offset_months: i64,
+) -> Result<Option<TimeRange>, TimeAmbiguousError> {
+    match parse_time_range_inner(prompt, fiscal_offset_months) {
+        TimeParseResult::Matched(r) => Ok(Some(r)),
+        TimeParseResult::Ambiguous => Err(TimeAmbiguousError),
+        TimeParseResult::NotFound => Ok(None),
     }
-
-    // FY YYYY / FYYYYY
-    if let Some(cap) = RE_FISCAL_YEAR.captures(prompt) {
-        let year: i32 = cap[1].parse().unwrap();
-        let (start, end) = year_to_unix(year, fiscal_offset_months);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // MMM YYYY / MMMM YYYY
-    if let Some(cap) = RE_MONTH_NAME.captures(prompt) {
-        let month = month_name_to_number(&cap[1]).unwrap_or(1);
-        let year: i32 = cap[2].parse().unwrap();
-        let start = month_start_unix(year, month);
-        let end = month_end_unix(year, month);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // past N days (cap at 36500 days / ~100 years to prevent Duration overflow)
-    if let Some(cap) = RE_PAST_N_DAYS.captures(prompt) {
-        let n: i64 = cap[1].parse().unwrap_or(1).clamp(1, 36500);
-        let end = now.timestamp();
-        let start = (now - Duration::days(n)).timestamp();
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // last quarter
-    if RE_LAST_QUARTER.is_match(prompt) {
-        let (start, end) = last_quarter_range(now.year(), now.month(), fiscal_offset_months);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // this quarter
-    if RE_THIS_QUARTER.is_match(prompt) {
-        let q = month_to_quarter(now.month());
-        let (start, end) = quarter_to_unix(q, now.year(), fiscal_offset_months);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // last month
-    if RE_LAST_MONTH.is_match(prompt) {
-        let (prev_year, prev_month) = prev_month(now.year(), now.month());
-        let start = month_start_unix(prev_year, prev_month);
-        let end = month_end_unix(prev_year, prev_month);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // this month
-    if RE_THIS_MONTH.is_match(prompt) {
-        let start = month_start_unix(now.year(), now.month());
-        let end = month_end_unix(now.year(), now.month());
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // last year / prior year → full prior calendar year
-    if RE_LAST_YEAR.is_match(prompt) {
-        let (start, end) = year_to_unix(now.year() - 1, fiscal_offset_months);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // YTD / year to date
-    if RE_YTD.is_match(prompt) {
-        let start = month_start_unix(now.year(), 1);
-        let end = now.timestamp();
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // Bare YYYY (lowest explicit priority, checked after all named patterns)
-    if let Some(cap) = RE_BARE_YEAR.captures(prompt) {
-        let year: i32 = cap[1].parse().unwrap();
-        let (start, end) = year_to_unix(year, fiscal_offset_months);
-        return Ok(TimeRange { start_unix_secs: start, end_unix_secs: end });
-    }
-
-    // Check for ambiguous time signals — only after all supported patterns fail
-    if RE_AMBIGUOUS_TIME.is_match(prompt) {
-        return Err(TimeAmbiguousError);
-    }
-
-    // No time expression at all — default to current calendar year
-    let (start, end) = year_to_unix(now.year(), 0);
-    Ok(TimeRange { start_unix_secs: start, end_unix_secs: end })
 }
 
 // ---------------------------------------------------------------------------

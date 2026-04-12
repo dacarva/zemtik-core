@@ -12,6 +12,7 @@ pub mod proxy;
 pub mod prover;
 pub mod tunnel;
 pub mod receipts;
+pub mod rewriter;
 pub mod router;
 pub mod startup;
 pub mod time_parser;

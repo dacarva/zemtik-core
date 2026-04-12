@@ -1,4 +1,4 @@
-use zemtik::time_parser::parse_time_range;
+use zemtik::time_parser::{parse_time_range, parse_time_range_explicit};
 
 // Reference timestamps (UTC):
 // 2026-01-01 00:00:00 = 1_767_225_600
@@ -243,4 +243,36 @@ fn bare_year_ignores_non_year_numbers() {
     let tr = parse_time_range("we have 2000 employees, show payroll", 0).unwrap();
     assert_eq!(tr.start_unix_secs, tr_control.start_unix_secs,
         "2000 should NOT match as a year — expected current-year default");
+}
+
+// ---------------------------------------------------------------------------
+// parse_time_range_explicit — new function tests (Fix 0)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_time_range_explicit_returns_none_on_no_time() {
+    // No time expression → Ok(None), NOT Ok(current_year_default)
+    let result = parse_time_range_explicit("What was the aws_spend?", 0);
+    assert!(result.is_ok(), "should not error on missing time");
+    assert!(result.unwrap().is_none(), "should return None, not a defaulted year");
+}
+
+#[test]
+fn parse_time_range_explicit_returns_err_on_ambiguous() {
+    // Ambiguous expression → Err
+    let result = parse_time_range_explicit("What was the aws_spend recently?", 0);
+    assert!(result.is_err(), "ambiguous time should return Err(TimeAmbiguousError)");
+}
+
+#[test]
+fn parse_time_range_explicit_returns_some_on_explicit_pattern() {
+    // Explicit quarter expression → Ok(Some(range))
+    let result = parse_time_range_explicit("What was aws_spend in Q1 2024?", 0);
+    assert!(result.is_ok());
+    let tr_opt = result.unwrap();
+    assert!(tr_opt.is_some(), "explicit time should return Ok(Some(_))");
+    let tr = tr_opt.unwrap();
+    // Q1 2024: 2024-01-01 → 2024-03-31
+    assert_eq!(tr.start_unix_secs, 1_704_067_200);
+    assert_eq!(tr.end_unix_secs, 1_711_929_599);
 }

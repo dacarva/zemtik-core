@@ -72,6 +72,47 @@ flowchart LR
 | `ZEMTIK_OPENAI_BASE_URL` | `https://api.openai.com` | URL | Base URL for OpenAI API calls. Override in tests or dev to point at a mock server (e.g. `http://localhost:3000`). |
 | `ZEMTIK_OPENAI_MODEL` | `gpt-5.4-nano` | model identifier | OpenAI model used in CLI pipeline and proxy forwarding. `gpt-5.4-nano` is the current default. Set to any Chat Completions-compatible model. |
 
+### Query rewriting (v0.10.0+)
+
+When intent extraction fails on the current message, the hybrid query rewriter attempts to resolve the request using conversation history. The rewriter is off by default and must be explicitly enabled.
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_QUERY_REWRITER` | `false` | `1`, `true` | Enables the hybrid query rewriter. When intent extraction fails, the rewriter first runs a deterministic pass over prior messages, then falls back to an LLM rewrite call if deterministic resolution fails. |
+| `ZEMTIK_QUERY_REWRITER_MODEL` | `gpt-5.4-nano` | model identifier | OpenAI model used for the LLM rewrite fallback call. Defaults to the value of `ZEMTIK_OPENAI_MODEL`. |
+| `ZEMTIK_QUERY_REWRITER_TURNS` | `6` | positive integer | Number of prior conversation turns included in the LLM rewriter context window. Higher values improve accuracy at the cost of more tokens per rewrite call. |
+| `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES` | `5` | positive integer | Maximum number of prior user messages scanned by the deterministic resolution pass. The deterministic pass does not call the LLM. |
+| `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` | `10` | positive integer | Seconds allowed for the LLM rewrite call before returning `RewritingFailed` with hint `timeout`. Does not affect the deterministic pass (no network call). |
+| `ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS` | `2000` | positive integer | Token budget for LLM rewriter context, estimated via character count divided by 4. Older messages are dropped first when the budget is exceeded. |
+
+#### Per-table override: `query_rewriting`
+
+Each table in `schema_config.json` can override the global `ZEMTIK_QUERY_REWRITER` setting with a `query_rewriting` field:
+
+| `query_rewriting` value | Effect |
+|------------------------|--------|
+| absent (field omitted) | Follows the global `ZEMTIK_QUERY_REWRITER` env var |
+| `true` | Rewriting enabled for this table, regardless of global setting |
+| `false` | Rewriting disabled for this table, even when `ZEMTIK_QUERY_REWRITER=1` (fail-secure override) |
+
+Use `"query_rewriting": false` on sensitive tables to prevent conversation history from being sent to the configured OpenAI endpoint for rewriting.
+
+#### Data residency
+
+When the LLM rewrite fallback runs, a constructed context window is sent to the OpenAI endpoint configured by `ZEMTIK_OPENAI_BASE_URL` using `OPENAI_API_KEY`. The context is built by `build_context()` from at most `ZEMTIK_QUERY_REWRITER_TURNS` most recent user and assistant turns — not all messages in the request body — and is further truncated to fit within the token budget set by `ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS` (estimated as total chars / 4). Only this bounded, truncated message history and the failing query text are sent externally. The rewritten query text produced by the LLM is logged to `receipts.db` in the `rewritten_query` column; raw database rows are never forwarded.
+
+Zemtik never sends raw database rows during rewriting — only the bounded, truncated message history and the failing query text.
+
+#### Tunnel mode interaction
+
+`ZEMTIK_QUERY_REWRITER=1` with `ZEMTIK_MODE=tunnel` emits a WARN at startup: the rewriter has no effect in tunnel mode because tunnel mode forwards requests unmodified. Set `ZEMTIK_QUERY_REWRITER` only in standard proxy mode.
+
+#### Production recommendation
+
+Start with the deterministic path only. The deterministic pass resolves the table from prior messages and merges an explicit time expression from the current message — no LLM call, no network latency. Enable the LLM fallback (`ZEMTIK_QUERY_REWRITER=1`) only after confirming that deterministic resolution does not cover your users' query patterns. When enabling the LLM fallback, review the data residency note above with your compliance team.
+
+---
+
 ### Tunnel mode (v0.9.0+)
 
 Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNNEL_MODE.md](TUNNEL_MODE.md) for full details.
@@ -163,6 +204,7 @@ Required for proxy mode. Zemtik loads this file from `~/.zemtik/schema_config.js
 | `aliases` | string[] | No | Alternative names the intent engine uses to match this table. Case-insensitive substring matching. |
 | `description` | string | Required for `embed` backend | Human-readable description of the table. Used to build the embedding index at startup. |
 | `example_prompts` | string[] | Required for `embed` backend | Representative queries for this table. Used to build the embedding index at startup. More examples = better matching accuracy. |
+| `query_rewriting` | boolean | No | Per-table override for the hybrid query rewriter (v0.10.0+). Absent = follow `ZEMTIK_QUERY_REWRITER`. `true` = force enable. `false` = fail-secure disable (overrides global enable). Use `false` on tables where sending conversation history to OpenAI is not acceptable. |
 
 ### Annotated example
 
@@ -183,6 +225,7 @@ Required for proxy mode. Zemtik loads this file from `~/.zemtik/schema_config.js
     },
     "payroll": {
       "sensitivity": "critical",
+      "query_rewriting": false,
       "description": "Employee salary, wages, and compensation data.",
       "example_prompts": [
         "What was our total payroll cost last quarter?",
@@ -194,6 +237,8 @@ Required for proxy mode. Zemtik loads this file from `~/.zemtik/schema_config.js
   }
 }
 ```
+
+> **`query_rewriting` three-state flag:** omit the field to follow the global `ZEMTIK_QUERY_REWRITER` env var; set to `true` to force-enable rewriting for this table regardless of the global setting; set to `false` (as shown for `payroll` above) to disable rewriting for this table even when `ZEMTIK_QUERY_REWRITER=1`. Use `false` on tables where sending conversation history to the configured OpenAI endpoint is not acceptable under your data residency policy.
 
 ### Fiscal year offset
 
@@ -219,9 +264,11 @@ The routing decision is made per-request based on the intent result and `schema_
 | `sensitivity = "low"` | FastLane |
 | `sensitivity = "critical"` | ZK SlowLane |
 | Table not found in `schema_config.json` | ZK SlowLane (fail-secure) |
-| Intent extraction fails (`NoTableIdentified`) | HTTP 400 |
-| Time range ambiguous (`TimeRangeAmbiguous`) | HTTP 400 (treated as `NoTableIdentified`) |
-| Confidence below `ZEMTIK_INTENT_THRESHOLD` | HTTP 400 (same as `NoTableIdentified`) |
+| Intent extraction fails (`NoTableIdentified`) | HTTP 400 (or rewriter fires if enabled) |
+| Time range ambiguous (`TimeRangeAmbiguous`) | HTTP 400 (or rewriter fires if enabled) |
+| Confidence below `ZEMTIK_INTENT_THRESHOLD` | HTTP 400 (or rewriter fires if enabled) |
+| Rewriter enabled, resolution fails | HTTP 400 `RewritingFailed` |
+| Rewriter enabled, LLM call times out | HTTP 400 `RewritingFailed` (hint: `timeout`) |
 
 ---
 
@@ -241,6 +288,7 @@ Every proxy response includes an `evidence` object at the top level of the Chat 
 | `zemtik_confidence` | float or null | Intent extraction confidence score (0.0–1.0). `null` when the regex backend was used (confidence not applicable). |
 | `outgoing_prompt_hash` | string or null | SHA-256 of the JSON payload sent to the LLM (Rust-layer commitment). `null` when `fully_verifiable=false` (no proof artifact). Visible in `zemtik verify` output and `zemtik list`. |
 | `data_exfiltrated` | integer | Always `0`. Explicit machine-readable assertion. |
+| `rewrite_method` | string or absent | `"deterministic"` or `"llm"` when the hybrid query rewriter resolved the request. Absent when intent extraction succeeded directly without rewriting. |
 | `timestamp` | string | ISO 8601 timestamp of the request |
 
 ---
@@ -260,9 +308,13 @@ CREATE TABLE receipts (
     data_exfiltrated     INTEGER NOT NULL DEFAULT 0,
     intent_confidence    REAL,                   -- NULL for regex backend
     outgoing_prompt_hash TEXT,                   -- NULL when fully_verifiable=false (added v3)
+    rewrite_method       TEXT,                   -- "deterministic", "llm", or NULL (added v6)
+    rewritten_query      TEXT,                   -- rewritten query text, or NULL (added v6)
     created_at           TEXT NOT NULL           -- ISO 8601
 );
 ```
+
+The `rewrite_method` and `rewritten_query` columns were added in the v6 migration (v0.10.0). The migration runs automatically at startup — no manual schema change is required.
 
 List recent receipts:
 

@@ -15,14 +15,14 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::config::{AggFn, AppConfig, ZemtikMode};
+use crate::config::{AggFn, AppConfig, RewriterConfig, ZemtikMode};
 use crate::intent::IntentBackend;
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
-    OpenAiRequestLog, OpenAiResponseLog, QueryParams, Route, SchemaValidationResult,
+    OpenAiRequestLog, OpenAiResponseLog, QueryParams, RewriteMethod, Route, SchemaValidationResult,
     SignatureData, TokenUsage, ZemtikErrorCode,
 };
-use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, router};
+use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, rewriter, router};
 
 pub(crate) struct ProxyState {
     pub(crate) http_client: reqwest::Client,
@@ -60,6 +60,8 @@ pub(crate) struct ProxyState {
     pub(crate) backpressure_count: std::sync::atomic::AtomicU64,
     /// Schema validation result from startup. Exposed via /health.
     pub(crate) schema_validation: Arc<SchemaValidationResult>,
+    /// Query rewriter configuration. None when ZEMTIK_QUERY_REWRITER is off (default).
+    pub(crate) rewriter_config: Option<Arc<RewriterConfig>>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -179,6 +181,34 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         crate::startup::run_startup_validation(&config, &schema).await
     );
 
+    // Build rewriter config if enabled — skip entirely in tunnel mode (no-op there).
+    // Avoids startup failure when ZEMTIK_QUERY_REWRITER=1 is set alongside
+    // ZEMTIK_MODE=tunnel without a corresponding OPENAI_API_KEY.
+    let rewriter_config: Option<Arc<RewriterConfig>> = if config.query_rewriter_enabled
+        && config.mode != ZemtikMode::Tunnel
+    {
+        let api_key = config.openai_api_key.clone()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .unwrap_or_default();
+        if api_key.is_empty() {
+            anyhow::bail!(
+                "ZEMTIK_QUERY_REWRITER=1 requires OPENAI_API_KEY to be set. \
+                 The LLM rewrite fallback cannot authenticate without it."
+            );
+        }
+        Some(Arc::new(RewriterConfig {
+            base_url: config.openai_base_url.clone(),
+            model: config.query_rewriter_model.clone(),
+            api_key,
+            context_window_turns: config.query_rewriter_context_turns,
+            max_scan_messages: config.query_rewriter_scan_messages,
+            timeout_secs: config.query_rewriter_timeout_secs,
+            max_context_tokens: config.query_rewriter_max_context_tokens,
+        }))
+    } else {
+        None
+    };
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_locks,
@@ -194,6 +224,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         tunnel_audit_db,
         backpressure_count: std::sync::atomic::AtomicU64::new(0),
         schema_validation,
+        rewriter_config,
     });
 
     // If any configured origin is "*", use the wildcard policy.
@@ -398,26 +429,175 @@ async fn handle_chat_completions(
         .map_err(|e| ProxyError::Internal(anyhow::anyhow!("intent backend thread panicked: {}", e)))?
     };
 
+    // Extract the full messages array for rewriter context (cloned before borrowing schema).
+    let messages: Vec<Value> = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+
     let intent_result = match intent_result_raw {
         Ok(r) => r,
-        Err(e) => {
-            // Log rejection synchronously — std::sync::Mutex must not be held across .await
-            {
-                let db_guard = state.receipts_db
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Err(db_err) = receipts::insert_intent_rejection(&db_guard, &prompt, &e.to_string()) {
+        Err(intent_err) => {
+            println!("[ROUTE] Intent rejection: {}", intent_err);
+
+            // Helper: log rejection to receipts DB synchronously.
+            // Called only on final failure paths so that a successful rewrite does not
+            // produce a phantom rejection record alongside the success receipt.
+            let log_rejection = |db: &std::sync::MutexGuard<rusqlite::Connection>, msg: &str| {
+                if let Err(db_err) = receipts::insert_intent_rejection(db, &prompt, msg) {
                     eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
                 }
+            };
+
+            // Hybrid query rewriter — only fires when ZEMTIK_QUERY_REWRITER=1.
+            if let Some(rw_config) = state.rewriter_config.as_ref().map(Arc::clone) {
+                // ── STEP 1: deterministic_resolve ────────────────────────────────
+                let det_result = {
+                    let backend = Arc::clone(&state.intent_backend);
+                    let messages_clone = messages.clone();
+                    let schema_clone = schema.clone();
+                    let threshold = state.config.intent_confidence_threshold;
+                    let max_scan = rw_config.max_scan_messages;
+                    tokio::task::spawn_blocking(move || {
+                        rewriter::deterministic_resolve(
+                            &messages_clone,
+                            &schema_clone,
+                            backend.as_ref(),
+                            threshold,
+                            max_scan,
+                        )
+                    })
+                    .await
+                    .map_err(|e| {
+                        ProxyError::Internal(anyhow::anyhow!(
+                            "deterministic_resolve spawn_blocking panicked: {}", e
+                        ))
+                    })?
+                };
+
+                if let Some(mut resolved) = det_result {
+                    // Per-table disable check (fail-secure override).
+                    if let Some(tc) = schema.tables.get(&resolved.table) {
+                        if tc.query_rewriting == Some(false) {
+                            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                            log_rejection(&db_guard, "rewriting disabled for table (query_rewriting: false)");
+                            return Ok(rewriting_disabled_400());
+                        }
+                    }
+                    // Record the original failing prompt (what the user actually said).
+                    // The resolved table+time are stored in the IntentResult fields themselves.
+                    resolved.rewritten_query = Some(prompt.clone());
+                    resolved.rewrite_method = Some(RewriteMethod::Deterministic);
+                    println!("[REWRITER] Deterministic: '{}' → table='{}' [{}-{}]",
+                        prompt, resolved.table, resolved.start_unix_secs, resolved.end_unix_secs);
+                    let route = router::decide_route(&resolved, schema);
+                    let effective_client_id: i64 = schema
+                        .tables
+                        .get(&resolved.table)
+                        .and_then(|tc| tc.client_id)
+                        .unwrap_or(state.config.client_id);
+                    return match route {
+                        Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
+                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
+                    };
+                }
+
+                // ── STEP 2: LLM rewriter (async — do NOT put inside spawn_blocking) ──
+                match rewriter::rewrite_query(&messages, &prompt, schema, &rw_config, &state.http_client).await {
+                    Ok(rewriter::RewriteResult::Rewritten(q)) => {
+                        println!("[REWRITER] LLM: '{}' → '{}'", prompt, q);
+                        // Re-run intent on the rewritten query.
+                        let backend = Arc::clone(&state.intent_backend);
+                        let q_clone = q.clone();
+                        let schema_clone = schema.clone();
+                        let threshold = state.config.intent_confidence_threshold;
+                        let re_intent_join = tokio::task::spawn_blocking(move || {
+                            intent::extract_intent_with_backend(&q_clone, &schema_clone, backend.as_ref(), threshold)
+                        })
+                        .await;
+
+                        // Distinguish panic (JoinError → 500) from intent failure (→ unresolvable 400).
+                        let re_intent: Option<_> = match re_intent_join {
+                            Err(join_err) => {
+                                return Err(ProxyError::Internal(anyhow::anyhow!(
+                                    "re-intent spawn_blocking panicked after LLM rewrite: {}", join_err
+                                )));
+                            }
+                            Ok(intent_result) => intent_result.ok(),
+                        };
+
+                        match re_intent {
+                            Some(mut r) => {
+                                // Per-table disable (LLM could have picked a locked table).
+                                if let Some(tc) = schema.tables.get(&r.table) {
+                                    if tc.query_rewriting == Some(false) {
+                                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                                        log_rejection(&db_guard, "rewriting disabled for table (query_rewriting: false)");
+                                        return Ok(rewriting_disabled_400());
+                                    }
+                                }
+                                r.rewritten_query = Some(q.clone());
+                                r.rewrite_method = Some(RewriteMethod::LlmRewrite);
+                                let route = router::decide_route(&r, schema);
+                                let effective_client_id: i64 = schema
+                                    .tables
+                                    .get(&r.table)
+                                    .and_then(|tc| tc.client_id)
+                                    .unwrap_or(state.config.client_id);
+                                // Rewrite succeeded — do NOT log intent_rejection.
+                                return match route {
+                                    Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
+                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
+                                };
+                            }
+                            None => {
+                                // LLM rewrote but re-intent failed — final failure, log rejection.
+                                let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                                log_rejection(&db_guard, &intent_err.to_string());
+                                return Ok(rewriting_failed_400("unresolvable"));
+                            }
+                        }
+                    }
+                    Ok(rewriter::RewriteResult::Unresolvable) => {
+                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                        log_rejection(&db_guard, &intent_err.to_string());
+                        return Ok(rewriting_failed_400("unresolvable"));
+                    }
+                    Err(e) => {
+                        // Walk the full anyhow error chain — reqwest::Error is typically
+                        // wrapped by `.context()` so downcast_ref on the top level fails.
+                        let is_timeout = e.chain().any(|cause| {
+                            cause.downcast_ref::<reqwest::Error>()
+                                .map(|re| re.is_timeout())
+                                .unwrap_or(false)
+                        });
+                        // Log to stderr but never expose in HTTP response body.
+                        eprintln!("[REWRITER] rewrite_query error (not exposed to caller): {:?}", e);
+                        let hint_kind = if is_timeout {
+                            format!("timeout:{}", rw_config.timeout_secs)
+                        } else {
+                            "unresolvable".to_owned()
+                        };
+                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                        log_rejection(&db_guard, &intent_err.to_string());
+                        return Ok(rewriting_failed_400(&hint_kind));
+                    }
+                }
             }
-            println!("[ROUTE] Intent rejection: {}", e);
+
+            // Rewriter disabled — log rejection and return the original 400.
+            {
+                let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                log_rejection(&db_guard, &intent_err.to_string());
+            }
             return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": {
                         "type": "zemtik_intent_error",
                         "code": ZemtikErrorCode::NoTableIdentified,
-                        "message": format!("Intent extraction failed: {}", e),
+                        "message": format!("Intent extraction failed: {}", intent_err),
                         "hint": "Add aliases matching your users' phrasing to your table config in schema_config.json.",
                         "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/HOW_TO_ADD_TABLE.md"
                     }
@@ -656,6 +836,8 @@ async fn handle_fast_lane(
                 outgoing_prompt_hash: Some(outgoing_hash),
                 signing_version: Some(2),
                 actual_row_count: None,
+                rewrite_method: intent_result.rewrite_method.as_ref().map(|m| m.to_string()),
+                rewritten_query: intent_result.rewritten_query.clone(),
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
@@ -682,9 +864,63 @@ async fn handle_fast_lane(
     .await
 }
 
+/// HTTP 400 response for `RewritingFailed` with hint based on failure kind.
+/// `hint_kind`: "unresolvable" | "timeout:<N>" where N is the configured timeout in seconds.
+fn rewriting_failed_400(hint_kind: &str) -> Response {
+    let (message, hint, doc_url) = if hint_kind.starts_with("timeout") {
+        // Do not include the configured timeout value in the response — operational
+        // parameters should not be visible to callers. Log it server-side instead.
+        let owned_hint =
+            "Increase ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS or check LLM endpoint connectivity."
+                .to_owned();
+        (
+            "Query rewriter timed out.".to_owned(),
+            owned_hint,
+            "https://github.com/dacarva/zemtik-core/blob/main/docs/CONFIGURATION.md#query-rewriting".to_owned(),
+        )
+    } else {
+        (
+            "Query rewriter could not resolve table and time range from conversation context.".to_owned(),
+            "Add aliases to schema_config.json matching how users phrase this query, or use system prompt injection (Workaround B).".to_owned(),
+            "https://github.com/dacarva/zemtik-core/blob/main/docs/SUPPORTED_QUERIES.md#conversation-patterns".to_owned(),
+        )
+    };
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "type": "zemtik_intent_error",
+                "code": ZemtikErrorCode::RewritingFailed,
+                "message": message,
+                "hint": hint,
+                "doc_url": doc_url,
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// HTTP 400 response when per-table `query_rewriting: false` blocks rewriting.
+fn rewriting_disabled_400() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "type": "zemtik_intent_error",
+                "code": ZemtikErrorCode::RewritingFailed,
+                "message": "Query rewriting is disabled for this table.",
+                "hint": "Remove query_rewriting: false from this table in schema_config.json to enable rewriting.",
+                "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/CONFIGURATION.md#query-rewriting",
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
 /// Adds `evidence_version: 2` to enable downstream parsers to distinguish v1 (row_count,
 /// single-proof) from v2 (actual_row_count, AVG dual-proof) response shapes.
+/// When intent was rewritten, injects `rewrite_method` field into the envelope.
 fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<Value, serde_json::Error> {
     let mut v = serde_json::to_value(ev)?;
     if let Some(obj) = v.as_object_mut() {
@@ -700,6 +936,9 @@ fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<
                 "confidence": intent.confidence,
             }),
         );
+        if let Some(ref method) = intent.rewrite_method {
+            obj.insert("rewrite_method".to_string(), serde_json::json!(method.to_string()));
+        }
     }
     Ok(v)
 }
@@ -881,6 +1120,8 @@ async fn handle_zk_slow_lane(
                 outgoing_prompt_hash: zk.outgoing_prompt_hash.clone(),
                 signing_version: None,
                 actual_row_count: Some(zk.actual_row_count),
+                rewrite_method: intent.rewrite_method.as_ref().map(|m| m.to_string()),
+                rewritten_query: intent.rewritten_query.clone(),
             },
         ) {
             Ok(()) => Some(br),
@@ -1614,7 +1855,7 @@ impl IntoResponse for ProxyError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
                         "error": {
-                            "message": format!("Zemtik ZK pipeline error: {}", e),
+                            "message": "Internal pipeline error — see server logs for details.",
                             "type": "zemtik_pipeline_error"
                         }
                     })),
