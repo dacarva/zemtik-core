@@ -434,7 +434,7 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     let direct_count = list.len() - det_count - llm_count;
     if det_count > 0 || llm_count > 0 {
         println!(
-            "Rewriting summary: {} direct | {} deterministic | {} llm (total: {} requests)",
+            "Rewriting summary: {} direct/other | {} deterministic | {} llm (total: {} requests)",
             direct_count, det_count, llm_count, list.len()
         );
     }

@@ -464,11 +464,16 @@ mod rewrite_query_tests {
         let msgs = messages(&[("user", "something")]);
 
         let result = rewrite_query(&msgs, "something", &schema, &config, &http).await;
-        // The error is returned as Err — caller must log it and return 400 without the message.
-        // We just verify it's an Err (not a panic or Unresolvable masking a real error).
-        // Note: reqwest may return Ok with a 500 response and fail on JSON parse.
-        // Either Err or Unresolvable is acceptable — the key invariant is no panic.
-        let _ = result; // no panic
+        // HTTP 500 from the LLM endpoint must surface as Err from rewrite_query.
+        // The proxy catches this Err and returns a 400 to the caller without exposing
+        // the underlying error message (prevents server internals from leaking).
+        // Note: reqwest may reject at the HTTP status layer (error_for_status) or at JSON
+        // parse — both are Err. Unresolvable is NOT acceptable here since that would
+        // silently mask a real transport/auth error.
+        assert!(
+            result.is_err(),
+            "HTTP 500 from LLM endpoint must surface as Err, not Ok(Unresolvable)"
+        );
     }
 }
 

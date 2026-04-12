@@ -645,6 +645,11 @@ pub fn load_from_sources(
     if let Some(v) = env.get("ZEMTIK_OPENAI_MODEL") {
         config.openai_model = v.trim().to_owned();
     }
+    // Rewriter model inherits the main model unless explicitly overridden.
+    // Applied after ZEMTIK_OPENAI_MODEL so the inheritance is resolved in one pass.
+    if env.get("ZEMTIK_QUERY_REWRITER_MODEL").is_none() {
+        config.query_rewriter_model = config.openai_model.clone();
+    }
     if let Some(v) = env.get("ZEMTIK_SKIP_CIRCUIT_VALIDATION") {
         let s = v.trim();
         config.skip_circuit_validation = match s {
@@ -741,20 +746,32 @@ pub fn load_from_sources(
         }
     }
     if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_TURNS") {
-        config.query_rewriter_context_turns =
-            v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_TURNS")?;
+        let n = v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_TURNS")?;
+        if n == 0 {
+            anyhow::bail!("ZEMTIK_QUERY_REWRITER_TURNS must be a positive integer (got 0)");
+        }
+        config.query_rewriter_context_turns = n;
     }
     if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES") {
-        config.query_rewriter_scan_messages =
-            v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES")?;
+        let n = v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES")?;
+        if n == 0 {
+            anyhow::bail!("ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES must be a positive integer (got 0)");
+        }
+        config.query_rewriter_scan_messages = n;
     }
     if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS") {
-        config.query_rewriter_timeout_secs =
-            v.trim().parse::<u64>().context("parse ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS")?;
+        let n = v.trim().parse::<u64>().context("parse ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS")?;
+        if n == 0 {
+            anyhow::bail!("ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS must be a positive integer (got 0)");
+        }
+        config.query_rewriter_timeout_secs = n;
     }
     if let Some(v) = env.get("ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS") {
-        config.query_rewriter_max_context_tokens =
-            v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS")?;
+        let n = v.trim().parse::<usize>().context("parse ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS")?;
+        if n == 0 {
+            anyhow::bail!("ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS must be a positive integer (got 0)");
+        }
+        config.query_rewriter_max_context_tokens = n;
     }
 
     // Layer 4: CLI flags

@@ -555,15 +555,9 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 ## Integration Validation deferred items — added from fix/integration-issues (2026-04-10)
 
-### PostgREST smoke-test at startup (P2, before standard-mode launch)
-- **What:** After DATABASE_URL column validation, also attempt a PostgREST aggregate query (using SUPABASE_URL + SUPABASE_SERVICE_KEY) against each configured table. Store the result in `SchemaValidationResult` alongside the Postgres validation.
-- **Why:** DATABASE_URL checks validate that the table exists in Postgres. It does NOT confirm that PostgREST can aggregate it (auth, RLS, column syntax differences). A table can pass startup validation and still fail every real FastLane request if PostgREST returns 401/403/400.
-- **Pros:** Complete startup validation for the Supabase FastLane path. DBA gets full signal before any query runs.
-- **Cons:** Additional startup round-trip. Requires SUPABASE_URL to be set (skipped when absent).
-- **Context:** Identified during eng review. For tunnel-mode-only pilots, this gap doesn't matter — tunnel mode doesn't run FastLane. For standard-mode launch, this is blocking. The INTEGRATION_CHECKLIST.md manual step covers this gap in the meantime.
-- **Effort:** S (human: ~2h / CC: ~20min)
-- **Priority:** P2 — required before standard-mode pilot launch
-- **Depends on:** fix/integration-issues startup validation merged, SUPABASE_URL configured
+### PostgREST smoke-test at startup
+
+See canonical entry below: [PostgREST smoke-test at startup (P2, v0.9.2)](#postgrest-smoke-test-at-startup-p2-v092). Duplicate removed.
 
 ### x-zemtik-warning response header (P3, v2)
 - **What:** When the proxy emits a startup warning (client_id=123, schema_validation warnings, ZK tools absent), include a `x-zemtik-warning: <code>` response header on subsequent chat completions responses. Clients can inspect this header programmatically during integration testing.
@@ -590,16 +584,16 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 ---
 
----
-
 ## PostgREST smoke-test at startup (P2, v0.9.2)
 
 - **What:** After Postgres column/row validation, if `DB_BACKEND=supabase`, fire a `GET {SUPABASE_URL}/rest/v1/{table}?select={value_column}&limit=1` against each table via PostgREST. Record result (200 vs 4xx/5xx) in startup event log and print to the formatted validation block.
 - **Why:** `startup.rs` validates the Postgres direct connection only. FastLane queries go through PostgREST (SUPABASE_URL). A table can pass startup validation and still fail every query at runtime if PostgREST has RLS, auth, or aggregate permission issues. This gap has caused silent failures in past sessions (prior learning: `startup-validation-postgrest-gap`).
 - **Pros:** Catches RLS/PostgREST auth misconfiguration before the demo starts. Pairs with `ZEMTIK_VALIDATE_ONLY=1` for pre-demo smoke-test.
 - **Cons:** Makes startup slower when Supabase is configured (~1 HTTP call per table). Add `ZEMTIK_SKIP_POSTGREST_VALIDATION` env var to suppress for offline environments.
-- **Context:** `startup.rs` already has the formatted validation block and event log. PostgREST check follows same pattern — call, record result, print summary line. Start in `validate_table()` in startup.rs.
+- **Context:** Start in `validate_table()` in `startup.rs` — that function already owns per-table validation and writes to the event log. PostgREST check follows the same pattern: call, record result, print summary line.
 - **Depends on / blocked by:** Requires `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` to be set. Skip gracefully if absent (sqlite path).
+- **Effort:** S (human: ~2h / CC: ~20min)
+- **Priority:** P2 — required before standard-mode pilot launch
 
 ---
 

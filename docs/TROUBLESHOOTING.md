@@ -13,8 +13,8 @@
 | Every query returns `$0.00` or `0` | Demo `client_id=123` with no matching rows in customer DB | Set `"skip_client_id_filter": true` in `schema_config.json` |
 | JS client hangs or HTTP 400 `StreamingNotSupported` | `stream: true` sent to standard proxy — not supported | Set `stream: false` in client config. Tunnel mode supports streaming. |
 | HTTP 400 `NoTableIdentified` | Prompt alias mismatch in `schema_config.json` | Add aliases matching how users phrase queries |
-| HTTP 400 `RewritingFailed` (hint: `unresolvable`) | Rewriter enabled but cannot determine table or time from conversation history | Add more context to prior messages, or use Workaround A/B/C in SUPPORTED_QUERIES.md |
-| HTTP 400 `RewritingFailed` (hint: `timeout`) | LLM rewriter call timed out | Increase `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default: 10) |
+| HTTP 400 `RewritingFailed` | Rewriter enabled but cannot determine table or time from conversation history | Add more context to prior messages, or use Workaround A/B/C in SUPPORTED_QUERIES.md |
+| HTTP 400 `RewritingFailed` (rewriter timed out) | LLM rewriter call timed out | Increase `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default: 10) |
 | HTTP 500 on critical-sensitivity tables | `nargo` or `bb` not on PATH | Set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` (FastLane-only) or `INSTALL_ZK_TOOLS=true` |
 | HTTP 500 `QueryFailed` | Wrong `physical_table`, `value_column`, or `timestamp_column` | Verify column names match actual DB schema |
 | DB connection refused at startup | Wrong `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, or `DATABASE_URL` | Check credentials and network reachability |
@@ -95,24 +95,33 @@ const result = await generateText({ model, stream: false });
 ### Symptom: HTTP 400 `RewritingFailed`
 
 **What you see:**
+
+The `hint` field contains a freeform human-readable message, not a fixed token. Two patterns:
+
 ```json
-{"error": {"type": "zemtik_intent_error", "code": "RewritingFailed", "hint": "unresolvable", "message": "..."}}
+{"error": {"type": "zemtik_intent_error", "code": "RewritingFailed",
+  "hint": "Add aliases to schema_config.json matching how users phrase this query, or use system prompt injection (Workaround B).",
+  "message": "Query rewriter could not resolve table and time range from conversation context."}}
 ```
-or
+or (when the LLM rewriter timed out):
 ```json
-{"error": {"type": "zemtik_intent_error", "code": "RewritingFailed", "hint": "timeout", "message": "..."}}
+{"error": {"type": "zemtik_intent_error", "code": "RewritingFailed",
+  "hint": "Increase ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS or check LLM endpoint connectivity.",
+  "message": "Query rewriter timed out."}}
 ```
 
-**Root cause (hint: `unresolvable`):** `ZEMTIK_QUERY_REWRITER=1` is set, but the rewriter could not determine the table or time range from the conversation history. The deterministic pass scanned the prior messages (up to `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES`, default 5) and found no usable table reference. The LLM fallback also failed to produce a resolvable query.
+Parse `error.code == "RewritingFailed"` for programmatic handling; use `error.message` to distinguish unresolvable vs. timeout cases. Do not match on `hint` exact strings — they may change between releases.
 
-**Fix (hint: `unresolvable`):**
+**Root cause (unresolvable):** `ZEMTIK_QUERY_REWRITER=1` is set, but the rewriter could not determine the table or time range from the conversation history. The deterministic pass scanned the prior messages (up to `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES`, default 5) and found no usable table reference. The LLM fallback also failed to produce a resolvable query.
+
+**Fix (unresolvable):**
 - Ensure at least one prior user message contains the table name, alias, or a phrase matching `example_prompts` in `schema_config.json`.
 - Increase `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES` to scan further back in long conversations.
 - If the conversation structure cannot be changed, use Workaround A, B, or C from [SUPPORTED_QUERIES.md](SUPPORTED_QUERIES.md) instead of relying on the rewriter.
 
-**Root cause (hint: `timeout`):** The LLM rewrite call did not complete within `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default: 10 seconds). The deterministic pass does not have a timeout — this error only occurs when the LLM fallback is reached.
+**Root cause (timeout):** The LLM rewrite call did not complete within `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default: 10 seconds). The deterministic pass does not have a timeout — this error only occurs when the LLM fallback is reached.
 
-**Fix (hint: `timeout`):**
+**Fix (timeout):**
 ```bash
 ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS=20 cargo run -- proxy
 ```

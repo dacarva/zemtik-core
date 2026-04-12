@@ -99,9 +99,9 @@ Use `"query_rewriting": false` on sensitive tables to prevent conversation histo
 
 #### Data residency
 
-When the LLM rewrite fallback runs, the conversation history (all messages in the request body, up to `ZEMTIK_QUERY_REWRITER_TURNS` turns) is sent to the OpenAI endpoint configured by `ZEMTIK_OPENAI_BASE_URL` using `OPENAI_API_KEY`. This is the same endpoint used for the main forwarded request. The rewritten query text is logged to `receipts.db` in the `rewritten_query` column.
+When the LLM rewrite fallback runs, a constructed context window is sent to the OpenAI endpoint configured by `ZEMTIK_OPENAI_BASE_URL` using `OPENAI_API_KEY`. The context is built by `build_context()` from at most `ZEMTIK_QUERY_REWRITER_TURNS` most recent user and assistant turns — not all messages in the request body — and is further truncated to fit within the token budget set by `ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS` (estimated as total chars / 4). Only this bounded, truncated message history and the failing query text are sent externally. The rewritten query text produced by the LLM is logged to `receipts.db` in the `rewritten_query` column; raw database rows are never forwarded.
 
-Zemtik never sends raw database rows during rewriting — only the message history that the client already provided.
+Zemtik never sends raw database rows during rewriting — only the bounded, truncated message history and the failing query text.
 
 #### Tunnel mode interaction
 

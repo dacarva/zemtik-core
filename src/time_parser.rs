@@ -97,8 +97,13 @@ static RE_BARE_YEAR: LazyLock<Regex> =
 
 /// Patterns that signal a time expression without being a supported format.
 /// When any of these match but no supported pattern did, we return TimeAmbiguousError.
+///
+/// Includes "same (quarter|period|month|week)" — these require carrying sub-year granularity
+/// from conversation context and must be routed to the LLM rewriter (not resolved by
+/// the deterministic parser). Checked before RE_LAST_YEAR so that compound phrases like
+/// "same quarter last year" are classified as Ambiguous rather than matching "last year".
 static RE_AMBIGUOUS_TIME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier)\b").unwrap()
+    Regex::new(r"(?i)\b(recently|soon|lately|recent|previously|next\s+(year|quarter|month)|previous\s+(year|quarter|month)|current\s+year|ago|earlier|same\s+(quarter|period|month|week))\b").unwrap()
 });
 
 // ---------------------------------------------------------------------------
@@ -189,6 +194,13 @@ fn parse_time_range_inner(prompt: &str, fiscal_offset_months: i64) -> TimeParseR
         return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
+    // Check for ambiguous time signals BEFORE relative-year patterns so that compound phrases
+    // like "same quarter last year" are classified Ambiguous rather than matching as "last year".
+    // RE_BARE_YEAR and other explicit matches still run afterward for non-ambiguous prompts.
+    if RE_AMBIGUOUS_TIME.is_match(prompt) {
+        return TimeParseResult::Ambiguous;
+    }
+
     // last year / prior year → full prior calendar year
     if RE_LAST_YEAR.is_match(prompt) {
         let (start, end) = year_to_unix(now.year() - 1, fiscal_offset_months);
@@ -209,7 +221,7 @@ fn parse_time_range_inner(prompt: &str, fiscal_offset_months: i64) -> TimeParseR
         return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
-    // Check for ambiguous time signals — only after all supported patterns fail
+    // Fallback ambiguous check — catches any remaining unrecognized time signals
     if RE_AMBIGUOUS_TIME.is_match(prompt) {
         return TimeParseResult::Ambiguous;
     }

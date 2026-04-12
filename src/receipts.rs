@@ -35,7 +35,9 @@ pub struct Receipt {
     /// How the query rewriter resolved this intent. "deterministic" | "llm" | None.
     /// None when no rewriting was performed. Added in v6.
     pub rewrite_method: Option<String>,
-    /// The original (pre-rewrite) query text. None when no rewriting was performed. Added in v6.
+    /// The effective query text after rewriting. For deterministic rewrites: the original failing
+    /// prompt (no text transformation applied). For LLM rewrites: the LLM-produced rewritten
+    /// query. None when no rewriting was performed. Added in v6.
     pub rewritten_query: Option<String>,
 }
 

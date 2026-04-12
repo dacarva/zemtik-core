@@ -465,16 +465,19 @@ async fn handle_chat_completions(
                         )
                     })
                     .await
-                    .unwrap_or_else(|e| {
-                        eprintln!("[REWRITER] deterministic_resolve spawn_blocking panicked: {}", e);
-                        None
-                    })
+                    .map_err(|e| {
+                        ProxyError::Internal(anyhow::anyhow!(
+                            "deterministic_resolve spawn_blocking panicked: {}", e
+                        ))
+                    })?
                 };
 
                 if let Some(mut resolved) = det_result {
                     // Per-table disable check (fail-secure override).
                     if let Some(tc) = schema.tables.get(&resolved.table) {
                         if tc.query_rewriting == Some(false) {
+                            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                            log_rejection(&db_guard, "rewriting disabled for table (query_rewriting: false)");
                             return Ok(rewriting_disabled_400());
                         }
                     }
@@ -517,6 +520,8 @@ async fn handle_chat_completions(
                                 // Per-table disable (LLM could have picked a locked table).
                                 if let Some(tc) = schema.tables.get(&r.table) {
                                     if tc.query_rewriting == Some(false) {
+                                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                                        log_rejection(&db_guard, "rewriting disabled for table (query_rewriting: false)");
                                         return Ok(rewriting_disabled_400());
                                     }
                                 }
