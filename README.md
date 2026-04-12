@@ -307,6 +307,8 @@ Zemtik intercepts the request, runs the full ZK pipeline against the transaction
 
 **Step 3 — UltraHonk proof generation.** Barretenberg generates a succinct proof over the circuit (728,283 gates). The proof reveals nothing about individual transaction amounts, timestamps, or client identifiers. The verifier learns only: "the holder of the signing key signed this dataset, and the AWS spend in Q1 was $2,805,600."
 
+See [docs/ZK_CIRCUITS.md](docs/ZK_CIRCUITS.md) for the full circuit reference: Poseidon Merkle tree structure, mini-circuit architecture (sum/count/lib), public input layout, bundle format, offline verification, and threat model.
+
 The payload sent to OpenAI contains exactly three data fields:
 
 ```json
@@ -503,6 +505,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide (Docker + build-from-source)
 - [Compliance Receipt](docs/COMPLIANCE_RECEIPT.md) — Evidence response fields: what each field means, how to verify
 - [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
+- [ZK Circuits](docs/ZK_CIRCUITS.md) — Circuit internals: Poseidon Merkle tree, mini-circuit architecture, public input layout, developer constraints (500-tx cap, sentinel padding, category hash rules), bundle format, offline verification, threat model
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
 
 ---
