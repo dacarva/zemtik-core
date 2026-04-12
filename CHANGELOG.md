@@ -14,8 +14,22 @@ All notable changes to this project will be documented in this file.
 - **Startup WARN**: `ZEMTIK_QUERY_REWRITER=1` with `ZEMTIK_MODE=tunnel` emits a warning — rewriter has no effect in tunnel mode.
 - **`zemtik list` rewriting summary**: footer line showing direct / deterministic / llm request counts when any rewritten requests are present.
 
+### Changed
+- **Documentation overhaul** — replaced all ASCII art diagrams (9 diagrams across 8 files) with GitHub-native Mermaid diagrams. Added 7 new diagrams covering startup validation, CI/CD pipeline, config resolution, and verification flow.
+- **`docs/ARCHITECTURE.md`** — updated scope note to v0.9.1; added `startup.rs` and `tunnel.rs` to source module map; new sections: Startup Validation, Structured Error Codes, Security Hardening (S1/S2/S3), CI/CD Pipeline, Health Endpoint.
+- **`README.md`** — replaced 38-line ASCII "How It Works" and tunnel mode diagrams with Mermaid flowcharts; updated project file tree to include `startup.rs`.
+- **`docs/TUNNEL_MODE.md`** — replaced ASCII data flow with `sequenceDiagram`; fixed audit record `id` type (UUID string, not integer); fixed dead link (`debug/MANUAL_TUNNEL_QA.md` → `INTEGRATION_CHECKLIST.md`).
+- **`docs/INTENT_ENGINE.md`** — added full intent extraction flowchart; fixed `TimeRangeAmbiguous` routing (routes to HTTP 400, not ZK SlowLane — 5 locations corrected).
+- **`docs/CONFIGURATION.md`** — added config resolution flowchart; added v0.9.1 env vars (`ZEMTIK_SKIP_DB_VALIDATION`, `ZEMTIK_VALIDATE_ONLY`); updated routing rules table with rewriter entries.
+- **`docs/SUPPORTED_QUERIES.md`** — fixed `TimeRangeAmbiguous` error description (was incorrectly documented as routing to ZK SlowLane).
+- **`docs/SCALING.md`** — replaced 3 ASCII recursive proof/aggregation/batch diagrams with Mermaid.
+- **`docs/GETTING_STARTED.md`** — added orientation flowchart.
+- **`docs/INTEGRATION_CHECKLIST.md`** — added verification flow diagram.
+- **`docs/TROUBLESHOOTING.md`** — updated quick table with `StreamingNotSupported` error code.
+
 ### Fixed
 - **SEC-3**: internal ZK pipeline error messages are no longer leaked in HTTP response bodies. Replaced with `"Internal pipeline error — see server logs for details."`.
+- **ISSUE-001**: `deterministic_resolve` now returns `None` for context-dependent time phrases (`same period`, `same quarter`, `same month`, `last year`) instead of applying a year-level time pivot. These phrases trigger LLM rewriter fallback (or HTTP 400 if rewriter disabled).
 
 ### Upgrading to v0.10.0
 

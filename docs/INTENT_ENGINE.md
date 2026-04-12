@@ -21,6 +21,51 @@ If either extraction fails or is ambiguous, the engine routes conservatively to 
 
 ## Two backends
 
+```mermaid
+flowchart TD
+    Prompt["Incoming prompt\n(truncated to 2000 chars)"]
+    Prompt --> ExactMatch
+
+    ExactMatch{{"Exact table key/alias\nsubstring match?"}}
+    ExactMatch -->|yes, confidence=1.0| TimeParser
+    ExactMatch -->|no| Backend
+
+    Backend{{"ZEMTIK_INTENT_BACKEND?"}}
+    Backend -->|embed| Embed
+    Backend -->|regex or fallback| Regex
+
+    subgraph EmbedPath["EmbeddingBackend  (src/intent_embed.rs)"]
+        Embed["Embed prompt\nBGE-small-en ONNX"]
+        Cosine["Cosine similarity\nagainst schema index\n(top-3 results)"]
+        Threshold{{"confidence ≥\nZEMTIK_INTENT_THRESHOLD\n(default 0.65)?"}}
+        Margin{{"top-1 vs top-2\nmargin ≥ 0.10?"}}
+        Embed --> Cosine --> Threshold
+        Threshold -->|yes| Margin
+    end
+
+    subgraph RegexPath["RegexBackend  (src/intent.rs)"]
+        Regex["Case-insensitive\nsubstring match\nagainst keys + aliases"]
+        RegexMatch{{"Match\nfound?"}}
+        Regex --> RegexMatch
+    end
+
+    Margin -->|yes| TimeParser
+    Margin -->|no| ErrNoTable["Err(NoTableIdentified)\n→ HTTP 400"]
+    Threshold -->|no| ErrNoTable
+    RegexMatch -->|yes, confidence=1.0| TimeParser
+    RegexMatch -->|no| ErrNoTable
+
+    subgraph timeParsing["DeterministicTimeParser  (src/time_parser.rs)"]
+        TimeParser["Extract time range\nfrom prompt"]
+        Ambiguous{{"Time expression\nambiguous?"}}
+        TimeParser --> Ambiguous
+    end
+
+    Ambiguous -->|yes| ErrAmbiguous["Err(TimeRangeAmbiguous)\n→ HTTP 400 NoTableIdentified"]
+    Ambiguous -->|no| IntentResult["IntentResult\n{ table, time_range, confidence }"]
+    IntentResult --> Routing["Router\n(src/router.rs)"]
+```
+
 The intent engine is a Rust trait (`IntentBackend`) with two implementations. Both return an `IntentResult`:
 
 ```rust
@@ -90,11 +135,11 @@ Both backends use the same deterministic time parser. It extracts a `(start_unix
 
 ### Unrecognized time expressions
 
-If the prompt contains a time-like word that does not match any pattern, the parser returns `TimeRangeAmbiguous`. This routes the request to ZK SlowLane, not HTTP 400.
+If the prompt contains a time-like word that does not match any pattern, the parser returns `TimeRangeAmbiguous`.
 
 Expressions that trigger `TimeRangeAmbiguous` include: `recently`, `previously`, `next year`, `current year`, `earlier`, `ago`, `before the acquisition`, `in the old fiscal year`. Relative expressions with clear semantics — `last year`, `prior year`, `last quarter`, `prior quarter`, `last month`, `prior month` — are **recognized** patterns and do not trigger `TimeRangeAmbiguous`.
 
-A `TimeRangeAmbiguous` result causes conservative routing to the ZK SlowLane regardless of the confidence score or table sensitivity. This is intentional: an ambiguous time range might query data outside the intended window, and the ZK proof circuit needs precise bounds.
+A `TimeRangeAmbiguous` result causes the proxy to return **HTTP 400** with `code: NoTableIdentified`. The ZK SlowLane is not invoked — the proxy requires a precise time range before it can construct a valid ZK witness, so ambiguous time expressions are rejected rather than routed conservatively.
 
 If no time expression is found at all, `time_range` is `None` and the table-level sensitivity determines routing.
 
@@ -109,17 +154,17 @@ EmbeddingBackend
   ├── confidence ≥ threshold + unambiguous time  →  route by table sensitivity
   ├── confidence < threshold                     →  Err(NoTableIdentified) → HTTP 400
   ├── low margin (top-2 scores within 0.10)      →  Err(NoTableIdentified) → HTTP 400
-  ├── TimeRangeAmbiguous                         →  ZK SlowLane
+  ├── TimeRangeAmbiguous                         →  HTTP 400 (NoTableIdentified)
   ├── NoTableIdentified                          →  HTTP 400
   └── init failure                               →  fall back to RegexBackend
 
 RegexBackend
   ├── table matched + unambiguous time           →  route by table sensitivity
-  ├── TimeRangeAmbiguous                         →  ZK SlowLane
+  ├── TimeRangeAmbiguous                         →  HTTP 400 (NoTableIdentified)
   └── NoTableIdentified                          →  HTTP 400
 ```
 
-> **Note:** Low confidence does **not** route to ZK SlowLane. It produces `NoTableIdentified` and the proxy returns HTTP 400. ZK SlowLane is only invoked when a table is identified but the time expression is ambiguous, or when the table is identified but has `critical` sensitivity (or is unknown).
+> **Note:** Low confidence does **not** route to `ZK SlowLane`. It produces `NoTableIdentified` and the proxy returns HTTP 400. `TimeRangeAmbiguous` also produces HTTP 400, regardless of whether a table was identified during the process — the proxy requires a precise time bound to construct a valid ZK witness. `ZK SlowLane` is only invoked when intent extraction succeeds completely (table identified via `EmbeddingBackend` or `RegexBackend` + time range unambiguous or absent), and the table has `critical` sensitivity or is unknown to `schema_config.json`.
 
 
 ---

@@ -11,7 +11,7 @@
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Every query returns `$0.00` or `0` | Demo `client_id=123` with no matching rows in customer DB | Set `"skip_client_id_filter": true` in `schema_config.json` |
-| JS client hangs indefinitely | `stream: true` sent to standard proxy — not supported | Set `stream: false` in client config |
+| JS client hangs or HTTP 400 `StreamingNotSupported` | `stream: true` sent to standard proxy — not supported | Set `stream: false` in client config. Tunnel mode supports streaming. |
 | HTTP 400 `NoTableIdentified` | Prompt alias mismatch in `schema_config.json` | Add aliases matching how users phrase queries |
 | HTTP 400 `RewritingFailed` (hint: `unresolvable`) | Rewriter enabled but cannot determine table or time from conversation history | Add more context to prior messages, or use Workaround A/B/C in SUPPORTED_QUERIES.md |
 | HTTP 400 `RewritingFailed` (hint: `timeout`) | LLM rewriter call timed out | Increase `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default: 10) |

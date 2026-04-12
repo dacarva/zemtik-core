@@ -16,38 +16,33 @@ The goal is frictionless evaluation: the customer sees zero latency penalty and 
 
 ## Data flow
 
-```
-Client
-  │
-  │  POST /v1/chat/completions
-  │  (any request — unmodified)
-  ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                       Zemtik Proxy (tunnel mode)                         │
-│                                                                          │
-│  ┌─ FORK 1 (foreground) ─────────────────────────────────────────────┐  │
-│  │  Forward original request bytes → OpenAI                           │  │
-│  │  Capture: status_code, response_body, SHA-256 hash, latency_ms     │  │
-│  │  Inject headers: x-zemtik-mode, x-zemtik-verified, x-zemtik-      │  │
-│  │                  receipt-id                                         │  │
-│  │  Return response to client immediately ◄──────────── CLIENT SEES   │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-│                                                                          │
-│  ┌─ FORK 2 (background) ─────────────────────────────────────────────┐  │
-│  │  [semaphore permits=50; non-blocking try_acquire]                  │  │
-│  │  Intent extraction (regex or embedding backend)                    │  │
-│  │  Route: FastLane (low sensitivity) or ZK SlowLane (critical)       │  │
-│  │  Compute Zemtik aggregate                                          │  │
-│  │  Receive FORK 1 response via oneshot channel                       │  │
-│  │  Diff computation (numerical comparison with tolerance)            │  │
-│  │  Write TunnelAuditRecord → tunnel_audit.db                         │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-│                                                                          │
-│  Dashboard: GET /tunnel/audit  /tunnel/audit/csv  /tunnel/summary        │
-└──────────────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-           OpenAI API
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy as Zemtik Proxy<br/>(tunnel mode)
+    participant OpenAI as OpenAI API
+    participant AuditDB as tunnel_audit.db
+
+    Client->>Proxy: POST /v1/chat/completions<br/>(any request — unmodified)
+
+    activate Proxy
+
+    note over Proxy: FORK 1 (foreground — customer-facing)
+    Proxy->>OpenAI: Forward original request bytes<br/>(customer API key)
+    OpenAI-->>Proxy: Response (status, body, latency_ms)
+    Proxy-->>Client: Return response immediately<br/>+ x-zemtik-mode: tunnel<br/>+ x-zemtik-verified: true/false<br/>+ x-zemtik-receipt-id: UUID
+
+    deactivate Proxy
+
+    note over Proxy: FORK 2 (background — semaphore-gated, max 50 concurrent)
+    activate Proxy
+    Proxy->>Proxy: Intent extraction<br/>(regex or embedding backend)
+    Proxy->>Proxy: Route: FastLane (low)<br/>or ZK SlowLane (critical)
+    Proxy->>Proxy: Compute Zemtik aggregate<br/>(zemtik API key)
+    Proxy->>Proxy: Receive FORK 1 data<br/>(via oneshot channel)
+    Proxy->>Proxy: Diff computation<br/>(numerical comparison + tolerance)
+    Proxy->>AuditDB: Write TunnelAuditRecord<br/>{match_status, diff_detected, ...}
+    deactivate Proxy
 ```
 
 **Key invariant:** FORK 1 always returns first. The client never waits for FORK 2.
@@ -162,8 +157,8 @@ Default tolerance when not set: `0.01` (1%).
 
 ```json
 {
-  "id": 1,
-  "receipt_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "receipt_id": null,
   "created_at": "2026-04-08T15:01:23Z",
   "match_status": "matched",
   "matched_table": "aws_spend",
@@ -262,4 +257,4 @@ Every `POST /v1/chat/completions` response in tunnel mode includes:
 4. `schema_config.json` — must contain the tables your customers query.
 5. Health check: `curl http://localhost:4000/health` — verify `tunnel_semaphore_available` is present.
 
-See [debug/MANUAL_TUNNEL_QA.md](../debug/MANUAL_TUNNEL_QA.md) for a step-by-step manual verification script.
+See [docs/INTEGRATION_CHECKLIST.md](INTEGRATION_CHECKLIST.md) for the step-by-step pre-demo validation script.
