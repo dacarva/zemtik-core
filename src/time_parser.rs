@@ -221,11 +221,6 @@ fn parse_time_range_inner(prompt: &str, fiscal_offset_months: i64) -> TimeParseR
         return TimeParseResult::Matched(TimeRange { start_unix_secs: start, end_unix_secs: end });
     }
 
-    // Fallback ambiguous check — catches any remaining unrecognized time signals
-    if RE_AMBIGUOUS_TIME.is_match(prompt) {
-        return TimeParseResult::Ambiguous;
-    }
-
     TimeParseResult::NotFound
 }
 

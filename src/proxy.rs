@@ -181,8 +181,12 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         crate::startup::run_startup_validation(&config, &schema).await
     );
 
-    // Build rewriter config if enabled.
-    let rewriter_config: Option<Arc<RewriterConfig>> = if config.query_rewriter_enabled {
+    // Build rewriter config if enabled — skip entirely in tunnel mode (no-op there).
+    // Avoids startup failure when ZEMTIK_QUERY_REWRITER=1 is set alongside
+    // ZEMTIK_MODE=tunnel without a corresponding OPENAI_API_KEY.
+    let rewriter_config: Option<Arc<RewriterConfig>> = if config.query_rewriter_enabled
+        && config.mode != ZemtikMode::Tunnel
+    {
         let api_key = config.openai_api_key.clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
@@ -508,12 +512,20 @@ async fn handle_chat_completions(
                         let q_clone = q.clone();
                         let schema_clone = schema.clone();
                         let threshold = state.config.intent_confidence_threshold;
-                        let re_intent = tokio::task::spawn_blocking(move || {
+                        let re_intent_join = tokio::task::spawn_blocking(move || {
                             intent::extract_intent_with_backend(&q_clone, &schema_clone, backend.as_ref(), threshold)
                         })
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
+                        .await;
+
+                        // Distinguish panic (JoinError → 500) from intent failure (→ unresolvable 400).
+                        let re_intent: Option<_> = match re_intent_join {
+                            Err(join_err) => {
+                                return Err(ProxyError::Internal(anyhow::anyhow!(
+                                    "re-intent spawn_blocking panicked after LLM rewrite: {}", join_err
+                                )));
+                            }
+                            Ok(intent_result) => intent_result.ok(),
+                        };
 
                         match re_intent {
                             Some(mut r) => {
