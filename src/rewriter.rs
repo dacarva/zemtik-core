@@ -87,23 +87,39 @@ pub fn deterministic_resolve(
         .unwrap_or_default();
 
     // Check whether the current message itself contains an explicit time.
-    // If the current message contains context-dependent phrases like "same period/quarter/month",
-    // the time expression cannot be resolved without knowing the prior granularity (e.g. Q1).
-    // In that case, suppress the time-pivot and fall through to the LLM rewriter.
-    let has_context_dependent_time = {
+    // Two classes of phrases require LLM resolution rather than deterministic pivot:
+    //
+    // 1. "same period/quarter/month/week" — the sub-year granularity must be carried from
+    //    the prior turn (e.g. Q1 2024 → Q1 2025 for "same quarter last year").
+    // 2. Relative year shifts ("last year", "next year", "previous year", "year before") —
+    //    these produce a year-level time range that discards the sub-year granularity from
+    //    context, so the combined intent ("same quarter last year") needs LLM resolution.
+    //
+    // When either class is detected, return `None` from `deterministic_resolve` so the
+    // caller falls through to the LLM rewriter.
+    let needs_llm_resolution = {
         let lower = current_text.to_lowercase();
         lower.contains("same period")
             || lower.contains("same quarter")
             || lower.contains("same month")
             || lower.contains("same week")
+            || lower.contains("last year")
+            || lower.contains("next year")
+            || lower.contains("previous year")
+            || lower.contains("year before")
+            || lower.contains("prior year")
     };
-    let current_time_opt: Option<TimeRange> = if has_context_dependent_time {
-        None
-    } else {
+    if needs_llm_resolution {
+        eprintln!(
+            "[REWRITER] deterministic_resolve: {}ms, 0 messages scanned, result: None (needs_llm_resolution)",
+            start.elapsed().as_millis()
+        );
+        return None;
+    }
+    let current_time_opt: Option<TimeRange> =
         parse_time_range_explicit(&current_text, schema.fiscal_year_offset_months)
             .ok()
-            .flatten()
-    };
+            .flatten();
 
     // Scan prior user messages, newest-first, skipping the current (last).
     let prior_messages: Vec<&Value> = user_messages
