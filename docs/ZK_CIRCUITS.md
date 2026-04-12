@@ -119,16 +119,66 @@ UltraHonk is the proving backend that Barretenberg (`bb`) implements. It produce
 
 ### Mini-circuit split
 
-Zemtik uses two small circuits rather than one large one:
+Zemtik uses three Noir packages rather than one monolithic circuit:
 
-```
-circuit/
-  lib/    — shared types, Poseidon tree, EdDSA verification
-  sum/    — SUM fold (calls lib)
-  count/  — COUNT fold (calls lib)
+```mermaid
+flowchart TD
+    subgraph Rust["Rust layer (src/prover.rs)"]
+        DISP["circuit_dir_for(agg_fn)\nprover.rs:22-31"]
+    end
+
+    subgraph Circuits["circuit/ (Noir packages)"]
+        direction TB
+
+        subgraph SUM["circuit/sum/  (type=bin)"]
+            SMAIN["main.nr\nfn main(...) -> pub Field\n— SUM fold"]
+        end
+
+        subgraph COUNT["circuit/count/  (type=bin)"]
+            CMAIN["main.nr\nfn main(...) -> pub Field\n— COUNT fold"]
+        end
+
+        subgraph LIB["circuit/lib/  (type=lib)  zemtik_lib"]
+            TYPES["Transaction, BatchInput\nTX_COUNT=50, BATCH_COUNT=10"]
+            COMMIT["verify_batch_commitment()\nPoseidon tree + EdDSA assert"]
+            PRED["compute_predicate()\ncategory == hash AND start ≤ ts ≤ end"]
+        end
+
+        subgraph EDDSA["vendor/eddsa/  (type=lib)  eddsa"]
+            NE["noir_edwards v0.2.5\nBabyJubJub EdDSA"]
+        end
+
+        subgraph POSEIDON["noir-lang/poseidon v0.2.6  (type=lib)"]
+            POS["bn254::hash_2/3/5"]
+        end
+    end
+
+    subgraph AVG["AVG query (Rust orchestration)"]
+        direction LR
+        RS["Run SUM circuit\n→ sum_result"]
+        RC["Run COUNT circuit\n→ count_result"]
+        DIV["sum_result / count_result\n+ BabyJubJub attestation"]
+        RS --> DIV
+        RC --> DIV
+    end
+
+    DISP -->|"AggFn::Sum → circuit/sum"| SUM
+    DISP -->|"AggFn::Count → circuit/count"| COUNT
+    DISP -->|"AggFn::Avg → panic!\n(caller decomposes first)"| AVG
+
+    SUM --> LIB
+    COUNT --> LIB
+    LIB --> EDDSA
+    LIB --> POSEIDON
+    SUM --> POSEIDON
 ```
 
-A single monolithic circuit covering all aggregation functions would increase gate count and compile time proportionally. SUM and COUNT share identical structure — they differ in exactly one line of the fold body. AVG is composite: Zemtik runs the SUM circuit and the COUNT circuit sequentially, then computes `sum / count` in Rust with a BabyJubJub attestation over the result.
+**Why three packages instead of one:**
+
+- A monolithic circuit with all aggregation logic would increase gate count proportionally even for queries that only need SUM. Each mini-circuit compiles to its own ACIR binary with exactly the gates it needs.
+- `lib` is a Noir `type = "lib"` package — it never compiles to a standalone proof. It is a shared dependency linked into `sum` and `count` at compile time.
+- Both `sum` and `count` have `package.name = "zemtik_circuit"` in their `Nargo.toml`. The Rust prover selects which subdirectory to `nargo compile` based on `circuit_dir_for(agg_fn, base)`.
+- AVG has no circuit of its own. `circuit_dir_for` panics if called with `AggFn::Avg`. The caller (`src/proxy.rs`) decomposes AVG into two sequential proofs (SUM then COUNT) before invoking the prover.
 
 ### Shared types (`circuit/lib/src/lib.nr`)
 
