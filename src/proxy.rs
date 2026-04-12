@@ -186,6 +186,12 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         let api_key = config.openai_api_key.clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
+        if api_key.is_empty() {
+            anyhow::bail!(
+                "ZEMTIK_QUERY_REWRITER=1 requires OPENAI_API_KEY to be set. \
+                 The LLM rewrite fallback cannot authenticate without it."
+            );
+        }
         Some(Arc::new(RewriterConfig {
             base_url: config.openai_base_url.clone(),
             model: config.query_rewriter_model.clone(),
@@ -429,19 +435,19 @@ async fn handle_chat_completions(
     let intent_result = match intent_result_raw {
         Ok(r) => r,
         Err(intent_err) => {
-            // Log rejection synchronously — std::sync::Mutex must not be held across .await
-            {
-                let db_guard = state.receipts_db
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Err(db_err) = receipts::insert_intent_rejection(&db_guard, &prompt, &intent_err.to_string()) {
-                    eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
-                }
-            }
             println!("[ROUTE] Intent rejection: {}", intent_err);
 
+            // Helper: log rejection to receipts DB synchronously.
+            // Called only on final failure paths so that a successful rewrite does not
+            // produce a phantom rejection record alongside the success receipt.
+            let log_rejection = |db: &std::sync::MutexGuard<rusqlite::Connection>, msg: &str| {
+                if let Err(db_err) = receipts::insert_intent_rejection(db, &prompt, msg) {
+                    eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
+                }
+            };
+
             // Hybrid query rewriter — only fires when ZEMTIK_QUERY_REWRITER=1.
-            if let Some(rw_config) = state.rewriter_config.clone() {
+            if let Some(rw_config) = state.rewriter_config.as_ref().map(Arc::clone) {
                 // ── STEP 1: deterministic_resolve ────────────────────────────────
                 let det_result = {
                     let backend = Arc::clone(&state.intent_backend);
@@ -459,8 +465,10 @@ async fn handle_chat_completions(
                         )
                     })
                     .await
-                    .ok()
-                    .flatten()
+                    .unwrap_or_else(|e| {
+                        eprintln!("[REWRITER] deterministic_resolve spawn_blocking panicked: {}", e);
+                        None
+                    })
                 };
 
                 if let Some(mut resolved) = det_result {
@@ -470,7 +478,9 @@ async fn handle_chat_completions(
                             return Ok(rewriting_disabled_400());
                         }
                     }
-                    resolved.rewritten_query = Some(format!("{} {}", resolved.table, prompt));
+                    // Record the original failing prompt (what the user actually said).
+                    // The resolved table+time are stored in the IntentResult fields themselves.
+                    resolved.rewritten_query = Some(prompt.clone());
                     resolved.rewrite_method = Some(RewriteMethod::Deterministic);
                     println!("[REWRITER] Deterministic: '{}' → table='{}' [{}-{}]",
                         prompt, resolved.table, resolved.start_unix_secs, resolved.end_unix_secs);
@@ -518,17 +528,23 @@ async fn handle_chat_completions(
                                     .get(&r.table)
                                     .and_then(|tc| tc.client_id)
                                     .unwrap_or(state.config.client_id);
+                                // Rewrite succeeded — do NOT log intent_rejection.
                                 return match route {
                                     Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
                                     Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
                                 };
                             }
                             None => {
+                                // LLM rewrote but re-intent failed — final failure, log rejection.
+                                let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                                log_rejection(&db_guard, &intent_err.to_string());
                                 return Ok(rewriting_failed_400("unresolvable"));
                             }
                         }
                     }
                     Ok(rewriter::RewriteResult::Unresolvable) => {
+                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                        log_rejection(&db_guard, &intent_err.to_string());
                         return Ok(rewriting_failed_400("unresolvable"));
                     }
                     Err(e) => {
@@ -546,12 +562,18 @@ async fn handle_chat_completions(
                         } else {
                             "unresolvable".to_owned()
                         };
+                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                        log_rejection(&db_guard, &intent_err.to_string());
                         return Ok(rewriting_failed_400(&hint_kind));
                     }
                 }
             }
 
-            // Rewriter disabled — return the original 400.
+            // Rewriter disabled — log rejection and return the original 400.
+            {
+                let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                log_rejection(&db_guard, &intent_err.to_string());
+            }
             return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -829,10 +851,11 @@ async fn handle_fast_lane(
 /// `hint_kind`: "unresolvable" | "timeout:<N>" where N is the configured timeout in seconds.
 fn rewriting_failed_400(hint_kind: &str) -> Response {
     let (message, hint, doc_url) = if hint_kind.starts_with("timeout") {
-        let secs = hint_kind.strip_prefix("timeout:").unwrap_or("?");
-        let owned_hint = format!(
-            "Increase ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS (current: {secs}s) or check LLM endpoint connectivity."
-        );
+        // Do not include the configured timeout value in the response — operational
+        // parameters should not be visible to callers. Log it server-side instead.
+        let owned_hint =
+            "Increase ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS or check LLM endpoint connectivity."
+                .to_owned();
         (
             "Query rewriter timed out.".to_owned(),
             owned_hint,
