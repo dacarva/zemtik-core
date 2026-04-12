@@ -87,10 +87,23 @@ pub fn deterministic_resolve(
         .unwrap_or_default();
 
     // Check whether the current message itself contains an explicit time.
-    let current_time_opt: Option<TimeRange> =
+    // If the current message contains context-dependent phrases like "same period/quarter/month",
+    // the time expression cannot be resolved without knowing the prior granularity (e.g. Q1).
+    // In that case, suppress the time-pivot and fall through to the LLM rewriter.
+    let has_context_dependent_time = {
+        let lower = current_text.to_lowercase();
+        lower.contains("same period")
+            || lower.contains("same quarter")
+            || lower.contains("same month")
+            || lower.contains("same week")
+    };
+    let current_time_opt: Option<TimeRange> = if has_context_dependent_time {
+        None
+    } else {
         parse_time_range_explicit(&current_text, schema.fiscal_year_offset_months)
             .ok()
-            .flatten();
+            .flatten()
+    };
 
     // Scan prior user messages, newest-first, skipping the current (last).
     let prior_messages: Vec<&Value> = user_messages
