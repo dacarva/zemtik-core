@@ -1053,6 +1053,8 @@ async fn handle_general_lane(
     use std::time::Duration;
     use axum::http::HeaderName;
 
+    let receipt_id = Uuid::new_v4().to_string();
+
     // ── Rate limit check ────────────────────────────────────────────────────
     if let Some(ref limiter) = state.general_rate_limiter {
         let mut window = limiter.lock().unwrap_or_else(|e| e.into_inner());
@@ -1060,19 +1062,63 @@ async fn handle_general_lane(
         let cutoff = now - Duration::from_secs(60);
         window.retain(|&t| t > cutoff);
         if window.len() as u32 >= state.general_max_rpm {
-            return Ok((
+            // Compute Retry-After: seconds until the oldest window entry expires.
+            let retry_after = window
+                .front()
+                .map(|oldest| {
+                    let elapsed = now.duration_since(*oldest);
+                    if elapsed < Duration::from_secs(60) {
+                        (Duration::from_secs(60) - elapsed).as_secs() + 1
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(60);
+
+            // Write a receipt so rate-limited requests appear in audit trail
+            // and general_queries_today counts them.
+            let now_str = Utc::now().to_rfc3339();
+            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = receipts::insert_receipt(&db_guard, &receipts::Receipt {
+                id: receipt_id.clone(),
+                bundle_path: String::new(),
+                proof_status: receipts::PROOF_STATUS_GENERAL_LANE_RATE_LIMITED.to_owned(),
+                circuit_hash: String::new(),
+                bb_version: String::new(),
+                prompt_hash: prompt_hash.clone(),
+                request_hash: prompt_hash.clone(),
+                created_at: now_str,
+                engine_used: "general_lane".to_owned(),
+                proof_hash: None,
+                data_exfiltrated: 0,
+                intent_confidence: None,
+                outgoing_prompt_hash: None,
+                signing_version: None,
+                actual_row_count: None,
+                rewrite_method: None,
+                rewritten_query: None,
+            }) {
+                eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
+            }
+            drop(db_guard);
+
+            let mut resp = (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({
                     "code": "GeneralLaneBudgetExceeded",
                     "message": "General lane rate limit exceeded. Increase ZEMTIK_GENERAL_MAX_RPM or set to 0 for unlimited.",
                     "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/CONFIGURATION.md#general-passthrough-v0110"
                 })),
-            ).into_response());
+            ).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after.to_string())
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("60")),
+            );
+            return Ok(resp);
         }
         window.push_back(now);
     }
-
-    let receipt_id = Uuid::new_v4().to_string();
 
     // ── reason string from intent error ────────────────────────────────────
     let reason = match &intent_err {
@@ -1185,9 +1231,14 @@ async fn handle_general_lane(
     };
 
     let http_status = StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK);
+    let effective_content_type = if content_type.is_empty() {
+        "application/json"
+    } else {
+        &content_type
+    };
     let mut response = Response::builder()
         .status(http_status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::CONTENT_TYPE, effective_content_type)
         .header(HeaderName::from_static("x-zemtik-engine"), "general_lane")
         .body(axum::body::Body::from(final_body))
         .unwrap_or_else(|_| Response::new(axum::body::Body::empty()));
@@ -2126,13 +2177,28 @@ pub(crate) async fn stream_openai_passthrough(upstream: reqwest::Response) -> Re
 
     tokio::spawn(async move {
         let mut byte_stream = upstream.bytes_stream();
-        while let Some(chunk_result) = byte_stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
+        // Per-chunk timeout: if no data arrives within 60s, treat as a stalled
+        // connection and terminate the stream to free the connection pool entry.
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                byte_stream.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(chunk))) => {
                     let _ = chunk_tx.send(Ok(chunk)).await;
                 }
-                Err(e) => {
+                Ok(Some(Err(e))) => {
                     let _ = chunk_tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
+                Ok(None) => break, // stream complete
+                Err(_timeout) => {
+                    eprintln!("[STREAM] Upstream stream stalled for >60s — terminating");
+                    let _ = chunk_tx
+                        .send(Err(std::io::Error::other("upstream stream timed out after 60s")))
+                        .await;
                     break;
                 }
             }

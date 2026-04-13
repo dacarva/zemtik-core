@@ -14,6 +14,8 @@ use crate::types::TunnelAuditRecord;
 pub const PROOF_STATUS_GENERAL_LANE: &str = "general_lane";
 /// NoTableIdentified: intent extraction failed with no matching table (400 path).
 pub const PROOF_STATUS_NO_TABLE: &str = "no_table_identified";
+/// GeneralLane rate-limited: request was not forwarded (sliding-window budget exceeded).
+pub const PROOF_STATUS_GENERAL_LANE_RATE_LIMITED: &str = "general_lane_rate_limited";
 
 /// A row in the receipts table — one per successfully generated proof bundle.
 pub struct Receipt {
