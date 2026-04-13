@@ -476,3 +476,57 @@ fn test_validate_rejects_reserved_dummy_key() {
         err
     );
 }
+
+// --- GeneralLane config tests ---
+
+#[test]
+fn general_passthrough_enabled_by_env() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_GENERAL_PASSTHROUGH", "1")]), &default_cli()).unwrap();
+    assert!(config.general_passthrough_enabled);
+}
+
+#[test]
+fn general_passthrough_enabled_by_true() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_GENERAL_PASSTHROUGH", "true")]), &default_cli()).unwrap();
+    assert!(config.general_passthrough_enabled);
+}
+
+#[test]
+fn general_passthrough_disabled_by_default() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert!(!config.general_passthrough_enabled);
+}
+
+#[test]
+fn general_passthrough_invalid_value_returns_error() {
+    let result = load_from_sources(None, &env(&[("ZEMTIK_GENERAL_PASSTHROUGH", "maybe")]), &default_cli());
+    assert!(result.is_err(), "invalid value should return Err");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("ZEMTIK_GENERAL_PASSTHROUGH"), "error should mention the env var");
+}
+
+#[test]
+fn general_max_rpm_set_by_env() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_GENERAL_MAX_RPM", "60")]), &default_cli()).unwrap();
+    assert_eq!(config.general_max_rpm, 60);
+}
+
+#[test]
+fn general_max_rpm_default_is_zero() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert_eq!(config.general_max_rpm, 0, "default should be 0 (unlimited)");
+}
+
+#[test]
+fn general_max_rpm_over_limit_returns_error() {
+    let result = load_from_sources(None, &env(&[("ZEMTIK_GENERAL_MAX_RPM", "1000001")]), &default_cli());
+    assert!(result.is_err(), "value over 1,000,000 should return Err");
+}
+
+#[test]
+fn general_max_rpm_non_numeric_returns_error() {
+    let result = load_from_sources(None, &env(&[("ZEMTIK_GENERAL_MAX_RPM", "fast")]), &default_cli());
+    assert!(result.is_err(), "non-numeric value should return Err");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("ZEMTIK_GENERAL_MAX_RPM"), "error should mention the env var");
+}

@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 use zemtik::receipts::{
-    get_receipt, insert_intent_rejection, insert_receipt, list_receipts, run_migration, Receipt,
+    count_engine_today, count_intent_failures_today, get_receipt, insert_intent_rejection,
+    insert_receipt, list_receipts, run_migration, Receipt, PROOF_STATUS_GENERAL_LANE,
 };
 
 fn open_in_memory() -> anyhow::Result<Connection> {
@@ -93,7 +94,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6, "expected migration to reach version 6");
+    assert_eq!(version, 7, "expected migration to reach version 7");
 }
 
 #[test]
@@ -103,7 +104,7 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6, "migration should be idempotent at version 6");
+    assert_eq!(version, 7, "migration should be idempotent at version 7");
 }
 
 #[test]
@@ -150,7 +151,7 @@ fn test_migration_v2_to_v3() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 6, "v2→v6 migration must bump to version 6");
+    assert_eq!(version_after, 7, "v2→v7 migration must bump to version 7");
 
     // Verify the column exists
     let col_count: i64 = conn
@@ -215,7 +216,7 @@ fn test_migration_v4_to_v5() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 6, "v4→v6 migration must bump to version 6");
+    assert_eq!(version_after, 7, "v4→v7 migration must bump to version 7");
 
     // Regression: ISSUE-001 — actual_row_count column missing after v4→v5 migration
     // Found by /qa on 2026-04-07
@@ -402,7 +403,7 @@ fn test_migration_v5_to_v6_adds_rewrite_columns() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 6, "v5→v6 migration must bump to version 6");
+    assert_eq!(version_after, 7, "v5→v7 migration must bump to version 7");
 
     for col in &["rewrite_method", "rewritten_query"] {
         let count: i64 = conn
@@ -414,6 +415,109 @@ fn test_migration_v5_to_v6_adds_rewrite_columns() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1, "column '{col}' must exist after v5→v6 migration");
+        assert_eq!(count, 1, "column '{col}' must exist after v5→v7 migration");
     }
+}
+
+#[test]
+fn test_migration_v6_to_v7_adds_index() {
+    // Simulate a v6 database and verify that run_migration creates the v7 index.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipts (
+            receipt_id   TEXT PRIMARY KEY,
+            bundle_path  TEXT NOT NULL,
+            proof_status TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            bb_version   TEXT NOT NULL,
+            prompt_hash  TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            engine_used  TEXT DEFAULT 'zk_slow_lane_legacy',
+            proof_hash   TEXT,
+            data_exfiltrated INTEGER DEFAULT 0,
+            intent_confidence REAL DEFAULT NULL,
+            outgoing_prompt_hash TEXT DEFAULT NULL,
+            signing_version INTEGER DEFAULT NULL,
+            actual_row_count INTEGER DEFAULT NULL,
+            rewrite_method TEXT DEFAULT NULL,
+            rewritten_query TEXT DEFAULT NULL
+        );
+        CREATE TABLE IF NOT EXISTS intent_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt TEXT NOT NULL,
+            error TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 6;",
+    )
+    .unwrap();
+
+    let version_before: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_before, 6);
+
+    run_migration(&conn).unwrap();
+
+    let version_after: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version_after, 7, "v6→v7 migration must bump to version 7");
+
+    let idx_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_receipts_engine_created'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx_count, 1, "idx_receipts_engine_created must exist after v6→v7 migration");
+}
+
+#[test]
+fn test_count_engine_today_returns_correct_count() {
+    let conn = open_in_memory().unwrap();
+
+    // Insert a general_lane receipt with today's timestamp
+    let mut r = sample_receipt("r1");
+    r.engine_used = "general_lane".to_owned();
+    r.proof_status = PROOF_STATUS_GENERAL_LANE.to_owned();
+    r.bundle_path = String::new();
+    r.circuit_hash = String::new();
+    r.bb_version = String::new();
+    r.created_at = chrono::Utc::now().to_rfc3339();
+    insert_receipt(&conn, &r).unwrap();
+
+    // Insert a fast_lane receipt (should NOT be counted)
+    let mut r2 = sample_receipt("r2");
+    r2.engine_used = "fast_lane".to_owned();
+    r2.created_at = chrono::Utc::now().to_rfc3339();
+    insert_receipt(&conn, &r2).unwrap();
+
+    // Insert a general_lane receipt with a past day's timestamp (should NOT be counted)
+    let mut r3 = sample_receipt("r3");
+    r3.engine_used = "general_lane".to_owned();
+    r3.created_at = "2020-01-01T00:00:00Z".to_owned();
+    insert_receipt(&conn, &r3).unwrap();
+
+    let count = count_engine_today(&conn, "general_lane").unwrap();
+    assert_eq!(count, 1, "count_engine_today must count only today's general_lane receipts");
+}
+
+#[test]
+fn test_count_intent_failures_today_returns_correct_count() {
+    let conn = open_in_memory().unwrap();
+
+    // Insert an intent rejection with today's timestamp
+    insert_intent_rejection(&conn, "test prompt", "NoTableIdentified").unwrap();
+
+    // Insert one with a past day's timestamp directly (bypassing the helper)
+    conn.execute(
+        "INSERT INTO intent_rejections (prompt, error, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params!["old prompt", "some error", "2020-01-01T00:00:00Z"],
+    ).unwrap();
+
+    let count = count_intent_failures_today(&conn).unwrap();
+    assert_eq!(count, 1, "count_intent_failures_today must count only today's intent rejections");
 }

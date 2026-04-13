@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::config::TableConfig;
 use crate::intent;
-use crate::proxy::{ProxyState, run_fast_lane_engine, run_zk_pipeline, run_avg_pipeline};
+use crate::proxy::{ProxyState, is_hop_by_hop, run_fast_lane_engine, run_zk_pipeline, run_avg_pipeline};
 use crate::receipts::{insert_tunnel_audit, query_tunnel_audits, tunnel_summary, TunnelAuditFilters};
 use crate::router;
 use crate::types::{IntentResult, OriginalResponseData, Route, TunnelAuditRecord, TunnelMatchStatus};
@@ -507,6 +507,8 @@ async fn run_fork2_pipeline(
                     Err(e) => (None, None, None, Some(format!("ZK error: {}", e)), None)
                 }
             }
+            // GeneralLane is never dispatched in tunnel mode (tunnel always routes by intent).
+            Route::GeneralLane => unreachable!("GeneralLane route not used in tunnel mode"),
         };
 
     let zemtik_latency_ms = engine_start.elapsed().as_millis() as u64;
@@ -976,14 +978,6 @@ pub(crate) async fn handle_tunnel_passthrough(
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
-
-fn is_hop_by_hop(header: &str) -> bool {
-    matches!(header.to_lowercase().as_str(),
-        "connection" | "keep-alive" | "proxy-authenticate" |
-        "proxy-authorization" | "te" | "trailer" | "transfer-encoding" |
-        "upgrade" | "host"
-    )
-}
 
 fn check_dashboard_auth(state: &Arc<ProxyState>, headers: &HeaderMap) -> Result<(), Box<Response>> {
     match state.config.dashboard_api_key {

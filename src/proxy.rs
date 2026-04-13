@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::config::{AggFn, AppConfig, RewriterConfig, ZemtikMode};
-use crate::intent::IntentBackend;
+use crate::intent::{IntentBackend, IntentError};
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
     OpenAiRequestLog, OpenAiResponseLog, QueryParams, RewriteMethod, Route, SchemaValidationResult,
@@ -62,6 +62,12 @@ pub(crate) struct ProxyState {
     pub(crate) schema_validation: Arc<SchemaValidationResult>,
     /// Query rewriter configuration. None when ZEMTIK_QUERY_REWRITER is off (default).
     pub(crate) rewriter_config: Option<Arc<RewriterConfig>>,
+    /// Whether ZEMTIK_GENERAL_PASSTHROUGH is enabled. Copied from config at startup.
+    pub(crate) general_passthrough_enabled: bool,
+    /// Sliding-window rate limiter for GeneralLane. None when general_max_rpm == 0 (unlimited).
+    pub(crate) general_rate_limiter: Option<Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>>,
+    /// Max requests/minute for GeneralLane (0 = unlimited).
+    pub(crate) general_max_rpm: u32,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -209,6 +215,14 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         None
     };
 
+    let general_rate_limiter = if config.general_max_rpm > 0 {
+        Some(Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::<std::time::Instant>::new(),
+        )))
+    } else {
+        None
+    };
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_locks,
@@ -225,16 +239,27 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         backpressure_count: std::sync::atomic::AtomicU64::new(0),
         schema_validation,
         rewriter_config,
+        general_passthrough_enabled: config.general_passthrough_enabled,
+        general_rate_limiter,
+        general_max_rpm: config.general_max_rpm,
     });
 
     // If any configured origin is "*", use the wildcard policy.
     // Mixing "*" with specific origins (e.g. "*, https://app") is unsupported —
     // the "*" takes precedence so callers don't get surprising no-CORS responses.
+    let exposed_headers: Vec<axum::http::HeaderName> = vec![
+        axum::http::HeaderName::from_static("x-zemtik-engine"),
+        axum::http::HeaderName::from_static("x-zemtik-meta"),
+        axum::http::HeaderName::from_static("x-zemtik-receipt-id"),
+        axum::http::HeaderName::from_static("x-zemtik-bundle-id"),
+        axum::http::HeaderName::from_static("x-zemtik-verify-url"),
+    ];
     let cors = if config.cors_origins.iter().any(|o| o == "*") {
         CorsLayer::new()
             .allow_origin(tower_http::cors::Any)
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any)
+            .expose_headers(exposed_headers)
     } else {
         let origins: Vec<HeaderValue> = config
             .cors_origins
@@ -245,6 +270,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .allow_origin(origins)
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any)
+            .expose_headers(exposed_headers)
     };
 
     let app = match config.mode {
@@ -373,10 +399,14 @@ async fn handle_chat_completions(
         })
         .unwrap_or_default();
 
-    // Streaming guard (standard mode only). Tunnel mode explicitly supports stream:true
-    // via forward_streaming — do NOT apply this guard in tunnel mode.
+    // Streaming guard (standard mode only). Tunnel mode supports stream:true via
+    // forward_streaming. GeneralLane also supports streaming when
+    // ZEMTIK_GENERAL_PASSTHROUGH=1 — allow stream:true through so intent extraction
+    // can run; data lanes reject stream:true at their own dispatch point below.
+    let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
     if state.config.mode == crate::config::ZemtikMode::Standard
-        && body.get("stream").and_then(|v| v.as_bool()) == Some(true)
+        && is_streaming
+        && !state.general_passthrough_enabled
     {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -441,10 +471,24 @@ async fn handle_chat_completions(
         Err(intent_err) => {
             println!("[ROUTE] Intent rejection: {}", intent_err);
 
+            // True when GeneralLane will handle this request — not a user-visible failure.
+            // Used to suppress the intent_rejection receipt so that intent_failures_today
+            // only counts queries that resulted in a 400, not queries rescued by GeneralLane.
+            let divert_to_general_lane = state.general_passthrough_enabled
+                && matches!(
+                    intent_err,
+                    IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous
+                );
+
             // Helper: log rejection to receipts DB synchronously.
             // Called only on final failure paths so that a successful rewrite does not
             // produce a phantom rejection record alongside the success receipt.
+            // Skipped when divert_to_general_lane is true — the general_lane receipt
+            // already records the request, and the query was never rejected from the user's POV.
             let log_rejection = |db: &std::sync::MutexGuard<rusqlite::Connection>, msg: &str| {
+                if divert_to_general_lane {
+                    return;
+                }
                 if let Err(db_err) = receipts::insert_intent_rejection(db, &prompt, msg) {
                     eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
                 }
@@ -497,9 +541,14 @@ async fn handle_chat_completions(
                         .get(&resolved.table)
                         .and_then(|tc| tc.client_id)
                         .unwrap_or(state.config.client_id);
+                    // Data lanes do not support streaming.
+                    if is_streaming {
+                        return Ok(streaming_not_supported_for_data_lane());
+                    }
                     return match route {
                         Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
                         Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
+                        Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                     };
                 }
 
@@ -546,22 +595,41 @@ async fn handle_chat_completions(
                                     .and_then(|tc| tc.client_id)
                                     .unwrap_or(state.config.client_id);
                                 // Rewrite succeeded — do NOT log intent_rejection.
+                                // Data lanes do not support streaming.
+                                if is_streaming {
+                                    return Ok(streaming_not_supported_for_data_lane());
+                                }
                                 return match route {
                                     Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
                                     Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
+                                    Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                                 };
                             }
                             None => {
-                                // LLM rewrote but re-intent failed — final failure, log rejection.
-                                let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
-                                log_rejection(&db_guard, &intent_err.to_string());
+                                // LLM rewrote but re-intent failed — final failure.
+                                {
+                                    let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                                    log_rejection(&db_guard, &intent_err.to_string());
+                                } // drop db_guard before potential GeneralLane dispatch
+                                if state.general_passthrough_enabled
+                                    && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
+                                {
+                                    return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                                }
                                 return Ok(rewriting_failed_400("unresolvable"));
                             }
                         }
                     }
                     Ok(rewriter::RewriteResult::Unresolvable) => {
-                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
-                        log_rejection(&db_guard, &intent_err.to_string());
+                        {
+                            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                            log_rejection(&db_guard, &intent_err.to_string());
+                        } // drop db_guard before potential GeneralLane dispatch
+                        if state.general_passthrough_enabled
+                            && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
+                        {
+                            return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                        }
                         return Ok(rewriting_failed_400("unresolvable"));
                     }
                     Err(e) => {
@@ -581,15 +649,24 @@ async fn handle_chat_completions(
                         };
                         let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
                         log_rejection(&db_guard, &intent_err.to_string());
+                        // Rewriter timeout is a transient infra error — do NOT route to GeneralLane
+                        // (an operator who hits a timeout wants to debug the rewriter, not silently
+                        // fall back). Only Unresolvable/NoTableIdentified routes to GeneralLane.
                         return Ok(rewriting_failed_400(&hint_kind));
                     }
                 }
             }
 
-            // Rewriter disabled — log rejection and return the original 400.
+            // Rewriter disabled (or exhausted without rewriter path above) — log rejection.
             {
                 let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
                 log_rejection(&db_guard, &intent_err.to_string());
+            }
+            // Route to GeneralLane if enabled and the error is a genuine non-data query.
+            if state.general_passthrough_enabled
+                && matches!(intent_err, crate::intent::IntentError::NoTableIdentified | crate::intent::IntentError::TimeRangeAmbiguous)
+            {
+                return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
             }
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -598,7 +675,7 @@ async fn handle_chat_completions(
                         "type": "zemtik_intent_error",
                         "code": ZemtikErrorCode::NoTableIdentified,
                         "message": format!("Intent extraction failed: {}", intent_err),
-                        "hint": "Add aliases matching your users' phrasing to your table config in schema_config.json.",
+                        "hint": "If this query references your data, add aliases to schema_config.json (see docs/HOW_TO_ADD_TABLE.md). If this is a general (non-data) query, set ZEMTIK_GENERAL_PASSTHROUGH=1 to route it through the general lane.",
                         "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/HOW_TO_ADD_TABLE.md"
                     }
                 })),
@@ -615,12 +692,35 @@ async fn handle_chat_completions(
         .and_then(|tc| tc.client_id)
         .unwrap_or(state.config.client_id);
 
+    // Data lanes do not support streaming (ZK pipeline must complete before response).
+    // If general_passthrough is enabled and stream:true reached here via a resolved data
+    // query, reject it explicitly rather than sending stream:true to the ZK/fast pipeline.
+    if is_streaming {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "zemtik_config_error",
+                    "code": ZemtikErrorCode::StreamingNotSupported,
+                    "message": "Set stream: false in your client configuration.",
+                    "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+                    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+                }
+            })),
+        ).into_response());
+    }
+
     match route {
         Route::FastLane => {
             handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
         }
         Route::ZkSlowLane => {
             handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
+        }
+        Route::GeneralLane => {
+            // GeneralLane variant is never produced by decide_route (it only returns
+            // FastLane or ZkSlowLane for successfully resolved intents). Handled defensively.
+            handle_general_lane(state, body, api_key, prompt, prompt_hash, None, total_start).await
         }
     }
 }
@@ -915,6 +1015,239 @@ fn rewriting_disabled_400() -> Response {
         })),
     )
         .into_response()
+}
+
+/// HTTP 400 for stream:true sent to a data lane (FastLane or ZK SlowLane).
+/// Separate from the entry guard so rewriter dispatch paths can also call it.
+fn streaming_not_supported_for_data_lane() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "type": "zemtik_config_error",
+                "code": ZemtikErrorCode::StreamingNotSupported,
+                "message": "Set stream: false in your client configuration.",
+                "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+                "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Handle a GeneralLane request: forward non-data queries to OpenAI with a receipt and
+/// zemtik_meta metadata block. Supports both streaming (SSE passthrough) and non-streaming.
+///
+/// Called when ZEMTIK_GENERAL_PASSTHROUGH=1 and intent extraction fails to match a table.
+/// `intent_err`: the original IntentError that triggered the GeneralLane route; None for
+/// the rare defensive GeneralLane arm from the happy-path route match (should not occur).
+async fn handle_general_lane(
+    state: Arc<ProxyState>,
+    body: Value,
+    api_key: String,
+    _prompt: String,
+    prompt_hash: String,
+    intent_err: Option<IntentError>,
+    _total_start: Instant,
+) -> Result<Response, ProxyError> {
+    use std::time::Duration;
+    use axum::http::HeaderName;
+
+    let receipt_id = Uuid::new_v4().to_string();
+
+    // ── Rate limit check ────────────────────────────────────────────────────
+    if let Some(ref limiter) = state.general_rate_limiter {
+        let mut window = limiter.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let cutoff = now - Duration::from_secs(60);
+        window.retain(|&t| t > cutoff);
+        if window.len() as u32 >= state.general_max_rpm {
+            // Compute Retry-After: seconds until the oldest window entry expires.
+            let retry_after = window
+                .front()
+                .map(|oldest| {
+                    let elapsed = now.duration_since(*oldest);
+                    if elapsed < Duration::from_secs(60) {
+                        (Duration::from_secs(60) - elapsed).as_secs() + 1
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(60);
+
+            // Write a receipt so rate-limited requests appear in audit trail
+            // and general_queries_today counts them.
+            let now_str = Utc::now().to_rfc3339();
+            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = receipts::insert_receipt(&db_guard, &receipts::Receipt {
+                id: receipt_id.clone(),
+                bundle_path: String::new(),
+                proof_status: receipts::PROOF_STATUS_GENERAL_LANE_RATE_LIMITED.to_owned(),
+                circuit_hash: String::new(),
+                bb_version: String::new(),
+                prompt_hash: prompt_hash.clone(),
+                request_hash: prompt_hash.clone(),
+                created_at: now_str,
+                engine_used: "general_lane".to_owned(),
+                proof_hash: None,
+                data_exfiltrated: 0,
+                intent_confidence: None,
+                outgoing_prompt_hash: None,
+                signing_version: None,
+                actual_row_count: None,
+                rewrite_method: None,
+                rewritten_query: None,
+            }) {
+                eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
+            }
+            drop(db_guard);
+
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "code": "GeneralLaneBudgetExceeded",
+                    "message": "General lane rate limit exceeded. Increase ZEMTIK_GENERAL_MAX_RPM or set to 0 for unlimited.",
+                    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/CONFIGURATION.md#general-passthrough-v0110"
+                })),
+            ).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after.to_string())
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("60")),
+            );
+            return Ok(resp);
+        }
+        window.push_back(now);
+    }
+
+    // ── reason string from intent error ────────────────────────────────────
+    let reason = match &intent_err {
+        Some(IntentError::NoTableIdentified) => "no_table_match",
+        Some(IntentError::TimeRangeAmbiguous) => "time_range_ambiguous",
+        _ => "intent_error",
+    };
+
+    // ── Write receipt BEFORE forwarding (FastLane parity) ──────────────────
+    let now_str = Utc::now().to_rfc3339();
+    let receipt_write_result = {
+        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+        receipts::insert_receipt(&db_guard, &receipts::Receipt {
+            id: receipt_id.clone(),
+            bundle_path: String::new(),
+            proof_status: receipts::PROOF_STATUS_GENERAL_LANE.to_owned(),
+            circuit_hash: String::new(),
+            bb_version: String::new(),
+            prompt_hash: prompt_hash.clone(),
+            request_hash: prompt_hash.clone(),
+            created_at: now_str.clone(),
+            engine_used: "general_lane".to_owned(),
+            proof_hash: None,
+            data_exfiltrated: 0,
+            intent_confidence: None,
+            outgoing_prompt_hash: None,
+            signing_version: None,
+            actual_row_count: None,
+            rewrite_method: None,
+            rewritten_query: None,
+        })
+    };
+    if let Err(e) = receipt_write_result {
+        eprintln!("[GENERAL_LANE] Warning: failed to write receipt {}: {}", receipt_id, e);
+        // Continue — receipt failure does not block the response (FastLane parity).
+    }
+
+    let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
+
+    let zemtik_meta = serde_json::json!({
+        "engine_used": "general_lane",
+        "zk_coverage": "none",
+        "reason": reason,
+        "receipt_id": receipt_id,
+    });
+    let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
+
+    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
+
+    if is_streaming {
+        // ── Streaming path: SSE passthrough, metadata via header only ──────
+        let upstream = state
+            .http_client
+            .post(&openai_url)
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane upstream error: {}", e)))?;
+
+        let mut resp = stream_openai_passthrough(upstream).await;
+        resp.headers_mut().insert(
+            HeaderName::from_static("x-zemtik-engine"),
+            HeaderValue::from_static("general_lane"),
+        );
+        if let Ok(v) = HeaderValue::from_str(&meta_header_val) {
+            resp.headers_mut().insert(HeaderName::from_static("x-zemtik-meta"), v);
+        }
+        return Ok(resp);
+    }
+
+    // ── Non-streaming path ──────────────────────────────────────────────────
+    let upstream = state
+        .http_client
+        .post(&openai_url)
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane upstream error: {}", e)))?;
+
+    let resp_status = upstream.status();
+    let content_type = upstream
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+
+    let resp_bytes = upstream
+        .bytes()
+        .await
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane read body: {}", e)))?;
+
+    // Inject zemtik_meta into the response body when Content-Type is application/json
+    // and the body is a JSON object (not array). Fall back to header-only for other cases.
+    let final_body: Vec<u8> = if content_type.contains("application/json") {
+        if let Ok(mut v) = serde_json::from_slice::<Value>(&resp_bytes) {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("zemtik_meta".to_string(), zemtik_meta);
+                serde_json::to_vec(&v).unwrap_or_else(|_| resp_bytes.to_vec())
+            } else {
+                resp_bytes.to_vec()
+            }
+        } else {
+            resp_bytes.to_vec()
+        }
+    } else {
+        resp_bytes.to_vec()
+    };
+
+    let http_status = StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK);
+    let effective_content_type = if content_type.is_empty() {
+        "application/json"
+    } else {
+        &content_type
+    };
+    let mut response = Response::builder()
+        .status(http_status)
+        .header(axum::http::header::CONTENT_TYPE, effective_content_type)
+        .header(HeaderName::from_static("x-zemtik-engine"), "general_lane")
+        .body(axum::body::Body::from(final_body))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()));
+
+    if let Ok(v) = HeaderValue::from_str(&meta_header_val) {
+        response.headers_mut().insert(HeaderName::from_static("x-zemtik-meta"), v);
+    }
+
+    Ok(response)
 }
 
 /// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
@@ -1313,6 +1646,10 @@ async fn handle_zk_slow_lane(
     )
         .into_response();
 
+    // Always present — machine-readable lane signal.
+    if let Ok(val) = HeaderValue::from_str("zk_slow_lane") {
+        response.headers_mut().insert("x-zemtik-engine", val);
+    }
     if let Some(br) = committed_bundle {
         if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
             response.headers_mut().insert("x-zemtik-bundle-id", val);
@@ -1323,9 +1660,6 @@ async fn handle_zk_slow_lane(
         );
         if let Ok(val) = HeaderValue::from_str(&verify_url) {
             response.headers_mut().insert("x-zemtik-verify-url", val);
-        }
-        if let Ok(val) = HeaderValue::from_str("zk_slow_lane") {
-            response.headers_mut().insert("x-zemtik-engine", val);
         }
     }
 
@@ -1760,7 +2094,16 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         }
     }
 
-    // Step 4: append schema_validation results.
+    // Step 4: append GeneralLane counters (SQLite only; no-op on Supabase backend).
+    if let Some(obj) = body.as_object_mut() {
+        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+        let general_today = receipts::count_engine_today(&db_guard, "general_lane").unwrap_or(0);
+        let intent_failures = receipts::count_intent_failures_today(&db_guard).unwrap_or(0);
+        obj.insert("general_queries_today".to_string(), serde_json::json!(general_today));
+        obj.insert("intent_failures_today".to_string(), serde_json::json!(intent_failures));
+    }
+
+    // Step 5: append schema_validation results.
     if let Some(obj) = body.as_object_mut() {
         let sv = &state.schema_validation;
         let sv_json = serde_json::json!({
@@ -1797,6 +2140,81 @@ async fn handle_passthrough() -> impl IntoResponse {
             }
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Shared streaming helpers (used by GeneralLane and tunnel mode)
+// ---------------------------------------------------------------------------
+
+/// Returns true for HTTP/1.1 hop-by-hop headers that must not be forwarded to clients.
+pub(crate) fn is_hop_by_hop(header: &str) -> bool {
+    matches!(
+        header.to_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// Forward an already-obtained upstream SSE response to the client.
+/// Single-consumer variant (no FORK2 tee). Used by GeneralLane streaming passthrough.
+pub(crate) async fn stream_openai_passthrough(upstream: reqwest::Response) -> Response {
+    use axum::body::Body;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let status = upstream.status();
+    let resp_headers = upstream.headers().clone();
+    let (chunk_tx, chunk_rx) =
+        tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1024);
+
+    tokio::spawn(async move {
+        let mut byte_stream = upstream.bytes_stream();
+        // Per-chunk timeout: if no data arrives within 60s, treat as a stalled
+        // connection and terminate the stream to free the connection pool entry.
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                byte_stream.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(chunk))) => {
+                    let _ = chunk_tx.send(Ok(chunk)).await;
+                }
+                Ok(Some(Err(e))) => {
+                    let _ = chunk_tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
+                Ok(None) => break, // stream complete
+                Err(_timeout) => {
+                    eprintln!("[STREAM] Upstream stream stalled for >60s — terminating");
+                    let _ = chunk_tx
+                        .send(Err(std::io::Error::other("upstream stream timed out after 60s")))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(chunk_rx);
+    let mut builder = Response::builder().status(status);
+    for (k, v) in resp_headers.iter() {
+        if !is_hop_by_hop(k.as_str()) {
+            builder = builder.header(k, v);
+        }
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
 }
 
 // ---------------------------------------------------------------------------

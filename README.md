@@ -36,7 +36,7 @@ The response includes an `evidence` block with `data_exfiltrated: 0` and `attest
 
 To use your own data: mount a custom `schema_config.json` — see the commented volume in `docker-compose.yml`.
 
-> **POC status (v0.9.1):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.11.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -121,6 +121,48 @@ ZK SlowLane is required for tables where even an aggregate could reveal sensitiv
 | Config (`schema_config.json`) | `"sensitivity": "low"` | `"sensitivity": "critical"` |
 
 Unknown tables that are not in `schema_config.json` always route to ZK SlowLane (fail-secure).
+
+---
+
+## General Passthrough Lane (v0.11.0+)
+
+Real conversations mix structured data queries ("What was Q1 spend?") and general follow-up questions ("Can you explain that?"). Without General Passthrough, non-data queries that fail intent extraction return HTTP 400 `NoTableIdentified`.
+
+Enable `ZEMTIK_GENERAL_PASSTHROUGH=1` to route those queries to OpenAI directly. Zemtik logs a receipt and injects a `zemtik_meta` block into the response so you always know which lane handled the request.
+
+```bash
+export ZEMTIK_GENERAL_PASSTHROUGH=1
+export ZEMTIK_GENERAL_MAX_RPM=60   # optional: max general-lane requests/minute (0 = unlimited)
+cargo run -- proxy
+```
+
+```bash
+# Data query — ZK/FastLane as normal
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Q1 2024 aws_spend total"}]}'
+
+# General follow-up — now succeeds instead of returning 400
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Can you summarize that for a non-technical audience?"}]}'
+```
+
+General lane responses include:
+```json
+{
+  "zemtik_meta": {
+    "engine_used": "general_lane",
+    "zk_coverage": "none",
+    "reason": "no_table_match",
+    "receipt_id": "<uuid>"
+  }
+}
+```
+
+`zk_coverage: "none"` confirms no ZK verification was applied — and none was needed, since no raw data was queried. The `/health` endpoint exposes `general_queries_today` and `intent_failures_today` counters. Rate-limit breaches return HTTP 429 with error code `GeneralLaneBudgetExceeded`.
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#general-passthrough-v0110) for full configuration reference and streaming notes.
 
 ---
 

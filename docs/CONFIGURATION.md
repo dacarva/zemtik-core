@@ -113,6 +113,78 @@ Start with the deterministic path only. The deterministic pass resolves the tabl
 
 ---
 
+### General Passthrough (v0.11.0+)
+
+When intent extraction fails to match any configured table and rewriter exhaustion
+is reached, the proxy normally returns HTTP 400 `NoTableIdentified`. Enabling
+General Passthrough routes these requests to OpenAI directly and logs a receipt.
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_GENERAL_PASSTHROUGH` | `false` | `1`, `true` | Enable General Passthrough. Off by default — preserves existing 400 behavior. |
+| `ZEMTIK_GENERAL_MAX_RPM` | `0` | positive integer | Max requests/minute for the general lane. `0` = unlimited. Per-instance (not cluster-wide). |
+
+> **Production warning:** `ZEMTIK_GENERAL_MAX_RPM` defaults to `0` (unlimited). In production, set an explicit limit to prevent runaway OpenAI API costs from unexpected traffic. Recommended starting point: `60` RPM per instance.
+
+**Quick start:**
+```bash
+export ZEMTIK_GENERAL_PASSTHROUGH=1
+# optional rate limiter (e.g. 60 requests/min):
+export ZEMTIK_GENERAL_MAX_RPM=60
+cargo run -- proxy   # or restart your Docker container
+```
+
+**Test it:**
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Can you summarize the previous answer?"}]}'
+```
+
+Expected response (trimmed):
+```json
+{
+  "id": "chatcmpl-...",
+  "choices": [{"message": {"role": "assistant", "content": "..."}}],
+  "zemtik_meta": {
+    "engine_used": "general_lane",
+    "zk_coverage": "none",
+    "reason": "no_table_match",
+    "receipt_id": "<uuid>"
+  }
+}
+```
+
+**400 error hint change:** The HTTP 400 `NoTableIdentified` response now includes a second hint:
+> "If this is a non-data query (e.g. a follow-up question), enable
+> `ZEMTIK_GENERAL_PASSTHROUGH=1` to route it through the general lane."
+
+**SDK compatibility note:** `zemtik_meta` is injected as a top-level field
+in the JSON response alongside `choices`, `usage`, and `id`. If your OpenAI
+client uses strict schema validation (Pydantic, TypeScript strict mode), either:
+- Configure your parser to ignore unknown fields (`extra="ignore"` in Pydantic)
+- Read the response metadata from the `X-Zemtik-Meta` header instead (always present,
+  same JSON payload as the body field, URL-encoded)
+
+**Streaming:** When `stream: true` is set in the request body, `zemtik_meta` is
+NOT injected into the SSE response body (SSE format does not support top-level JSON).
+Use the `X-Zemtik-Meta` response header for streaming responses.
+
+> **SDK access limitation:** Most OpenAI SDK clients (Python, JS/TS) do not expose
+> raw HTTP response headers through their streaming interface. If you use
+> `openai.ChatCompletion.create(stream=True)` or equivalent, you cannot read
+> `X-Zemtik-Meta` without accessing the underlying HTTP client directly (e.g., via
+> `httpx` response object). Plan accordingly if your streaming consumers need
+> `engine_used` metadata.
+
+**Response headers (v0.11.0+, all lanes):**
+`X-Zemtik-Engine: <lane>` is now present on every response from the proxy,
+including FastLane, ZK SlowLane, and GeneralLane. Cross-origin clients must
+list it in their CORS allow/expose configuration. Same applies to `X-Zemtik-Meta`.
+
+---
+
 ### Tunnel mode (v0.9.0+)
 
 Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNNEL_MODE.md](TUNNEL_MODE.md) for full details.

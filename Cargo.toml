@@ -1,6 +1,6 @@
 [package]
 name = "zemtik"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
