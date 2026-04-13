@@ -129,15 +129,10 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 Added from `/plan-devex-review` of fix/general-queries.
 
-### intent_failures_today counter approach (P1, v0.11.0)
+### ~~intent_failures_today counter approach (P1, v0.11.0)~~ **Completed: v0.11.0 (2026-04-13)**
 
-- **What:** `intent_failures_today: u64` in `/health` response — count of intent failures (NoTableIdentified + TimeRangeAmbiguous) today. Decision needed during implementation: (a) write a receipt in the 400 path with proof_status='no_table_identified' and query; or (b) in-memory atomic counter reset at midnight. Option (b) is zero DB impact but lost on restart. Option (a) requires a receipt write on the 400 path (currently no receipt written there) and a composite index query.
-- **Why:** Operators can see "400s dropped, GeneralLane traffic increased" — the two together confirm GeneralLane is working as intended and docs were effective.
-- **Pros:** Direct DX feedback loop. Operator-visible signal that the feature is being used.
-- **Cons:** Option (a) adds a DB write on error paths; Option (b) loses count on restart.
-- **Context:** Add `intent_failures_today` alongside `general_queries_today` in the /health JSON.
-- **Depends on / blocked by:** GeneralLane /health counter implementation (same PR)
-- **Effort:** S (CC: ~15 min)
+- **What:** `intent_failures_today: u64` and `general_queries_today: u64` added to `/health` response. Uses `count_engine_today("general_lane")` and `count_intent_failures_today()` — both backed by the v7 composite index. Intent failures use the existing `intent_rejections` table (no new DB writes on error paths).
+- **Completed:** fix/general-queries PR.
 
 ---
 

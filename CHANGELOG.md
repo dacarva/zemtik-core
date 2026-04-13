@@ -19,6 +19,15 @@ All notable changes to this project will be documented in this file.
 - **CORS `expose_headers`** now includes `x-zemtik-engine` and `x-zemtik-meta` so cross-origin clients can read them.
 - **Shared SSE helper** extracted from `tunnel.rs` to `proxy.rs` (`is_hop_by_hop`, `stream_openai_passthrough`) to avoid duplication.
 
+### Fixed
+- **GeneralLane 429 audit trail**: rate-limited requests now write a receipt with `proof_status = "general_lane_rate_limited"` so they appear in audit logs and `general_queries_today`.
+- **`Retry-After` header on 429**: GeneralLane rate-limit responses now include `Retry-After: N` computed from the sliding window oldest entry.
+- **Upstream `Content-Type` passthrough**: GeneralLane non-streaming responses now forward the upstream `Content-Type` instead of hardcoding `application/json`.
+- **Streaming task timeout**: `stream_openai_passthrough` now applies a 60s per-chunk timeout — stalled upstream connections release the connection pool entry instead of hanging indefinitely.
+- **Receipts v7 migration tests**: updated assertions to match schema version 7; added `test_migration_v6_to_v7_adds_index`.
+- **Daily counter tests**: `count_engine_today` and `count_intent_failures_today` now have direct unit tests including old-timestamp boundary cases.
+- **Config tests**: `ZEMTIK_GENERAL_PASSTHROUGH` and `ZEMTIK_GENERAL_MAX_RPM` now have dedicated parse and validation tests.
+
 ## [0.10.0] - 2026-04-12
 
 ### Added
