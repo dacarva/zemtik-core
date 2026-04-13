@@ -501,9 +501,11 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 ## P1 — Docker ZK tools hash pinning (added 2026-04-08, ship review feat/integration-test-and-docker)
 
-- **What:** The `Dockerfile` installs nargo (via `noirup`) and bb (via `bbup`) using `curl | bash` when `INSTALL_ZK_TOOLS=true`. Neither installer URL is pinned to a content hash. A compromised installer would execute arbitrary code as root inside the builder layer, tainting the final image binary.
+- **What:** The `Dockerfile` installs nargo from a pinned GitHub release tarball (good), but still installs bb via `bbup` using `curl | bash` when `INSTALL_ZK_TOOLS=true`. The bbup script URL is not pinned to a content hash. A compromised installer would execute arbitrary code as root inside the builder layer, tainting the final image binary.
 - **Why:** Supply-chain integrity for the ZK path. The FastLane-only image (default) is unaffected, but the ZK SlowLane variant (`INSTALL_ZK_TOOLS=true`) is exposed. At the time of shipping, this path is documented as experimental/advanced, so risk is low. Needs a proper fix before the ZK path is recommended to enterprise customers.
-- **How to fix:** Pin the installer scripts with `sha256sum -c` before executing, or copy pre-built, hash-verified binaries from a trusted artifact registry (e.g., GitHub Release asset with verified SHA) rather than running shell-pipe installers as root.
+- **Progress (2026-04-13):** nargo is now pinned to a stable semver tag (`v1.0.0-beta.19`) with a reproducible GitHub release tarball URL. bb remains on `bbup` — the aztec-packages repo only publishes dated nightly tags (`v4.x.y-nightly.YYYYMMDD`) and the `bb 4.0.0-nightly` required by nargo `1.0.0-beta.19` has no stable pinnable release. Revisit once nargo rolls forward to a bb line with stable semver releases, or when aztec-packages publishes a long-lived release channel for bb.
+- **Lesson learned (bdb3173):** an earlier fix attempt invented a tarball URL (`aztec-packages-v0.82.2` / `barretenberg-x86_64-linux-gnu.tar.gz`) that didn't exist. CI did not catch it because the Docker smoke test built with `INSTALL_ZK_TOOLS=false`. CI now exercises both paths — see `.github/workflows/ci.yml`.
+- **How to fix (remaining):** Pin bbup itself with `sha256sum -c` before executing, then have bbup download a specific dated aztec-packages nightly and also verify its sha256 against a hardcoded digest. Update the digest whenever nargo is bumped.
 - **Effort:** S (human: ~1h / CC: ~15min) — update Dockerfile RUN commands, add sha256 verification
 - **Priority:** P1 — fix before marketing the ZK SlowLane Docker path to customers
 

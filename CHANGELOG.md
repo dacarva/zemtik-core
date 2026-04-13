@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Docker `INSTALL_ZK_TOOLS=true` build failure**: the `bb` install step in the Dockerfile pointed at a nonexistent `aztec-packages-v0.82.2` GitHub tag and a nonexistent `barretenberg-x86_64-linux-gnu.tar.gz` asset (introduced in bdb3173), producing a hard `curl: (22)` 404 whenever operators built the ZK variant. Reverted `bb` to `bbup --noir-version 1.0.0-beta.19`; kept the pinned GitHub release tarball for `nargo`. Runtime base image switched from `debian:bookworm-slim` to `ubuntu:24.04` for glibc compatibility with the `bb` nightly binary. CI Docker smoke test now exercises `INSTALL_ZK_TOOLS=true` so the next regression on the ZK path fails in CI instead of shipping.
+
 ## [0.10.0] - 2026-04-12
 
 ### Added

@@ -2,7 +2,7 @@
 # Stage 1: Builder
 # ============================================================
 # regex-only build: no fastembed/ONNX dependency, no nargo/bb required at build time.
-# Result: ~150MB runtime image (FastLane only) or ~450MB (INSTALL_ZK_TOOLS=true).
+# Result: ~170MB runtime image (FastLane only) or ~480MB (INSTALL_ZK_TOOLS=true).
 FROM rust:1.88-bookworm AS builder
 
 WORKDIR /build
@@ -25,7 +25,10 @@ RUN cargo build --release --no-default-features --features regex-only \
 # ============================================================
 # Stage 2: Runtime
 # ============================================================
-FROM debian:bookworm-slim
+# ubuntu:24.04 (glibc 2.39) is required for compatibility with bb v4.0.0-nightly
+# binaries, which are linked against a glibc newer than debian:bookworm-slim
+# (glibc 2.36) provides. Swapping back to bookworm will break INSTALL_ZK_TOOLS=true.
+FROM ubuntu:24.04
 
 # Set to "true" to install nargo + bb for ZK SlowLane support (~300MB image increase).
 # When enabled, also remove ZEMTIK_SKIP_CIRCUIT_VALIDATION from your compose file
@@ -46,16 +49,18 @@ RUN apt-get update \
 # nargo compiles the Noir circuit per ZK request; bb generates UltraHonk proofs.
 # On first ZK proof, bb downloads the SRS (~1GB) to /home/zemtik/.bb/.
 # Mount a named volume at /home/zemtik/.bb to persist the SRS across restarts.
-# Pinned ZK tool versions — update these together when bumping nargo/bb.
-# To get the sha256: docker build with INSTALL_ZK_TOOLS=false, then manually
-# download and run: sha256sum <archive>
+# Pinned nargo version — bb is resolved by bbup from this version.
 ARG NARGO_VERSION=1.0.0-beta.19
-ARG BB_VERSION=v0.82.2
 
-# NOTE: curl|bash@main is intentionally avoided here (S3 fix).
-# Instead we download pinned release tarballs and verify sha256.
-# When building internally, you can set INSTALL_ZK_TOOLS_INTERNAL=true to use
-# the noirup/bbup installers on a trusted build host — but never in CI/CD.
+# nargo is installed from a pinned GitHub release tarball (sha-pinnable,
+# stable semver tag). bb is installed via `bbup --noir-version ...` because
+# aztec-packages only publishes dated nightly tags (v4.x.y-nightly.YYYYMMDD),
+# and the bb 4.0.0-nightly required by nargo 1.0.0-beta.19 has no stable
+# release tarball. An earlier attempt (commit bdb3173) tried to pin bb to
+# `aztec-packages-v0.82.2` — that tag does not exist in aztec-packages and
+# produced a hard build failure (`curl: (22)` 404). Tracked as P1 TODO:
+# "Docker ZK tools hash pinning" in TODOS.md — revisit once nargo rolls
+# forward to a bb line with stable releases.
 RUN if [ "$INSTALL_ZK_TOOLS" = "true" ]; then \
     apt-get update && apt-get install -y --no-install-recommends git jq && rm -rf /var/lib/apt/lists/* \
     # Install nargo from pinned GitHub release (linux/amd64)
@@ -64,16 +69,13 @@ RUN if [ "$INSTALL_ZK_TOOLS" = "true" ]; then \
     && mkdir -p /root/.nargo/bin \
     && tar -xzf /tmp/nargo.tar.gz -C /root/.nargo/bin \
     && chmod +x /root/.nargo/bin/nargo \
-    # Install bb from pinned Aztec release (linux/amd64)
-    && BB_URL="https://github.com/AztecProtocol/aztec-packages/releases/download/aztec-packages-${BB_VERSION}/barretenberg-x86_64-linux-gnu.tar.gz" \
-    && curl -fsSL "$BB_URL" -o /tmp/bb.tar.gz \
-    && mkdir -p /root/.bb \
-    && tar -xzf /tmp/bb.tar.gz -C /root/.bb \
-    && chmod +x /root/.bb/bb \
-    # Move binaries to system PATH
     && mv /root/.nargo/bin/nargo /usr/local/bin/nargo \
+    # Install bb via bbup, resolved against the pinned nargo version.
+    && curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/bbup/bbup \
+         -o /usr/local/bin/bbup && chmod +x /usr/local/bin/bbup \
+    && bbup --noir-version ${NARGO_VERSION} \
     && mv /root/.bb/bb /usr/local/bin/bb \
-    && rm -rf /root/.nargo /root/.bb /tmp/nargo.tar.gz /tmp/bb.tar.gz; \
+    && rm -rf /root/.nargo /root/.bb /tmp/nargo.tar.gz; \
 fi
 
 # Copy the binary

@@ -70,13 +70,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (linux/amd64, no push)
+      - name: Build image (FastLane, linux/amd64, no push)
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: false
           tags: zemtik-core:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Exercises the INSTALL_ZK_TOOLS=true path so regressions in the
+      # nargo/bb install block fail CI instead of shipping. See bdb3173 for
+      # the historical regression this smoke test would have caught.
+      - name: Build image with ZK tools (linux/amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            INSTALL_ZK_TOOLS=true
+          tags: zemtik-core:ci-zk
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
