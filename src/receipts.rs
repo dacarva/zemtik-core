@@ -6,6 +6,15 @@ use sha2::{Digest, Sha256};
 
 use crate::types::TunnelAuditRecord;
 
+// ---------------------------------------------------------------------------
+// Proof status constants
+// ---------------------------------------------------------------------------
+
+/// GeneralLane: no ZK proof, forwarded directly to OpenAI.
+pub const PROOF_STATUS_GENERAL_LANE: &str = "general_lane";
+/// NoTableIdentified: intent extraction failed with no matching table (400 path).
+pub const PROOF_STATUS_NO_TABLE: &str = "no_table_identified";
+
 /// A row in the receipts table — one per successfully generated proof bundle.
 pub struct Receipt {
     pub id: String,           // uuid v4
@@ -154,6 +163,17 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v6")?;
     }
 
+    if version < 7 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE INDEX IF NOT EXISTS idx_receipts_engine_created
+                 ON receipts(engine_used, created_at);
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )
+        .context("apply migration v7")?;
+    }
+
     Ok(())
 }
 
@@ -208,6 +228,30 @@ pub fn insert_intent_rejection(
     )
     .context("insert intent rejection")?;
     Ok(())
+}
+
+/// Count receipts for a given engine_used value created today (UTC).
+/// Used by /health to report per-lane daily counters.
+pub fn count_engine_today(conn: &Connection, engine_used: &str) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM receipts
+         WHERE engine_used = ?1
+           AND created_at >= strftime('%Y-%m-%dT00:00:00', 'now')",
+        rusqlite::params![engine_used],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as u64)
+}
+
+/// Count intent rejections logged today (UTC). Used by /health to report intent_failures_today.
+pub fn count_intent_failures_today(conn: &Connection) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM intent_rejections
+         WHERE created_at >= strftime('%Y-%m-%dT00:00:00', 'now')",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as u64)
 }
 
 /// List all receipts ordered by created_at DESC (for `zemtik list`).

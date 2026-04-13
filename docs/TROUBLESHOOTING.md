@@ -218,6 +218,20 @@ ZEMTIK_SKIP_DB_VALIDATION=1 docker compose up
 
 ---
 
+## I'm getting HTTP 429 with code `GeneralLaneBudgetExceeded`
+
+Your `ZEMTIK_GENERAL_MAX_RPM` limit has been reached for the current 60-second window.
+
+**Fix:** Increase the limit or set it to `0` (unlimited):
+```bash
+export ZEMTIK_GENERAL_MAX_RPM=0   # unlimited (default)
+```
+
+Note: The rate limit is per-proxy-instance. If you run multiple Zemtik instances,
+each enforces its own limit independently (not cluster-wide).
+
+---
+
 ## Startup events log
 
 Each startup validation appends structured events to `~/.zemtik/startup_events.jsonl`. Review after a deployment:
@@ -225,3 +239,4 @@ Each startup validation appends structured events to `~/.zemtik/startup_events.j
 ```bash
 tail -n 20 ~/.zemtik/startup_events.jsonl | jq .
 ```
+

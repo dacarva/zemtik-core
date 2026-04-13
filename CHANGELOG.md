@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-04-13
+
+### Added
+- **GeneralLane**: non-data query passthrough via `ZEMTIK_GENERAL_PASSTHROUGH=1`. When intent extraction fails to match any configured table (after rewriter exhaustion), requests are forwarded to OpenAI with a receipt and `zemtik_meta` response block instead of returning HTTP 400.
+- **`ZEMTIK_GENERAL_MAX_RPM`**: per-instance rate limiter for the general lane (default: 0/unlimited). Sliding 60-second window; returns HTTP 429 `GeneralLaneBudgetExceeded` on breach.
+- **`zemtik_meta` field** in GeneralLane JSON responses: `{ engine_used, zk_coverage, reason, receipt_id }`. `reason` is `"no_table_match"` (NoTableIdentified) or `"time_range_ambiguous"` (TimeRangeAmbiguous).
+- **`X-Zemtik-Meta` header**: URL-encoded JSON of `zemtik_meta` — primary metadata signal for streaming responses.
+- **`general_queries_today`** and **`intent_failures_today`** counters in `/health` response.
+- **Receipts DB v7 migration**: composite index `idx_receipts_engine_created` on `(engine_used, created_at)` for `/health` counter queries.
+- **Streaming passthrough for GeneralLane**: when `ZEMTIK_GENERAL_PASSTHROUGH=1` and `stream: true`, general queries are forwarded as SSE. `zemtik_meta` is NOT injected into the SSE body; use `X-Zemtik-Meta` header instead.
+
+### Changed (behavioral)
+- **`X-Zemtik-Engine: <lane>` header** is now present on ALL proxy responses (FastLane, ZK SlowLane, GeneralLane). Previously absent on ZK SlowLane responses without a committed bundle. Clients that validate response headers should allow this header.
+- **NoTableIdentified 400 hint** updated to mention `ZEMTIK_GENERAL_PASSTHROUGH=1` as the opt-in for non-data queries.
+- **CORS `expose_headers`** now includes `x-zemtik-engine` and `x-zemtik-meta` so cross-origin clients can read them.
+- **Shared SSE helper** extracted from `tunnel.rs` to `proxy.rs` (`is_hop_by_hop`, `stream_openai_passthrough`) to avoid duplication.
+
 ## [0.10.0] - 2026-04-12
 
 ### Added

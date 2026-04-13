@@ -125,6 +125,22 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 ---
 
+## DX additions — GeneralLane DX review (2026-04-13)
+
+Added from `/plan-devex-review` of fix/general-queries.
+
+### intent_failures_today counter approach (P1, v0.11.0)
+
+- **What:** `intent_failures_today: u64` in `/health` response — count of intent failures (NoTableIdentified + TimeRangeAmbiguous) today. Decision needed during implementation: (a) write a receipt in the 400 path with proof_status='no_table_identified' and query; or (b) in-memory atomic counter reset at midnight. Option (b) is zero DB impact but lost on restart. Option (a) requires a receipt write on the 400 path (currently no receipt written there) and a composite index query.
+- **Why:** Operators can see "400s dropped, GeneralLane traffic increased" — the two together confirm GeneralLane is working as intended and docs were effective.
+- **Pros:** Direct DX feedback loop. Operator-visible signal that the feature is being used.
+- **Cons:** Option (a) adds a DB write on error paths; Option (b) loses count on restart.
+- **Context:** Add `intent_failures_today` alongside `general_queries_today` in the /health JSON.
+- **Depends on / blocked by:** GeneralLane /health counter implementation (same PR)
+- **Effort:** S (CC: ~15 min)
+
+---
+
 ## P1 — Gating questions (blocking implementation)
 
 ### SF client demand confirmation (feat/routing-engine, before implementation)
@@ -594,6 +610,48 @@ See canonical entry below: [PostgREST smoke-test at startup (P2, v0.9.2)](#postg
 - **Depends on / blocked by:** Requires `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` to be set. Skip gracefully if absent (sqlite path).
 - **Effort:** S (human: ~2h / CC: ~20min)
 - **Priority:** P2 — required before standard-mode pilot launch
+
+---
+
+## GeneralLane post-launch TODOs (added 2026-04-13, plan-ceo-review fix/general-queries)
+
+### Per-table general_passthrough override (P3)
+- **What:** Add `general_passthrough: bool` field to `TableConfig` in `schema_config.json`. When false, GeneralLane is blocked for requests that partially matched this table (intent identified the table but routing failed).
+- **Why:** Operators with sensitive tables want GeneralLane opt-out at table granularity without disabling it globally.
+- **Pros:** Defense-in-depth for sensitive schemas.
+- **Cons:** Only applies to partial-match cases where intent resolved a table. Cannot apply when intent fails entirely (NoTableIdentified) — the full-miss case that GeneralLane primarily handles. Needs redesign to clarify semantics before implementing.
+- **Context:** Rejected from fix/general-queries PR (Codex found it logically broken for the primary use case). Revisit if an operator requests it with a concrete partial-match scenario.
+- **Effort:** S (human: ~2h / CC: ~10min)
+- **Priority:** P3
+- **Depends on:** fix/general-queries merged, operator feedback on real use cases
+
+### Cluster-aware GeneralLane rate limiting (P2)
+- **What:** Move `ZEMTIK_GENERAL_MAX_RPM` from per-instance `VecDeque<Instant>` sliding window to a Redis-backed sliding window.
+- **Why:** Replicated Zemtik deployments (multiple proxy instances behind a load balancer) get N × MAX_RPM effective throughput. Per-instance limiting is only accurate for single-instance deployments.
+- **Pros:** Accurate cluster-wide enforcement. Required for production multi-instance deployments.
+- **Cons:** New external dependency (Redis). Adds operational complexity (Redis availability becomes a proxy dependency).
+- **Context:** v1 GeneralLane rate limiter is per-instance by design. Acceptable for single-instance pilots. Block for multi-instance production launch.
+- **Effort:** M (human: ~4h / CC: ~20min + Redis dep)
+- **Priority:** P2 — block for multi-instance production
+
+### GeneralLane adversarial intent-miss threat model (P3)
+- **What:** Document and optionally implement detection for prompts that deliberately cause intent classifier miss to force routing into GeneralLane when `ZEMTIK_GENERAL_PASSTHROUGH=1`.
+- **Why:** BGE-small-en (the embedding backend) is not adversarially robust. An attacker who knows `ZEMTIK_GENERAL_PASSTHROUGH=1` could craft prompts that always fail intent extraction to reach OpenAI without ZK verification — potentially extracting data-adjacent information via the general lane.
+- **Pros:** Closes a known attack surface for operators who have enabled passthrough.
+- **Cons:** Hard to implement well without false positives. Most Zemtik deployments are enterprise-internal, reducing exposure. The receipt audit trail is the primary mitigation today.
+- **Context:** Raised during fix/general-queries eng review (outside voice). Applies only when `ZEMTIK_GENERAL_PASSTHROUGH=1`. A basic mitigation could be a second-pass similarity check against known data patterns before allowing GeneralLane to fire.
+- **Effort:** M (human: ~4h / CC: ~20min)
+- **Priority:** P3 — non-blocking, mitigated by opt-in flag and receipt audit trail
+- **Depends on:** fix/general-queries merged
+
+### GeneralLane idempotency key support (P3)
+- **What:** Support `Idempotency-Key` request header to deduplicate rapid retries. Same key within a TTL window returns the cached receipt_id and skips a second forward to OpenAI.
+- **Why:** Network retries or client double-submits write two receipts and forward twice. Audit trail shows duplicate entries; operator billed twice.
+- **Pros:** Clean audit trail. Prevents duplicate OpenAI billing on retries.
+- **Cons:** Requires in-memory cache or DB lookup per GeneralLane request. Cache TTL adds state to the rate limiter. More complexity than the value warrants in v1.
+- **Context:** Added as P3 during fix/general-queries review. No operator has reported duplicate receipt issues yet.
+- **Effort:** M (human: ~3h / CC: ~15min)
+- **Priority:** P3
 
 ---
 

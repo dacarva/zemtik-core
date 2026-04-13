@@ -469,6 +469,44 @@ const result = await generateText({ model, stream: false });
 ```
 
 > **Tunnel mode** supports streaming — `stream: true` passes through to OpenAI unmodified. The streaming guard only applies in standard proxy mode.
+>
+> **General Passthrough** also supports streaming (v0.11.0+) — when `ZEMTIK_GENERAL_PASSTHROUGH=1`, `stream: true` is allowed for non-data queries. `zemtik_meta` is NOT injected into the SSE body; use the `X-Zemtik-Meta` response header instead.
+
+---
+
+## Option C — Mixed Session (data + general queries)
+
+Real conversations mix data queries ("What was Q1 spend?") and general follow-ups
+("Can you explain that?"). To handle both in the same session:
+
+1. Enable General Passthrough:
+```bash
+export ZEMTIK_GENERAL_PASSTHROUGH=1
+docker compose up --build   # or restart if already running
+```
+
+2. Send a data query (handled by ZK/FastLane as normal):
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Q1 2024 aws_spend total"}]}'
+```
+
+3. Send a follow-up general query in the same session — now succeeds:
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Can you summarize that for a non-technical audience?"}]}'
+```
+
+The general query response will include `zemtik_meta.engine_used: "general_lane"`
+and `zk_coverage: "none"` — confirming that no ZK verification was applied (and none
+was needed, since no raw data was queried).
+
+> **Note on ZEMTIK_QUERY_REWRITER:** GeneralLane works with or without the query
+> rewriter enabled. If `ZEMTIK_QUERY_REWRITER=1` is set, the proxy first attempts to
+> resolve follow-up queries as data queries (adding ~1s latency) before routing to
+> GeneralLane. Without the rewriter, general queries go to GeneralLane immediately.
 
 ---
 

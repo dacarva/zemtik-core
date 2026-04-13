@@ -455,6 +455,20 @@ pub struct AppConfig {
     /// Env: ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS
     #[serde(skip)]
     pub query_rewriter_max_context_tokens: usize,
+
+    // --- General Passthrough fields ---
+
+    /// Enable General Passthrough lane. Default: false.
+    /// When enabled, non-data queries that fail intent extraction are forwarded to OpenAI
+    /// with a receipt and zemtik_meta block instead of returning 400 NoTableIdentified.
+    /// Env: ZEMTIK_GENERAL_PASSTHROUGH=1|true
+    #[serde(skip)]
+    pub general_passthrough_enabled: bool,
+    /// Max requests per minute for the General Passthrough lane. Default: 0 (unlimited).
+    /// Sliding 60-second window, per-instance. 429 GeneralLaneBudgetExceeded on breach.
+    /// Env: ZEMTIK_GENERAL_MAX_RPM
+    #[serde(skip)]
+    pub general_max_rpm: u32,
 }
 
 impl AppConfig {
@@ -510,6 +524,8 @@ impl Default for AppConfig {
             query_rewriter_scan_messages: 5,
             query_rewriter_timeout_secs: 10,
             query_rewriter_max_context_tokens: 2000,
+            general_passthrough_enabled: false,
+            general_max_rpm: 0,
         }
     }
 }
@@ -772,6 +788,31 @@ pub fn load_from_sources(
             anyhow::bail!("ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS must be a positive integer (got 0)");
         }
         config.query_rewriter_max_context_tokens = n;
+    }
+
+    // General Passthrough env vars
+    if let Some(v) = env.get("ZEMTIK_GENERAL_PASSTHROUGH") {
+        let s = v.trim();
+        config.general_passthrough_enabled = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_GENERAL_PASSTHROUGH: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_GENERAL_MAX_RPM") {
+        let n = v.trim().parse::<u32>().with_context(|| {
+            format!("ZEMTIK_GENERAL_MAX_RPM: invalid value {:?}; must be a non-negative integer", v.trim())
+        })?;
+        if n > 1_000_000 {
+            anyhow::bail!(
+                "ZEMTIK_GENERAL_MAX_RPM: value {} exceeds maximum of 1,000,000",
+                n
+            );
+        }
+        config.general_max_rpm = n;
     }
 
     // Layer 4: CLI flags
