@@ -122,7 +122,9 @@ General Passthrough routes these requests to OpenAI directly and logs a receipt.
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
 | `ZEMTIK_GENERAL_PASSTHROUGH` | `false` | `1`, `true` | Enable General Passthrough. Off by default — preserves existing 400 behavior. |
-| `ZEMTIK_GENERAL_MAX_RPM` | `0` | positive integer | Max requests/minute for the general lane. `0` = unlimited. Per-instance (not cluster-wide). ⚠️ Production note: default is 0 (unlimited). Consider setting a limit to control OpenAI API costs when deploying `ZEMTIK_GENERAL_PASSTHROUGH` in production. |
+| `ZEMTIK_GENERAL_MAX_RPM` | `0` | positive integer | Max requests/minute for the general lane. `0` = unlimited. Per-instance (not cluster-wide). |
+
+> **Production warning:** `ZEMTIK_GENERAL_MAX_RPM` defaults to `0` (unlimited). In production, set an explicit limit to prevent runaway OpenAI API costs from unexpected traffic. Recommended starting point: `60` RPM per instance.
 
 **Quick start:**
 ```bash

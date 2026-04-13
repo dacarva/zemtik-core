@@ -501,7 +501,9 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 
 The general query response will include `zemtik_meta.engine_used: "general_lane"`
 and `zk_coverage: "none"` — confirming that no ZK verification was applied (and none
-was needed, since no raw data was queried).
+was needed, since no raw data was queried). (`zemtik_meta` is the GeneralLane
+equivalent of the `evidence` field used by ZK/FastLane responses — a separate
+top-level key injected only when `engine_used: "general_lane"`.)
 
 > **Note on ZEMTIK_QUERY_REWRITER:** GeneralLane works with or without the query
 > rewriter enabled. If `ZEMTIK_QUERY_REWRITER=1` is set, the proxy first attempts to
