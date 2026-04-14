@@ -200,6 +200,33 @@ See [docs/TUNNEL_MODE.md](docs/TUNNEL_MODE.md) for the full configuration refere
 
 ---
 
+## MCP Attestation Proxy (v0.13.0+)
+
+Zemtik can act as an **MCP (Model Context Protocol) attestation proxy** that wraps every tool call made by Claude or another MCP client with a ZK-backed attestation record. This lets you prove — cryptographically — that no raw data was exfiltrated through tool calls even when Claude is operating as an autonomous agent.
+
+Two transports are supported:
+
+| Command | Transport | Use case |
+|---------|-----------|---------|
+| `zemtik mcp` | stdio | Claude Desktop integration — add to `claude_desktop_config.json` |
+| `zemtik mcp-serve` | Streamable HTTP on `:4001` | IDE plugins, CI pipelines, or any HTTP MCP client |
+
+```bash
+# stdio mode (Claude Desktop)
+export ZEMTIK_MCP_API_KEY=secret
+zemtik mcp
+
+# HTTP server mode
+zemtik mcp-serve   # binds to 127.0.0.1:4001
+
+# Review audit records
+zemtik list-mcp
+```
+
+Two enforcement modes: `ZEMTIK_MCP_MODE=tunnel` (default — logs all tool calls, never blocks) and `ZEMTIK_MCP_MODE=governed` (blocks tool calls whose attestation fails). See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for the full integration guide.
+
+---
+
 ## Where Zemtik Applies
 
 Zemtik addresses a specific problem: **your data contains rows you cannot send to an LLM, but your business needs answers from those rows.** The pattern recurs across industries wherever regulation, privilege, or competitive sensitivity governs data residency.
@@ -437,6 +464,9 @@ zemtik-core/
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── startup.rs        # Startup validation: Postgres checks, ZK tools detection, JSONL event log
+│   ├── mcp_proxy.rs      # MCP attestation proxy: stdio + HTTP server; McpAuditRecord persistence; list_mcp_audit_records
+│   ├── mcp_auth.rs       # MCP bearer key validation; startup error enforcement for mcp-serve mode
+│   ├── mcp_tools.rs      # Built-in MCP tools (zemtik_fetch, zemtik_read_file); dynamic tool registration; path/domain allowlists
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
 │   └── types.rs          # Shared types; ZemtikErrorCode; TunnelMatchStatus
 ├── tests/
@@ -550,6 +580,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
 - [ZK Circuits](docs/ZK_CIRCUITS.md) — Circuit internals: Poseidon Merkle tree, mini-circuit architecture, public input layout, developer constraints (500-tx cap, sentinel padding, category hash rules), bundle format, offline verification, threat model
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
+- [MCP Attestation](docs/MCP_ATTESTATION.md) — MCP attestation proxy: Claude Desktop integration, `zemtik mcp` / `zemtik mcp-serve`, audit record schema, governed mode
 
 ---
 

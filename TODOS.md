@@ -7,6 +7,61 @@
 
 ---
 
+## ~~MCP attestation proxy core (v0.10.0)~~ **Completed: 2026-04-14**
+
+- `src/mcp_proxy.rs` — STDIO + SSE (mcp-serve), FORK 1+2, zemtik_read_file + zemtik_fetch, BabyJubJub attestation, SQLite mcp_audit.db
+- `src/mcp_auth.rs` — Bearer + ?token= auth with constant_time_eq
+- `src/mcp_tools.rs` — mcp_tools.json dynamic tool registration
+- `src/types.rs` — McpAuditRecord, McpMode, McpToolDef
+- `src/config.rs` — 8 MCP env vars (ZEMTIK_MCP_*)
+- `src/main.rs` — zemtik mcp, zemtik mcp-serve, zemtik list-mcp subcommands
+- `tests/test_mcp.rs` + `tests/integration_mcp.rs` — 13 tests passing
+- `tmp/manual_qa_mcp.md` — 12-step manual QA golden
+
+---
+
+## DX additions — MCP attestation proxy DX review (2026-04-13)
+
+These items were added during `/plan-devex-review` of the MCP attestation proxy plan (worktree-iridescent-forging-globe).
+All target v0.10.0 (pilot ship). Ordered by pilot-blocking priority.
+
+### ~~install.sh MCP wrapper + Claude Desktop config printer~~ **Completed: v0.13.0 (2026-04-14)**
+- **What:** When `ZEMTIK_MCP_ENABLED=true` is set during `install.sh`, the script should: (1) write `~/.zemtik/bin/zemtik-mcp` — a wrapper script that runs the Zemtik Docker container in STDIO mode (`docker exec zemtik zemtik mcp-stdio`), and (2) print the exact JSON block to paste into `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
+- **Why:** Without this, TTHW for MCP setup is ~60 min (manual Docker config + hunting Claude Desktop config format). With it, it's ~5 min: run install.sh, copy-paste one JSON block.
+- **Pros:** Competitive-tier TTHW. Tax director pilot deployable in under 5 minutes. Matches Stripe-tier DX for the first impression.
+- **Cons:** install.sh grows by ~30 lines. Must detect OS for config path.
+- **Context:** Claude Desktop JSON format for STDIO subprocess (Mac/Windows): `{"mcpServers": {"zemtik": {"command": "/path/to/zemtik-mcp", "env": {"ZEMTIK_MCP_API_KEY": "<key>"}}}}`. Config location: macOS `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows `%APPDATA%\Claude\claude_desktop_config.json`.
+- **Effort:** S (CC: ~20 min)
+- **Depends on:** mcp-serve subcommand implemented
+
+### ~~docs/MCP_ATTESTATION.md~~ **Completed: v0.13.0 (2026-04-14)**
+- **What:** New `docs/MCP_ATTESTATION.md` covering: (1) audit record schema (all fields with descriptions), (2) how to verify a BabyJubJub signature using the `public_key` field in each record + example `openssl`/`babyjubjub-cli` command, (3) what tunnel vs governed mode records look like, (4) retention policy. Target audience: compliance/legal team reviewing pilot results.
+- **Why:** The tax director's compliance team will ask "what exactly is Zemtik recording and how do I know it hasn't been tampered with?" Without a doc they can read independently, the founder has to explain it in every meeting.
+- **Pros:** Compliance team can self-serve. Mirrors `docs/COMPLIANCE_RECEIPT.md` pattern for ZK receipts.
+- **Cons:** Must stay in sync if audit record schema changes.
+- **Context:** Link from `docs/COMPLIANCE_RECEIPT.md` intro and from the `GET /mcp/audit` response comments.
+- **Effort:** S (CC: ~15 min doc writing)
+- **Depends on:** MCP audit record schema finalized in src/types.rs
+
+### docker-compose.yml MCP section + Windows WSL2 path note (P1, v0.10.0)
+- **What:** Add a commented-out MCP section to `docker-compose.yml` showing: `ZEMTIK_MCP_ENABLED=true`, `ZEMTIK_MCP_TRANSPORT=http`, `ZEMTIK_MCP_API_KEY=<generate with: openssl rand -hex 32>`, `ZEMTIK_MCP_BIND_ADDR=0.0.0.0:4001`, port `4001:4001`, and a Windows-specific note: `# Windows WSL2: ZEMTIK_MCP_AUDIT_DB_PATH=/mnt/c/Users/<username>/.zemtik/mcp_audit.jsonl`.
+- **Why:** Tax director's machine is Windows. Docker volume mounts using `~/.zemtik/` Unix paths silently fail on Windows without WSL2 path translation. Without the note, audit records vanish on container restart with no error message.
+- **Pros:** Zero guesswork for Windows deployment. Also documents the MCP env vars in context (not just CONFIGURATION.md).
+- **Cons:** Minimal — ~15 lines in docker-compose.yml.
+- **Effort:** XS (CC: ~5 min)
+- **Depends on:** Nothing (can be added now before implementation)
+
+### GET /mcp/summary endpoint (P1, v0.10.0)
+- **What:** Add `GET /mcp/summary` endpoint (gated by `?token=<ZEMTIK_MCP_API_KEY>` query param for browser access). Returns: `{"tool_calls_total": N, "tools_used": [{"name": "zemtik_read_file", "count": N}], "date_range": {"first": "ISO", "last": "ISO"}, "last_call_ts": "ISO", "mode": "tunnel|governed"}`. Mirrors `GET /tunnel/summary` pattern in `src/tunnel.rs`.
+- **Why:** `GET /mcp/audit` returns raw JSONL — hard to explain to a non-technical stakeholder. `GET /mcp/summary` is the "magical moment" URL: founder opens it in a browser, shows the tax director "this is every tool call your AI made, signed and counted." Summary is narrate-able; JSONL is not.
+- **Pros:** Moves the wow moment from a curl command to a browser URL. Mirrors existing pattern — low implementation cost.
+- **Cons:** ~50 additional lines in `src/mcp_proxy.rs` or `src/tunnel.rs`.
+- **Context:** The query param token (`?token=`) is browser-accessible. Header auth (`Authorization: Bearer`) is still supported for programmatic use. Both share the same `ZEMTIK_MCP_API_KEY`.
+- **Effort:** S (CC: ~20 min, mirrors tunnel.rs pattern)
+- **Depends on:** mcp-serve subcommand, McpAuditRecord in src/types.rs
+
+---
+
 ## DX additions — fix/integration-issues DX review (2026-04-10)
 
 These items were added during `/plan-devex-review` of the pilot readiness plan.
@@ -387,6 +442,7 @@ Added from `/plan-devex-review` of fix/general-queries.
 - **Effort:** S (human: ~2h / CC: ~15min)
 - **Priority:** P2 — required before installing on any untrusted network. For the v0.6.0 pilot, the CDO deploys on an internal LAN — document that `OPENAI_API_KEY` must NOT be set on the server (require callers to pass their own key).
 - **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+- **MCP note from /qa 2026-04-14:** Same gap exists for the MCP SSE endpoint at ZEMTIK_MCP_BIND_ADDR. Startup warning added (commit 6005bd4, ISSUE-004) but HTTP-layer auth on `/mcp` is not yet implemented. Tower middleware `ValidateRequestHeaderLayer::bearer` is the path forward for both proxy and MCP.
 
 ### table_name field in TableConfig (P3, Pilot Week 1)
 - **What:** Add `table_name: Option<String>` to `TableConfig` in `config.rs`. If set, use this as the Supabase table name in `query_sum_by_category` instead of the schema_config key.
@@ -676,6 +732,44 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 - **VALIDATE_ONLY + SKIP_CIRCUIT_VALIDATION** — both flags now stack correctly; VALIDATE_ONLY no longer exits 1 when circuit validation is suppressed.
 - **`/health` status_summary** — reports `"warnings"` when ZK tools are absent, not `"ok"`.
 - **Test safety** — `startup_validation_skipped_when_env_set` uses `#[serial]` to prevent env var race in parallel tests.
+
+---
+
+## MCP pilot deferred items — added from feat/mcp-attestation-proxy eng review (2026-04-14)
+
+### mcp_tools.json dynamic tool wiring (P1, before first SSE customer) — NEW from /qa 2026-04-14
+
+- **What:** Wire `load_mcp_tools()` into `McpHandlerState` and dispatch dynamic tools in `list_tools()` + `call_tool()`. Currently the parser exists and is tested but tools from `mcp_tools.json` are never loaded at startup and never appear in the tool list (ISSUE-005).
+- **Why:** The feature is documented and tested but non-functional. Any operator who creates an `mcp_tools.json` file will see it silently ignored. The `zemtik_attest` tool mentioned in the module docstring also has no handler.
+- **How to apply:** (1) Add `dynamic_tools: Vec<McpToolDef>` to `McpHandlerState`, (2) call `load_mcp_tools` in `from_config`, (3) append dynamic tools in `list_tools()`, (4) add a dispatch arm in `call_tool()` that forwards to a pluggable handler (or returns a structured error if no handler registered).
+- **Effort:** S (CC: ~20min)
+- **Depends on:** MCP STDIO/SSE shipped.
+
+### mcp_tools.json reload on SIGHUP (P2, before second SSE customer)
+
+- **What:** Reload `mcp_tools.json` on SIGHUP without restarting `zemtik mcp-serve`. New tools become available; removed tools disappear; malformed reload → log error + keep old config (don't crash).
+- **Why:** Hosted SSE deployment with multiple customers needs to add/remove custom tools without taking the MCP server offline. Restart-on-config-change is OK for STDIO (single user) but not for SSE.
+- **Pros:** Zero-downtime tool registration changes for the hosted product.
+- **Cons:** Shared state mutation under concurrent requests needs an `Arc<RwLock<ToolConfig>>`. ~30 LOC of wiring.
+- **Context:** Same SIGHUP pattern as schema_config.json hot-reload (see TODOS.md hot-reload item if it exists). `mcp_tools.rs` loads config at startup; replace `ToolConfig` with `Arc<RwLock<ToolConfig>>` in `McpState`. Add a tokio signal handler that calls `reload_tools()` on SIGHUP.
+- **Depends on:** MCP SSE mode shipped (feat/mcp-attestation-proxy)
+
+### ZEMTIK_MCP_ALLOWED_PATHS enforcement in STDIO mode (P2, before multi-user STDIO)
+
+- **What:** Promote `ZEMTIK_MCP_ALLOWED_PATHS` from warn-only to enforce in STDIO mode. The pilot uses warn-only (trusted local user). Regulated enterprise customers will need explicit path allowlisting even in STDIO.
+- **Why:** Current STDIO mode hardcodes a deny for `~/.zemtik/` (signing key protection) but other sensitive paths are warn-only. A zero-trust enterprise deployment can't rely on implicit trust of the local user.
+- **Pros:** Full path control in STDIO. Makes STDIO mode as safe as SSE mode (which enforces).
+- **Cons:** Adds IT setup friction on pilot day — the engineer must configure `ZEMTIK_MCP_ALLOWED_PATHS` before handing the workstation to the user. Empty = start-up warning, not hard error.
+- **Context:** When promoting, make empty `ZEMTIK_MCP_ALLOWED_PATHS` warn at startup ("no path allowlist configured — all paths allowed"). Add a startup validation block entry for MCP similar to schema_config.json. Document in TROUBLESHOOTING.md.
+- **Depends on:** MCP STDIO mode shipped (feat/mcp-attestation-proxy)
+- **Partial fix by /qa 2026-04-14:** SSE mode with empty `ZEMTIK_MCP_ALLOWED_PATHS` now denies all reads (ISSUE-002, commit 118f438). STDIO mode still allow-all when empty. This TODO tracks promoting STDIO to the same enforcement.
+
+### Signing message concatenation: add delimiter before mcp_tools.json wiring (P2, before dynamic tool registration)
+
+- **What:** The signed message for BabyJubJub attestation is `tool_name + input_hash + output_hash + ts`. The input/output hashes are fixed-length (71 chars: "sha256:" + 64 hex). But `tool_name` has no delimiter, creating theoretical collision potential once dynamic tools with arbitrary names are registered. Change to null-delimited: `tool_name + "\x00" + input_hash + "\x00" + output_hash + "\x00" + ts`.
+- **Why:** Breaking change to the audit record signing format — existing records signed with the old format will fail verification against the new format. Must be done before `mcp_tools.json` dynamic wiring, not after.
+- **Context:** Found by adversarial review during /ship of v0.13.0. The two builtin tools (`zemtik_read_file`, `zemtik_fetch`) have short names that cannot collide with the hash prefix. Safe today, a liability once arbitrary tool names are registered. Update `docs/MCP_ATTESTATION.md` when fixing to document the new format with a version field.
+- **Depends on:** Ship v0.13.0 first; fix before mcp_tools.json dynamic tool wiring.
 
 ---
 

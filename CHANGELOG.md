@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-04-14
+
+### Added
+- **MCP Attestation Proxy** (`zemtik mcp` / `zemtik mcp-serve`) — every file read and HTTP fetch Claude makes on your data is signed with BabyJubJub EdDSA and written to a tamper-evident audit record in `~/.zemtik/mcp_audit.db`. Zero latency impact via FORK 1+2 pattern.
+- **STDIO mode** (`zemtik mcp`): Claude Desktop spawns Zemtik as a subprocess. Audit records are best-effort with a 1-second async signing timeout.
+- **SSE mode** (`zemtik mcp-serve`): Streamable HTTP server on `ZEMTIK_MCP_BIND_ADDR` (default `127.0.0.1:4001`) with `GET /mcp/audit`, `/mcp/summary`, `/mcp/health` endpoints. Bearer token auth via `ZEMTIK_MCP_API_KEY`.
+- **`zemtik_read_file` tool**: file read with P0 deny for `~/.zemtik/` (signing key protection), 10 MB cap, allowlist enforcement in SSE mode (`ZEMTIK_MCP_ALLOWED_PATHS`).
+- **`zemtik_fetch` tool**: HTTP fetch with domain allowlist enforcement in SSE mode (`ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`). Bypass events are audited with `mode=bypass_blocked` or `mode=bypass_stdio`.
+- **`docs/MCP_ATTESTATION.md`**: compliance doc covering audit schema, BabyJubJub signature verification (Rust + Python), tunnel vs governed mode, key management, and security boundaries.
+- **`install.sh` MCP wrapper**: creates `~/.zemtik/bin/zemtik-mcp` and prints the exact JSON block for `claude_desktop_config.json`.
+
+### Changed
+- **`check_mcp_auth` now denies on unconfigured key** — previous allow-all default inverted to deny-all. Startup validation in `run_mcp_serve` ensures the key is always set before any requests are served.
+- **`mcp_audit.db` uses WAL mode** — prevents dropped audit records under concurrent FORK 2 writes in SSE mode.
+- **`allowed_paths` canonicalized at construction time** — tilde and symlink components in `ZEMTIK_MCP_ALLOWED_PATHS` are resolved at startup, not per-request.
+- **`pending_fork2` handles drained on push** — completed `JoinHandle`s are pruned before pushing new ones, preventing unbounded memory growth in long-running SSE deployments.
+- **Key seed wrapped in `Zeroizing`** — the 32-byte BabyJubJub key seed copy materialized in each FORK 2 `spawn_blocking` call is now zeroed on drop.
+
+### Fixed (security)
+- **Symlink bypass of key-file protection** (`fix(mcp)` commit 17861a0): `zemtik_home` is now canonicalized at construction time. On macOS, `/var/folders` is a symlink to `/private/var/folders`; without canonicalization, `starts_with()` silently passed for symlinked paths into `~/.zemtik/`.
+- **SSE mode with empty `ZEMTIK_MCP_ALLOWED_PATHS` now denies all reads** (commit 118f438) — empty allowlist was previously allow-all instead of deny-all in SSE mode.
+- **Non-allowlisted `zemtik_fetch` domains blocked in SSE mode** (commit 81d6bf1) — previously only logged, now returns an error and writes a bypass audit record.
+- **Startup warning when SSE mode binds to non-loopback address** (commit 6005bd4).
+
 ## [0.12.0] - 2026-04-14
 
 ### Added

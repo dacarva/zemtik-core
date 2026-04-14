@@ -49,6 +49,15 @@ cargo run -- list
 # List recent tunnel audit records (tunnel mode only)
 cargo run -- list-tunnel
 
+# Run MCP attestation proxy (stdio, for Claude Desktop)
+cargo run -- mcp
+
+# Run MCP attestation HTTP server on :4001 (Streamable HTTP transport)
+cargo run -- mcp-serve
+
+# List recent MCP audit records
+cargo run -- list-mcp
+
 # Tests
 cargo test
 
@@ -70,6 +79,9 @@ Zemtik Core is a **Rust + Noir ZK middleware** that enforces zero-knowledge proo
 | Verify | `cargo run -- verify <bundle.zip>` | Offline bundle verification via `bb verify` |
 | List | `cargo run -- list` | List recent receipts from `~/.zemtik/receipts.db` |
 | List-tunnel | `cargo run -- list-tunnel` | List recent tunnel audit records from `~/.zemtik/tunnel_audit.db` |
+| MCP stdio | `cargo run -- mcp` | MCP attestation proxy over stdio; integrates with Claude Desktop; wraps every MCP tool call with ZK-backed attestation and logs to `mcp_audit.db` |
+| MCP HTTP | `cargo run -- mcp-serve` | MCP attestation HTTP server on `:4001` (Streamable HTTP transport); for IDE/CI integrations that use HTTP instead of stdio |
+| List-mcp | `cargo run -- list-mcp` | List recent MCP audit records from `~/.zemtik/mcp_audit.db` |
 
 ### Proxy Data Flow (v0.8+)
 
@@ -118,6 +130,9 @@ POST /v1/chat/completions (user prompt)
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |
+| `mcp_proxy.rs` | MCP attestation proxy: `run_mcp_stdio`, `run_mcp_serve`, `run_dry_run`; wraps every MCP tool call with ZK-backed attestation; persists `McpAuditRecord` to `mcp_audit.db`; `list_mcp_audit_records` |
+| `mcp_auth.rs` | MCP authentication: bearer key validation for `/mcp/audit` and `/mcp/summary`; startup error if `ZEMTIK_MCP_API_KEY` unset in `mcp-serve` mode |
+| `mcp_tools.rs` | MCP built-in tool definitions (`zemtik_fetch`, `zemtik_read_file`); dynamic tool registration from `mcp_tools.json` (`ZEMTIK_MCP_TOOLS_PATH`); path and domain allowlist enforcement |
 
 ### ZK Circuit (`circuit/`)
 
@@ -135,7 +150,7 @@ Layered resolution order (later overrides earlier):
 
 1. Hardcoded defaults (`~/.zemtik/` subdirs: `circuit/`, `runs/`, `keys/`, `receipts/`, `receipts.db`, `zemtik.db`)
 2. YAML file (`~/.zemtik/config.yaml`)
-3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard), `ZEMTIK_OPENAI_BASE_URL` (default `https://api.openai.com`; override in tests/dev), `ZEMTIK_OPENAI_MODEL` (default `gpt-5.4-nano`; `gpt-5.4-nano` is a real OpenAI model, not a placeholder), `ZEMTIK_SKIP_CIRCUIT_VALIDATION` (`1`|`true`; skips nargo/bb circuit dir check — required in Docker and integration tests), `ZEMTIK_SKIP_DB_VALIDATION` (`1`|`true`; skips startup schema validation — use when `DATABASE_URL` is not available), `ZEMTIK_VALIDATE_ONLY` (`1`|`true`; run startup schema validation then exit 0/1 — pre-demo config check, no server started), `ZEMTIK_MODE` (`standard`|`tunnel`; default `standard`), `ZEMTIK_TUNNEL_API_KEY` (required when `ZEMTIK_MODE=tunnel`; hard startup error if unset), `ZEMTIK_TUNNEL_MODEL` (default: `ZEMTIK_OPENAI_MODEL`), `ZEMTIK_TUNNEL_TIMEOUT_SECS` (default 180), `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` (default 50), `ZEMTIK_DASHBOARD_API_KEY` (protects `/tunnel/audit` and `/tunnel/summary`; warning if unset in tunnel mode), `ZEMTIK_TUNNEL_AUDIT_DB_PATH` (default `~/.zemtik/tunnel_audit.db`), `ZEMTIK_TUNNEL_DEBUG_PREVIEWS` (`0`|`1`; default `0` — when enabled, stores 500-char plaintext snippets of original LLM responses in the audit DB; disable in production to avoid persisting customer output), `ZEMTIK_QUERY_REWRITER` (`1`|`true`; default `false` — enable hybrid query rewriter for multi-turn proxy mode), `ZEMTIK_QUERY_REWRITER_MODEL` (default: `ZEMTIK_OPENAI_MODEL`), `ZEMTIK_QUERY_REWRITER_TURNS` (default 6 — conversation turns included in LLM rewrite context), `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES` (default 5 — max prior messages scanned by deterministic_resolve), `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default 10 — per-request timeout for LLM rewrite call), `ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS` (default 2000 — token budget for LLM context, estimated via char/4), `ZEMTIK_GENERAL_PASSTHROUGH` (`1`|`true`; default `false` — enables General Passthrough lane; non-data queries that fail intent extraction are forwarded to OpenAI with a receipt and zemtik_meta block instead of returning 400), `ZEMTIK_GENERAL_MAX_RPM` (default `0` — max requests/minute for the general lane; `0` = unlimited; per-instance, not cluster-wide; 429 with GeneralLaneBudgetExceeded on breach))
+3. Environment variables (`ZEMTIK_*` prefix, plus `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `DB_BACKEND`, `ZEMTIK_INTENT_BACKEND` (`embed`|`regex`), `ZEMTIK_INTENT_THRESHOLD`, `ZEMTIK_VERIFY_TIMEOUT_SECS` (default 120), `ZEMTIK_CLIENT_ID` (default 123), `ZEMTIK_BIND_ADDR` (default `127.0.0.1:4000`), `ZEMTIK_CORS_ORIGINS` (comma-separated; `*` for wildcard), `ZEMTIK_OPENAI_BASE_URL` (default `https://api.openai.com`; override in tests/dev), `ZEMTIK_OPENAI_MODEL` (default `gpt-5.4-nano`; `gpt-5.4-nano` is a real OpenAI model, not a placeholder), `ZEMTIK_SKIP_CIRCUIT_VALIDATION` (`1`|`true`; skips nargo/bb circuit dir check — required in Docker and integration tests), `ZEMTIK_SKIP_DB_VALIDATION` (`1`|`true`; skips startup schema validation — use when `DATABASE_URL` is not available), `ZEMTIK_VALIDATE_ONLY` (`1`|`true`; run startup schema validation then exit 0/1 — pre-demo config check, no server started), `ZEMTIK_MODE` (`standard`|`tunnel`; default `standard`), `ZEMTIK_TUNNEL_API_KEY` (required when `ZEMTIK_MODE=tunnel`; hard startup error if unset), `ZEMTIK_TUNNEL_MODEL` (default: `ZEMTIK_OPENAI_MODEL`), `ZEMTIK_TUNNEL_TIMEOUT_SECS` (default 180), `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` (default 50), `ZEMTIK_DASHBOARD_API_KEY` (protects `/tunnel/audit` and `/tunnel/summary`; warning if unset in tunnel mode), `ZEMTIK_TUNNEL_AUDIT_DB_PATH` (default `~/.zemtik/tunnel_audit.db`), `ZEMTIK_TUNNEL_DEBUG_PREVIEWS` (`0`|`1`; default `0` — when enabled, stores 500-char plaintext snippets of original LLM responses in the audit DB; disable in production to avoid persisting customer output), `ZEMTIK_QUERY_REWRITER` (`1`|`true`; default `false` — enable hybrid query rewriter for multi-turn proxy mode), `ZEMTIK_QUERY_REWRITER_MODEL` (default: `ZEMTIK_OPENAI_MODEL`), `ZEMTIK_QUERY_REWRITER_TURNS` (default 6 — conversation turns included in LLM rewrite context), `ZEMTIK_QUERY_REWRITER_SCAN_MESSAGES` (default 5 — max prior messages scanned by deterministic_resolve), `ZEMTIK_QUERY_REWRITER_TIMEOUT_SECS` (default 10 — per-request timeout for LLM rewrite call), `ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS` (default 2000 — token budget for LLM context, estimated via char/4), `ZEMTIK_GENERAL_PASSTHROUGH` (`1`|`true`; default `false` — enables General Passthrough lane; non-data queries that fail intent extraction are forwarded to OpenAI with a receipt and zemtik_meta block instead of returning 400), `ZEMTIK_GENERAL_MAX_RPM` (default `0` — max requests/minute for the general lane; `0` = unlimited; per-instance, not cluster-wide; 429 with GeneralLaneBudgetExceeded on breach), `ZEMTIK_MCP_BIND_ADDR` (default `127.0.0.1:4001` — bind address for the MCP HTTP server in `mcp-serve` mode), `ZEMTIK_MCP_API_KEY` (bearer key protecting `/mcp/audit` and `/mcp/summary`; hard startup error in `mcp-serve` mode if unset), `ZEMTIK_MCP_MODE` (`tunnel`|`governed`; default `tunnel` — `governed` blocks tool calls that fail attestation), `ZEMTIK_MCP_TRANSPORT` (deprecated; `sse` rejected at startup since 2026-04-01; use `http`), `ZEMTIK_MCP_AUDIT_DB_PATH` (default `~/.zemtik/mcp_audit.db`), `ZEMTIK_MCP_FETCH_TIMEOUT_SECS` (default `30` — HTTP timeout for `zemtik_fetch` tool; must be >= 1), `ZEMTIK_MCP_ALLOWED_PATHS` (comma-separated glob allowlist for `zemtik_read_file`; empty = allow-all in stdio mode, deny-all in `mcp-serve` mode), `ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS` (comma-separated domain allowlist for `zemtik_fetch`; empty = allow-all in stdio, deny-all in `mcp-serve`), `ZEMTIK_MCP_TOOLS_PATH` (path to `mcp_tools.json` for dynamic tool registration; omit to use built-in tools only))
 4. CLI flags (`--port`, `--circuit-dir`)
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` at minimum for end-to-end runs.

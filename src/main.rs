@@ -1,4 +1,4 @@
-use zemtik::{audit, bundle, config, db, keys, openai, prover, proxy, receipts, types, verify};
+use zemtik::{audit, bundle, config, db, keys, mcp_proxy, openai, prover, proxy, receipts, types, verify};
 use zemtik::config::AggFn;
 
 use std::path::PathBuf;
@@ -40,6 +40,20 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Run as MCP stdio subprocess (Claude Desktop integration)
+    Mcp {
+        /// Validate key + create test audit record, then exit 0/1
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Run MCP HTTP server on :4001 (Streamable HTTP transport)
+    McpServe,
+    /// List recent MCP audit records
+    ListMcp {
+        /// Maximum number of records to show (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -58,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
             Some(Commands::Verify { path }) => Command::Verify(path.clone()),
             Some(Commands::List) => Command::List,
             Some(Commands::ListTunnel { .. }) => Command::ListTunnel,
+            Some(Commands::Mcp { .. }) => Command::Pipeline,
+            Some(Commands::McpServe) => Command::Pipeline,
+            Some(Commands::ListMcp { .. }) => Command::Pipeline,
             None => Command::Pipeline,
         },
     };
@@ -110,6 +127,28 @@ async fn main() -> anyhow::Result<()> {
             return run_list_tunnel(app_config, limit);
         }
         Command::Pipeline => {} // fall through to default pipeline
+    }
+
+    // MCP commands are handled before the ZK pipeline
+    match &cli.command {
+        Some(Commands::Mcp { dry_run }) => {
+            if *dry_run {
+                return mcp_proxy::run_dry_run(&app_config).map_err(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                    #[allow(unreachable_code)]
+                    e
+                });
+            }
+            return mcp_proxy::run_mcp_stdio(app_config).await;
+        }
+        Some(Commands::McpServe) => {
+            return mcp_proxy::run_mcp_serve(app_config).await;
+        }
+        Some(Commands::ListMcp { limit }) => {
+            return run_list_mcp(app_config, *limit);
+        }
+        _ => {}
     }
 
     // Fail fast: verify circuit directory before starting the pipeline.
@@ -448,6 +487,36 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
             direct_count, det_count, llm_count, list.len()
         );
     }
+    Ok(())
+}
+
+fn run_list_mcp(config: config::AppConfig, limit: usize) -> anyhow::Result<()> {
+    let records = mcp_proxy::list_mcp_audit_records(&config.mcp_audit_db_path, limit)
+        .context("list MCP audit records")?;
+
+    if records.is_empty() {
+        println!("No MCP audit records found. Run `zemtik mcp` with Claude Desktop to generate records.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38}  {:<25}  {:<18}  {:<8}  Mode",
+        "Receipt ID", "Timestamp", "Tool", "Duration"
+    );
+    println!("{}", "-".repeat(120));
+
+    for r in &records {
+        let id_short = &r.receipt_id;
+        println!(
+            "{:<38}  {:<25}  {:<18}  {:>6}ms  {}",
+            id_short,
+            r.ts,
+            r.tool_name,
+            r.duration_ms,
+            r.mode,
+        );
+    }
+    println!("\n{} MCP audit record(s) shown (limit: {}).", records.len(), limit);
     Ok(())
 }
 

@@ -1,12 +1,13 @@
 [package]
 name = "zemtik"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
 
 [dependencies]
 constant_time_eq = "0.3"
+zeroize = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Use the same poseidon-rs version as babyjubjub-rs to share the Fr type
 poseidon-rs = "0.0.8"
@@ -44,6 +45,9 @@ regex = "1"
 clap = { version = "4", features = ["derive"] }
 urlencoding = "2"
 fastembed = { version = "5", optional = true }
+rmcp = { version = "=1.4.0", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
+schemars = "0.8"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # aarch64-specific: babyjubjub-rs needs the "aarch64" feature on Apple Silicon
 # to avoid a ppv-lite86 blake-hash panic. x86_64 builds must NOT include it.
@@ -64,6 +68,7 @@ benchmarks = []
 name = "intent-eval"
 path = "eval/intent_eval.rs"
 required-features = ["eval"]
+
 
 [dev-dependencies]
 tempfile = "3"
