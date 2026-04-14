@@ -11,14 +11,19 @@ use constant_time_eq::constant_time_eq;
 /// Validate a request against the configured ZEMTIK_MCP_API_KEY.
 ///
 /// Returns `true` if the key is valid, `false` otherwise.
-/// Returns `true` (allow) when `expected_key` is None (key not configured — warn in startup).
+/// Returns `false` (deny) when `expected_key` is None — callers must explicitly opt out of
+/// auth if needed. The startup check in `run_mcp_serve` rejects a missing key before any
+/// requests are served, so None reaching here is a programming error.
 pub fn check_mcp_auth(
     auth_header: Option<&str>,
     token_param: Option<&str>,
     expected_key: Option<&str>,
 ) -> bool {
     let key = match expected_key {
-        None => return true, // no key configured — allow (startup warns about this)
+        None => {
+            eprintln!("[MCP] check_mcp_auth called with no key configured — denying");
+            return false;
+        }
         Some(k) => k,
     };
 
@@ -61,7 +66,7 @@ mod tests {
     }
 
     #[test]
-    fn no_key_configured_allows() {
-        assert!(check_mcp_auth(None, None, None));
+    fn no_key_configured_denies() {
+        assert!(!check_mcp_auth(None, None, None));
     }
 }

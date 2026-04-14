@@ -51,6 +51,7 @@ use num_bigint::BigInt;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 use std::sync::LazyLock;
 
 /// BN254 scalar field order. SHA-256 outputs ~25% values outside this range; reduce mod r.
@@ -84,7 +85,8 @@ const FORK2_TIMEOUT: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct McpHandlerState {
     /// Raw 32-byte BabyJubJub key seed (for reconstruction in spawn_blocking).
-    pub key_seed: Arc<[u8; 32]>,
+    /// Wrapped in Zeroizing so the stack/heap copy is zeroed on drop.
+    pub key_seed: Arc<Zeroizing<[u8; 32]>>,
     /// BabyJubJub public key hex (cached at startup for audit records).
     pub public_key_hex: String,
     /// MCP operating mode.
@@ -128,7 +130,7 @@ impl McpHandlerState {
         let seed_bytes = std::fs::read(&key_path)
             .context("read key seed for MCP handler")?;
         anyhow::ensure!(seed_bytes.len() == 32, "key seed must be 32 bytes");
-        let mut seed = [0u8; 32];
+        let mut seed = Zeroizing::new([0u8; 32]);
         seed.copy_from_slice(&seed_bytes);
 
         // Canonicalize zemtik_home so that starts_with() works correctly on macOS
@@ -158,7 +160,16 @@ impl McpHandlerState {
                 .build()
                 .context("build reqwest client")?,
             fetch_timeout: Duration::from_secs(config.mcp_fetch_timeout_secs),
-            allowed_paths: config.mcp_allowed_paths.clone(),
+            // Canonicalize allowed_paths at construction time so starts_with() comparisons
+            // work correctly even when entries contain symlink components or relative paths.
+            allowed_paths: config.mcp_allowed_paths.iter()
+                .map(|p| {
+                    let expanded = crate::config::expand_tilde(p);
+                    expanded.canonicalize()
+                        .map(|c| c.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| expanded.to_string_lossy().into_owned())
+                })
+                .collect(),
             allowed_fetch_domains: config.mcp_allowed_fetch_domains.clone(),
             is_stdio,
             zemtik_home,
@@ -421,11 +432,13 @@ impl ZemtikMcpHandler {
                 Ok(Ok(_)) => {}
             }
         });
-        self.state
+        let mut handles = self.state
             .pending_fork2
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(handle);
+            .unwrap_or_else(|e| e.into_inner());
+        // Drain completed handles to prevent unbounded growth in SSE mode.
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
     }
 
     /// Returns true if the domain is not in the allowlist (bypass event).
@@ -543,8 +556,9 @@ fn sign_and_write(
     let message = format!("{}{}{}{}", tool_name, input_hash, output_hash, ts);
     let message_hash = sha256_bytes(message.as_bytes());
 
-    let seed = state.key_seed.as_ref().to_vec();
-    let key = babyjubjub_rs::PrivateKey::import(seed)
+    // Use Zeroizing<Vec<u8>> so the heap copy of the seed is zeroed on drop.
+    let seed: Zeroizing<Vec<u8>> = Zeroizing::new(state.key_seed.as_ref().to_vec());
+    let key = babyjubjub_rs::PrivateKey::import(seed.to_vec())
         .map_err(|e| anyhow::anyhow!("import key: {}", e))?;
 
     let msg_raw = BigInt::from_bytes_le(num_bigint::Sign::Plus, &message_hash);
@@ -585,6 +599,8 @@ pub fn open_mcp_audit_db(db_path: &Path) -> anyhow::Result<Connection> {
     }
     let conn = Connection::open(db_path)
         .with_context(|| format!("open mcp_audit.db at {}", db_path.display()))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        .context("set WAL mode on mcp_audit.db")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS mcp_audit (
             receipt_id      TEXT PRIMARY KEY,
@@ -987,7 +1003,14 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        s[..max].to_string()
+        // Find the largest char boundary at or before max bytes to avoid panicking
+        // on multi-byte UTF-8 sequences.
+        let boundary = s.char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i < max)
+            .last()
+            .unwrap_or(0);
+        s[..boundary].to_string()
     }
 }
 

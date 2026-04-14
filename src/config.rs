@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 /// Expand a leading `~` to the home directory so users can write `~/foo` in
 /// config.yaml and env vars.  Paths that don't start with `~` are unchanged.
-fn expand_tilde(s: &str) -> PathBuf {
+pub fn expand_tilde(s: &str) -> PathBuf {
     if let Some(rest) = s.strip_prefix("~/") {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
         home.join(rest)

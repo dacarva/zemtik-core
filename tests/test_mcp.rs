@@ -20,9 +20,10 @@ fn test_mcp_auth_invalid_key() {
 }
 
 #[test]
-fn test_mcp_auth_no_key_allows_all() {
-    assert!(check_mcp_auth(None, None, None));
-    assert!(check_mcp_auth(Some("Bearer anything"), None, None));
+fn test_mcp_auth_no_key_denies() {
+    // No key configured must deny — unsafe-default inversion (adversarial finding #11)
+    assert!(!check_mcp_auth(None, None, None));
+    assert!(!check_mcp_auth(Some("Bearer anything"), None, None));
 }
 
 #[test]
