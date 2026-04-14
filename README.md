@@ -36,7 +36,29 @@ The response includes an `evidence` block with `data_exfiltrated: 0` and `attest
 
 To use your own data: mount a custom `schema_config.json` — see the commented volume in `docker-compose.yml`.
 
-> **POC status (v0.11.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+**Build variants** — the default image uses regex-based intent matching (~150MB). Two optional upgrades:
+
+```bash
+# Semantic intent matching (BGE-small-en ONNX, ~450MB image; model downloads ~130MB on first start)
+docker build --build-arg BUILD_FEATURES=embed \
+             --build-arg BUILDER_IMAGE=ubuntu:24.04 \
+             --build-arg RUNTIME_IMAGE=ubuntu:24.04 \
+             -t zemtik:embed .
+
+# ZK SlowLane support — adds nargo + bb (~+300MB; requires INSTALL_ZK_TOOLS=true)
+docker build --build-arg INSTALL_ZK_TOOLS=true -t zemtik:zk .
+
+# Both combined
+docker build --build-arg BUILD_FEATURES=embed \
+             --build-arg BUILDER_IMAGE=ubuntu:24.04 \
+             --build-arg RUNTIME_IMAGE=ubuntu:24.04 \
+             --build-arg INSTALL_ZK_TOOLS=true \
+             -t zemtik:embed-zk .
+```
+
+The ubuntu:24.04 base is required for embed because the ONNX Runtime C++ layer needs glibc 2.38+ (Debian Bookworm ships 2.36).
+
+> **POC status (v0.13.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -492,7 +514,7 @@ zemtik-core/
 │   ├── SCALING.md            # Recursive proofs, production path, why remote proving breaks ZK
 │   ├── SUPPORTED_QUERIES.md  # v1 query contract: supported patterns, error reference
 │   └── ZK_CIRCUITS.md  # Deep explanation on the zk circuits
-├── Dockerfile            # Multi-stage build; non-root user; FastLane only (no nargo/bb)
+├── Dockerfile            # Multi-stage build; non-root user; BUILD_FEATURES=regex-only (default, ~150MB) or embed (ONNX semantic intent, ~450MB); INSTALL_ZK_TOOLS=true adds nargo+bb (~+300MB)
 ├── docker-compose.yml    # Compose file for local Docker runs
 └── .env.example
 ```

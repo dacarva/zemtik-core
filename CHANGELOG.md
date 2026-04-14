@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.1] - 2026-04-14
+
+### Added
+- **Embed Docker build profile** — new `BUILD_FEATURES=embed` build arg compiles fastembed BGE-small-en ONNX into the image for semantic intent matching (~450MB). Use with `BUILDER_IMAGE=ubuntu:24.04` and `RUNTIME_IMAGE=ubuntu:24.04` (required: ONNX Runtime links against glibc 2.38+, not available on Debian Bookworm).
+
+### Fixed
+- **`INSTALL_ZK_TOOLS=true` Docker build** — corrected Barretenberg download URL and version (`v4.0.0-nightly.20260120`, artifact `barretenberg-{amd64|arm64}-linux.tar.gz`). The previous URL (`aztec-packages-v0.82.2/barretenberg-x86_64-linux-gnu.tar.gz`) returned HTTP 404 and hard-blocked every ZK-enabled Docker build.
+- **Multi-platform `INSTALL_ZK_TOOLS`** — nargo and bb binaries are now selected based on `TARGETARCH` (`amd64`/`arm64`) so `docker buildx build --platform linux/amd64,linux/arm64` succeeds for ZK-enabled images.
+- **Intent eval CI gate** — `eval/intent_eval.rs` now handles `Route::GeneralLane` in its match expression (added in v0.11.0 but missing from the eval harness). The non-exhaustive pattern caused the `release.yml` eval job to fail at compile time, which cascaded to cancel the Docker multi-platform build job via `needs: eval`.
+- **Non-ASCII character in ZK circuit comment** — replaced `≈` (U+2248) with `~` in `circuit/sum/src/main.nr:66`. Some toolchain integrations rejected the file as invalid ASCII.
+
 ## [0.13.0] - 2026-04-14
 
 ### Added

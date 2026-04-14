@@ -575,15 +575,22 @@ ALTER TABLE financial_transactions
     (EXTRACT(EPOCH FROM created_at)::BIGINT) STORED;
 ```
 
-### Step 4 — Build with ZK tools if needed
+### Step 4 — Choose your build profile
 
-If any table has `"sensitivity": "critical"`, install nargo and bb:
+The default image uses regex-based intent matching. Pick the profile that matches your needs:
 
-```bash
-docker compose build --build-arg INSTALL_ZK_TOOLS=true
-```
+| Profile | Command | Size | Intent matching | ZK proofs |
+|---------|---------|------|----------------|-----------|
+| Default | `docker compose build` | ~150MB | Regex (exact table key) | No |
+| Embed | `docker compose build --build-arg BUILD_FEATURES=embed --build-arg BUILDER_IMAGE=ubuntu:24.04 --build-arg RUNTIME_IMAGE=ubuntu:24.04` | ~450MB | Semantic (BGE-small-en ONNX) | No |
+| ZK | `docker compose build --build-arg INSTALL_ZK_TOOLS=true` | ~450MB | Regex | Yes |
+| Full | All args above combined | ~750MB | Semantic | Yes |
 
-Or set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` to use FastLane-only mode (no ZK proofs).
+The embed profile requires ubuntu:24.04 base images — ONNX Runtime needs glibc 2.38+, which Debian Bookworm (2.36) does not provide.
+
+On first proxy start, the embed profile downloads the BGE-small-en model (~130MB) to `~/.zemtik/models/`. Set `ZEMTIK_INTENT_BACKEND=regex` to skip the download and force regex matching.
+
+Or set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` to use FastLane-only mode without installing ZK tools.
 
 ### Step 5 — Smoke-test
 
