@@ -448,8 +448,18 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         ));
     }
 
-    // Path allowlist check
-    if !state.allowed_paths.is_empty() {
+    // Path allowlist check.
+    // Mirrors fetch domain logic: empty = allow-all in STDIO, deny-all in SSE.
+    if state.allowed_paths.is_empty() {
+        if !state.is_stdio {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                "file_access_denied: ZEMTIK_MCP_ALLOWED_PATHS is required in SSE mode".to_string(),
+                None,
+            ));
+        }
+        // STDIO + empty allowlist → allow all (except the P0 key-protection above)
+    } else {
         let path_str_norm = canonical.to_string_lossy();
         let allowed = state.allowed_paths.iter().any(|prefix| {
             path_str_norm.starts_with(prefix.as_str())

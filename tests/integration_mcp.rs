@@ -142,3 +142,33 @@ fn test_key_path_denied_in_read_file() {
         err.message
     );
 }
+
+#[test]
+fn test_sse_empty_allowlist_denies_all() {
+    // Regression: ISSUE-002 — SSE mode with empty ZEMTIK_MCP_ALLOWED_PATHS allowed
+    // all file reads. The comment said "deny-all in SSE" but the code did "allow-all".
+    // Found by /qa on 2026-04-14
+    // Report: .gstack/qa-reports/qa-report-zemtik-core-2026-04-14.md
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(&dir);
+    config.mcp_allowed_paths = vec![]; // empty — deny-all in SSE
+
+    // is_stdio=false simulates SSE/HTTP mode
+    let state = McpHandlerState::from_config(&config, false).unwrap();
+
+    // Write a file outside zemtik_home
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("public.txt");
+    std::fs::write(&f, b"hello").unwrap();
+
+    let result = zemtik::mcp_proxy::read_file_blocking(
+        &f.to_string_lossy(), &state
+    );
+    assert!(result.is_err(), "SSE with empty allowlist must deny all reads");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("ZEMTIK_MCP_ALLOWED_PATHS is required"),
+        "error must mention ZEMTIK_MCP_ALLOWED_PATHS, got: {}",
+        err.message
+    );
+}
