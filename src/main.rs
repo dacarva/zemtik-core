@@ -269,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
             &app_config.receipts_dir,
             "SUM", // CLI pipeline is hardcoded SUM
             None,  // actual_row_count: CLI pipeline uses exactly 500 seeded rows
-            &bank_key.key.to_vec(),
+            bank_key.key.as_ref(),
         ) {
             Ok(br) => {
                 println!("[BUNDLE] Receipt: {}", br.bundle_path.display());

@@ -1877,6 +1877,7 @@ impl Drop for RunDirGuard {
 /// `outgoing_prompt_hash_field` — BN254 Field encoding of SHA-256(original_user_prompt),
 /// written to Prover.toml as circuit public input #6 and included in the signed manifest.
 /// Format: "0x<64 hex chars>" (top 2 bits cleared for BN254 field safety).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_zk_pipeline(
     config: Arc<AppConfig>,
     key_bytes: Vec<u8>,
