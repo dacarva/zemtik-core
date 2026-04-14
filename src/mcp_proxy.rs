@@ -837,7 +837,7 @@ pub async fn run_mcp_stdio(config: AppConfig) -> anyhow::Result<()> {
 /// Run the MCP server in SSE/HTTP mode on ZEMTIK_MCP_BIND_ADDR.
 pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
     // Hard startup error: ZEMTIK_MCP_API_KEY required in SSE mode (blank counts as absent)
-    if config.mcp_api_key.as_ref().map_or(true, |k| k.trim().is_empty()) {
+    if config.mcp_api_key.as_ref().is_none_or(|k| k.trim().is_empty()) {
         anyhow::bail!(
             "ZEMTIK_MCP_API_KEY is required in mcp-serve mode. \
              Generate a key: openssl rand -hex 32"
