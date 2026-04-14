@@ -1,9 +1,40 @@
 # ============================================================
 # Stage 1: Builder
 # ============================================================
-# regex-only build: no fastembed/ONNX dependency, no nargo/bb required at build time.
-# Result: ~150MB runtime image (FastLane only) or ~450MB (INSTALL_ZK_TOOLS=true).
-FROM rust:1.88-bookworm AS builder
+# BUILD_FEATURES controls which Cargo features are compiled in:
+#   regex-only  (default) — no fastembed/ONNX; ~150MB image, fast start, regex intent matching
+#   embed       — includes fastembed BGE-small-en ONNX; ~450MB image, semantic intent matching
+#                 (model downloaded to ~/.zemtik/models/ on first proxy start, ~130MB)
+# Result with ZK tools: add ~300MB on top of either base size.
+#
+# BUILDER_IMAGE / RUNTIME_IMAGE base image selection:
+#   regex-only  → rust:1.88-bookworm builder + debian:bookworm-slim runtime (default)
+#   embed       → ubuntu:24.04 builder + ubuntu:24.04 runtime
+#                 Required: ort-sys (ONNX Runtime) links against glibc 2.38+ symbols
+#                 (__isoc23_strtoll, __cxa_call_terminate) not present in glibc 2.36
+#                 (Debian Bookworm). Ubuntu 24.04 ships glibc 2.39.
+ARG BUILDER_IMAGE=rust:1.88-bookworm
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+ARG BUILD_FEATURES=regex-only
+
+FROM ${BUILDER_IMAGE} AS builder
+
+ARG BUILD_FEATURES
+
+# When using ubuntu:24.04 as BUILDER_IMAGE (needed for embed/ONNX builds),
+# Rust is not pre-installed. Bootstrap it via rustup with the same toolchain
+# version used by the standard rust:1.88-bookworm image.
+RUN if ! command -v cargo > /dev/null 2>&1; then \
+    apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends \
+        curl gcc g++ pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+         | sh -s -- -y --profile minimal --default-toolchain 1.88 \
+    && echo '. $HOME/.cargo/env' >> /root/.bashrc; \
+  fi
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
@@ -11,7 +42,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 # Create stub lib/main so `cargo build --release` can resolve the manifest.
 RUN mkdir -p src && echo 'fn main(){}' > src/main.rs && echo '' > src/lib.rs
-RUN cargo build --release --no-default-features --features regex-only 2>&1 | tail -5 || true
+RUN cargo build --release --no-default-features --features ${BUILD_FEATURES} 2>&1 | tail -5 || true
 
 # Copy real sources and rebuild (only zemtik crate recompiles — deps are cached).
 COPY src/ src/
@@ -19,13 +50,14 @@ COPY src/ src/
 # original mtime, making files appear older than the cached stub compilation).
 RUN find src -name '*.rs' -exec touch {} +
 
-RUN cargo build --release --no-default-features --features regex-only \
+RUN cargo build --release --no-default-features --features ${BUILD_FEATURES} \
     && strip target/release/zemtik
 
 # ============================================================
 # Stage 2: Runtime
 # ============================================================
-FROM debian:bookworm-slim
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
 
 # Set to "true" to install nargo + bb for ZK SlowLane support (~300MB image increase).
 # When enabled, also remove ZEMTIK_SKIP_CIRCUIT_VALIDATION from your compose file
