@@ -63,7 +63,7 @@ fn main(
     // `let _ = ...` (dead-code discard) is insufficient; the Noir optimizer eliminates
     // gates whose results are never used. An assert is a side effect that survives.
     // In practice outgoing_prompt_hash is SHA-256(prompt) with top 3 bits masked (AND 0x1f).
-    // Masking 3 bits guarantees the value < BN254 Fr modulus p ≈ 0x30644e72...
+    // Masking 3 bits guarantees the value < BN254 Fr modulus p (~0x30644e72...).
     // The probability it equals zero is ~2^-253 (top 3 bits masked).
     assert(outgoing_prompt_hash != 0);
     total
