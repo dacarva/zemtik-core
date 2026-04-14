@@ -504,7 +504,7 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         }
     }
 
-    // Metadata check first — no full read if file too large
+    // Metadata check first — fast rejection for obviously oversized files.
     let metadata = std::fs::metadata(path).map_err(|e| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
         format!("file_not_found_or_permission_denied: {}", e),
@@ -522,11 +522,27 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         ));
     }
 
-    let bytes = std::fs::read(path).map_err(|e| rmcp::ErrorData::new(
+    // Bounded read: prevents TOCTOU — file may grow between metadata check and read.
+    // We read at most FILE_SIZE_CAP+1 bytes; if we get more, the file grew past the cap.
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).map_err(|e| rmcp::ErrorData::new(
+        rmcp::model::ErrorCode(-32002),
+        format!("file_open_error: {}", e),
+        None,
+    ))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(FILE_SIZE_CAP + 1).read_to_end(&mut bytes).map_err(|e| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
         format!("file_read_error: {}", e),
         None,
     ))?;
+    if bytes.len() as u64 > FILE_SIZE_CAP {
+        return Err(rmcp::ErrorData::new(
+            rmcp::model::ErrorCode(-32003),
+            format!("file_too_large: read {} bytes exceeds 10MB cap", bytes.len()),
+            None,
+        ));
+    }
 
     let content_hash = sha256_hex(&bytes);
     let preview = truncate(&String::from_utf8_lossy(&bytes), PREVIEW_LEN);
@@ -534,7 +550,7 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
     Ok(ReadFileResult {
         content_hash,
         preview,
-        size_bytes: metadata.len(),
+        size_bytes: bytes.len() as u64,
     })
 }
 
@@ -912,11 +928,24 @@ async fn summary_handler(
     .into_response()
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 fn render_audit_html(records: &[McpAuditRecord]) -> String {
     let rows: String = records.iter().map(|r| {
         format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}ms</td><td>{}</td></tr>",
-            r.ts, r.tool_name, r.input_hash, r.output_hash, r.duration_ms, r.mode
+            escape_html(&r.ts),
+            escape_html(&r.tool_name),
+            escape_html(&r.input_hash),
+            escape_html(&r.output_hash),
+            r.duration_ms,
+            escape_html(&r.mode),
         )
     }).collect();
 
@@ -1018,7 +1047,14 @@ fn extract_domain(url: &str) -> Option<String> {
     let without_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    let domain = without_scheme.split('/').next()?;
-    let domain = domain.split(':').next()?;
-    Some(domain.to_lowercase())
+    // Strip path, query, and fragment
+    let authority = without_scheme.split('/').next()?;
+    // Strip userinfo (user:pass@host) — rfind handles colons in passwords
+    let host_port = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    // Strip port
+    let host = host_port.split(':').next()?;
+    Some(host.to_lowercase())
 }
