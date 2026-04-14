@@ -128,9 +128,16 @@ impl McpHandlerState {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&seed_bytes);
 
-        let zemtik_home = config.keys_dir.parent()
+        // Canonicalize zemtik_home so that starts_with() works correctly on macOS
+        // where /var/folders is a symlink to /private/var/folders. Without
+        // canonicalization, path.canonicalize() returns the /private/... form but
+        // zemtik_home stores the /var/... form, causing the P0 key-protection
+        // check to silently pass (bypass).
+        let raw_zemtik_home = config.keys_dir.parent()
             .unwrap_or(Path::new("/nonexistent"))
             .to_path_buf();
+        let zemtik_home = raw_zemtik_home.canonicalize()
+            .unwrap_or(raw_zemtik_home);
 
         let mode = if config.mcp_mode == "governed" {
             McpMode::Governed
@@ -421,14 +428,14 @@ impl ZemtikMcpHandler {
 // Blocking helpers (run in spawn_blocking)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-struct ReadFileResult {
+#[derive(Debug, Serialize)]
+pub struct ReadFileResult {
     content_hash: String,
     preview: String,
     size_bytes: u64,
 }
 
-fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<ReadFileResult, rmcp::ErrorData> {
+pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<ReadFileResult, rmcp::ErrorData> {
     let path = Path::new(path_str);
 
     // P0 security: deny access to ~/.zemtik/ (signing key protection)

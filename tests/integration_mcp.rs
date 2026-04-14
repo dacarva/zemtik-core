@@ -110,11 +110,35 @@ fn test_mcp_tools_malformed_returns_error() {
 
 #[test]
 fn test_key_path_denied_in_read_file() {
-    // Verify that ~/.zemtik/ prefix is denied by checking the zemtik_home logic.
+    // Regression: ISSUE-001 — zemtik_home symlink bypass on macOS
+    // Found by /qa on 2026-04-14
+    // Report: .gstack/qa-reports/qa-report-zemtik-core-2026-04-14.md
+    //
+    // zemtik_home must be canonicalized at construction time. On macOS,
+    // /var/folders is a symlink to /private/var/folders. Without canonicalization,
+    // path.canonicalize() returns /private/... but zemtik_home stores /var/...,
+    // causing starts_with() to return false and silently allowing reads of ~/.zemtik/.
     let dir = tempfile::tempdir().unwrap();
     let config = test_config(&dir);
     let state = McpHandlerState::from_config(&config, true).unwrap();
 
-    // The zemtik_home should be the parent of keys_dir
-    assert_eq!(state.zemtik_home, dir.path().to_path_buf());
+    // zemtik_home must equal the CANONICAL parent of keys_dir
+    let expected = dir.path().canonicalize().unwrap();
+    assert_eq!(state.zemtik_home, expected,
+        "zemtik_home must be canonical so starts_with() correctly catches symlinked paths");
+
+    // Directly test that a file inside zemtik_home is denied.
+    // Create a real file inside the temp dir (simulates ~/.zemtik/keys/bank_sk).
+    let sentinel = dir.path().join("sentinel.txt");
+    std::fs::write(&sentinel, b"secret").unwrap();
+    let sentinel_str = sentinel.to_string_lossy().to_string();
+
+    let result = zemtik::mcp_proxy::read_file_blocking(&sentinel_str, &state);
+    assert!(result.is_err(), "read inside zemtik_home must be denied");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("file_access_denied"),
+        "error message must say file_access_denied, got: {}",
+        err.message
+    );
 }
