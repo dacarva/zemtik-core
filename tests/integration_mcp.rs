@@ -143,6 +143,58 @@ fn test_key_path_denied_in_read_file() {
     );
 }
 
+/// Regression test for the symlink-bypass P0 (commit 17861a0).
+///
+/// Attack: create a symlink OUTSIDE ~/.zemtik/ that points to a file INSIDE
+/// ~/.zemtik/ (e.g., the signing key). Without canonicalize() on zemtik_home,
+/// path.canonicalize() returns /private/var/... while zemtik_home stores /var/...,
+/// so starts_with() silently passes and the read proceeds.
+///
+/// Correct behavior: read_file_blocking() must canonicalize the input path AND
+/// compare against a canonicalized zemtik_home. A symlink chain that resolves into
+/// zemtik_home must be denied.
+#[test]
+fn test_symlink_into_zemtik_home_denied() {
+    let zemtik_dir = tempfile::tempdir().unwrap();
+    let config = test_config(&zemtik_dir);
+    let state = McpHandlerState::from_config(&config, true).unwrap();
+
+    // Create a "secret" file inside zemtik_home (simulates bank_sk)
+    let secret = zemtik_dir.path().join("keys").join("bank_sk");
+    std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+    std::fs::write(&secret, b"secret_key_bytes").unwrap();
+
+    // Create a symlink OUTSIDE zemtik_home that points INTO it
+    let outside_dir = tempfile::tempdir().unwrap();
+    let link_path = outside_dir.path().join("innocent_link.txt");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&secret, &link_path).unwrap();
+    #[cfg(not(unix))]
+    {
+        // On non-Unix, skip symlink creation and just verify direct access is denied
+        let _ = (secret, link_path, outside_dir);
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        let result = zemtik::mcp_proxy::read_file_blocking(
+            &link_path.to_string_lossy(),
+            &state,
+        );
+        assert!(
+            result.is_err(),
+            "symlink pointing into zemtik_home must be denied (P0 key protection)"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("file_access_denied"),
+            "error must say file_access_denied, got: {}",
+            err.message
+        );
+    }
+}
+
 #[test]
 fn test_sse_empty_allowlist_denies_all() {
     // Regression: ISSUE-002 — SSE mode with empty ZEMTIK_MCP_ALLOWED_PATHS allowed
