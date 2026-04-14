@@ -420,6 +420,7 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 - **Effort:** S (human: ~2h / CC: ~15min)
 - **Priority:** P2 — required before installing on any untrusted network. For the v0.6.0 pilot, the CDO deploys on an internal LAN — document that `OPENAI_API_KEY` must NOT be set on the server (require callers to pass their own key).
 - **Depends on:** Commercial Readiness Sprint (v0.6.0) merged.
+- **MCP note from /qa 2026-04-14:** Same gap exists for the MCP SSE endpoint at ZEMTIK_MCP_BIND_ADDR. Startup warning added (commit 6005bd4, ISSUE-004) but HTTP-layer auth on `/mcp` is not yet implemented. Tower middleware `ValidateRequestHeaderLayer::bearer` is the path forward for both proxy and MCP.
 
 ### table_name field in TableConfig (P3, Pilot Week 1)
 - **What:** Add `table_name: Option<String>` to `TableConfig` in `config.rs`. If set, use this as the Supabase table name in `query_sum_by_category` instead of the schema_config key.
@@ -672,6 +673,14 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 
 ## MCP pilot deferred items — added from feat/mcp-attestation-proxy eng review (2026-04-14)
 
+### mcp_tools.json dynamic tool wiring (P1, before first SSE customer) — NEW from /qa 2026-04-14
+
+- **What:** Wire `load_mcp_tools()` into `McpHandlerState` and dispatch dynamic tools in `list_tools()` + `call_tool()`. Currently the parser exists and is tested but tools from `mcp_tools.json` are never loaded at startup and never appear in the tool list (ISSUE-005).
+- **Why:** The feature is documented and tested but non-functional. Any operator who creates an `mcp_tools.json` file will see it silently ignored. The `zemtik_attest` tool mentioned in the module docstring also has no handler.
+- **How to apply:** (1) Add `dynamic_tools: Vec<McpToolDef>` to `McpHandlerState`, (2) call `load_mcp_tools` in `from_config`, (3) append dynamic tools in `list_tools()`, (4) add a dispatch arm in `call_tool()` that forwards to a pluggable handler (or returns a structured error if no handler registered).
+- **Effort:** S (CC: ~20min)
+- **Depends on:** MCP STDIO/SSE shipped.
+
 ### mcp_tools.json reload on SIGHUP (P2, before second SSE customer)
 
 - **What:** Reload `mcp_tools.json` on SIGHUP without restarting `zemtik mcp-serve`. New tools become available; removed tools disappear; malformed reload → log error + keep old config (don't crash).
@@ -689,3 +698,4 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 - **Cons:** Adds IT setup friction on pilot day — the engineer must configure `ZEMTIK_MCP_ALLOWED_PATHS` before handing the workstation to the user. Empty = start-up warning, not hard error.
 - **Context:** When promoting, make empty `ZEMTIK_MCP_ALLOWED_PATHS` warn at startup ("no path allowlist configured — all paths allowed"). Add a startup validation block entry for MCP similar to schema_config.json. Document in TROUBLESHOOTING.md.
 - **Depends on:** MCP STDIO mode shipped (feat/mcp-attestation-proxy)
+- **Partial fix by /qa 2026-04-14:** SSE mode with empty `ZEMTIK_MCP_ALLOWED_PATHS` now denies all reads (ISSUE-002, commit 118f438). STDIO mode still allow-all when empty. This TODO tracks promoting STDIO to the same enforcement.
