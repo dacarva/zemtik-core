@@ -41,6 +41,7 @@ fn sample_receipt(id: &str) -> Receipt {
         actual_row_count: None,
         rewrite_method: None,
         rewritten_query: None,
+        manifest_key_id: None,
     }
 }
 
@@ -94,7 +95,7 @@ fn test_migration_on_fresh_db() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 7, "expected migration to reach version 7");
+    assert_eq!(version, 8, "expected migration to reach version 8");
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn test_migration_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 7, "migration should be idempotent at version 7");
+    assert_eq!(version, 8, "migration should be idempotent at version 8");
 }
 
 #[test]
@@ -151,7 +152,7 @@ fn test_migration_v2_to_v3() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 7, "v2→v7 migration must bump to version 7");
+    assert_eq!(version_after, 8, "v2→v8 migration must bump to version 8");
 
     // Verify the column exists
     let col_count: i64 = conn
@@ -216,7 +217,7 @@ fn test_migration_v4_to_v5() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 7, "v4→v7 migration must bump to version 7");
+    assert_eq!(version_after, 8, "v4→v8 migration must bump to version 8");
 
     // Regression: ISSUE-001 — actual_row_count column missing after v4→v5 migration
     // Found by /qa on 2026-04-07
@@ -403,7 +404,7 @@ fn test_migration_v5_to_v6_adds_rewrite_columns() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 7, "v5→v7 migration must bump to version 7");
+    assert_eq!(version_after, 8, "v5→v8 migration must bump to version 8");
 
     for col in &["rewrite_method", "rewritten_query"] {
         let count: i64 = conn
@@ -463,7 +464,7 @@ fn test_migration_v6_to_v7_adds_index() {
     let version_after: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version_after, 7, "v6→v7 migration must bump to version 7");
+    assert_eq!(version_after, 8, "v6→v8 migration must bump to version 8");
 
     let idx_count: i64 = conn
         .query_row(

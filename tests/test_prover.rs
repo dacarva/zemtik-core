@@ -64,7 +64,7 @@ fn generate_batched_prover_toml_creates_file() {
     let sig = dummy_sig();
     let params = dummy_params();
 
-    generate_batched_prover_toml(&[(txns, sig)], &params, dir.path()).unwrap();
+    generate_batched_prover_toml(&[(txns, sig)], &params, dir.path(), "0x0000000000000000000000000000000000000000000000000000000000000000").unwrap();
 
     let content = std::fs::read_to_string(dir.path().join("Prover.toml")).unwrap();
     assert!(content.contains("target_category_hash = \""));
@@ -79,7 +79,7 @@ fn generate_batched_prover_toml_embeds_query_params() {
     let txns = dummy_txns(BATCH_SIZE);
     let sig = dummy_sig();
 
-    generate_batched_prover_toml(&[(txns, sig)], &params, dir.path()).unwrap();
+    generate_batched_prover_toml(&[(txns, sig)], &params, dir.path(), "0x0000000000000000000000000000000000000000000000000000000000000000").unwrap();
 
     let content = std::fs::read_to_string(dir.path().join("Prover.toml")).unwrap();
     assert!(content.contains("start_time = \"1704067200\""));

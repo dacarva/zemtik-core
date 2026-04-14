@@ -665,3 +665,21 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 - **VALIDATE_ONLY + SKIP_CIRCUIT_VALIDATION** — both flags now stack correctly; VALIDATE_ONLY no longer exits 1 when circuit validation is suppressed.
 - **`/health` status_summary** — reports `"warnings"` when ZK tools are absent, not `"ok"`.
 - **Test safety** — `startup_validation_skipped_when_env_set` uses `#[serial]` to prevent env var race in parallel tests.
+
+---
+
+## BN254 field encoding + HKDF safety (P2, before second Aztec demo)
+
+Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy-yawning-creek).
+
+### SHA-256 → BN254 truncation safety
+- **What:** SHA-256 produces 256 bits; BN254 scalar field is ~254 bits (2^254 - delta). Truncating the 2 MSBs is safe for nearly all inputs but can produce `value == 0` or `value >= field_modulus` in extreme edge cases. Add a check: if truncated value >= BN254_FIELD_ORDER or == 0, return Err with a clear message ("prompt hash encoding out of BN254 range — retry or report this input").
+- **Why:** The Aztec engineer will inspect the public input encoding during review. A panic or silent wrong value would undermine the cryptographic credibility of the commitment.
+- **Context:** The field modulus is `21888242871839275222246405745257275088548364400416034343698204186575808495617` (BN254 scalar field). SHA-256 of any 256-bit random input has probability ~2^-254 of landing out of range — extremely rare but worth a runtime guard.
+- **Effort:** XS (CC: ~5 min)
+
+### HKDF derive_manifest_signing_key() error handling
+- **What:** `derive_manifest_signing_key()` should return `anyhow::Result<ed25519_dalek::SigningKey>` instead of unwrapping HKDF expand. If `hk.expand()` fails (e.g., bad OKM length), it would panic in the hot path.
+- **Why:** Hard startup error is acceptable (matches ZEMTIK_TUNNEL_API_KEY pattern), but panic is not. Use `hk.expand(...)?.` and propagate as startup error.
+- **Context:** HKDF expand can only fail if the output length exceeds 255 * HashLen. For SHA-256 with 32-byte output this will never fail in practice — but the guard is cheap and the Aztec engineer will check error handling.
+- **Effort:** XS (CC: ~2 min)

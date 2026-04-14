@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Context;
 use chrono::Utc;
+use ed25519_dalek::Signer;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
@@ -52,14 +54,18 @@ pub fn parse_bb_version(raw: &str) -> Option<(u32, u32, u32)> {
 /// `circuit_dir/target/zemtik_circuit.json`, and writes the bundle atomically to
 /// `receipts_dir/{uuid}.zip` via a temp file + rename.
 ///
-/// Bundle contents:
+/// Bundle contents (v3):
 ///   proof.bin                — raw proof bytes (for `bb verify -p`)
 ///   vk.bin                   — verification key (for `bb verify -k`)
 ///   public_inputs            — raw binary public inputs (for `bb verify -i`)
 ///   public_inputs_readable.json — human-readable labeled public inputs
 ///   circuit_hash.txt         — SHA-256 of the circuit ACIR JSON
-///   manifest.json            — sidecar SHA-256 for tamper detection (v0.5.1+)
+///   manifest.json            — ed25519-signed manifest (v3) with 5 artifact hashes
 ///   request_meta.json        — bundle metadata
+///
+/// `signing_key_bytes` must be the 32-byte `bank_sk` seed. An ed25519 signing key
+/// is derived via HKDF-SHA256(salt=zeros, info="zemtik-manifest-signing-v1").
+/// The manifest is signed using JCS (RFC 8785) canonical JSON.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_bundle(
     params: &QueryParams,
@@ -74,6 +80,7 @@ pub fn generate_bundle(
     receipts_dir: &Path,
     agg_type: &str,
     actual_row_count: Option<usize>,
+    signing_key_bytes: &[u8],
 ) -> anyhow::Result<BundleResult> {
     let bundle_id = Uuid::new_v4().to_string();
     let bb_version = detect_bb_version();
@@ -98,7 +105,7 @@ pub fn generate_bundle(
     let public_inputs_bytes = std::fs::read(&public_inputs_path)
         .with_context(|| format!("read public_inputs from {}", public_inputs_path.display()))?;
 
-    // Build human-readable public inputs JSON
+    // Build human-readable public inputs JSON (v3: includes outgoing_prompt_hash)
     let public_inputs_readable = serde_json::json!({
         "target_category_hash": params.target_category_hash,
         "category_name": params.category_name,
@@ -106,6 +113,7 @@ pub fn generate_bundle(
         "end_time": params.end_time,
         "bank_pub_key_x": sig.pub_key_x,
         "bank_pub_key_y": sig.pub_key_y,
+        "outgoing_prompt_hash": outgoing_prompt_hash.unwrap_or(""),
         "verified_aggregate": aggregate,
         "agg_type": agg_type,
         "actual_row_count": actual_row_count
@@ -113,31 +121,22 @@ pub fn generate_bundle(
     let public_inputs_readable_bytes =
         serde_json::to_vec_pretty(&public_inputs_readable).context("serialize public_inputs_readable")?;
 
-    // Compute SHA-256 of sidecar bytes for manifest integrity
+    // Compute SHA-256 hashes for all five artifacts
+    let proof_hash_hex = format!("sha256:{}", hex::encode(Sha256::digest(&proof_bytes)));
+    let vk_hash_hex = format!("sha256:{}", hex::encode(Sha256::digest(&vk_bytes)));
+    let public_inputs_hash_hex = format!("sha256:{}", hex::encode(Sha256::digest(&public_inputs_bytes)));
     let sidecar_hash = format!("sha256:{}", hex::encode(Sha256::digest(&public_inputs_readable_bytes)));
 
-    // Build manifest.json — makes the sidecar tamper-evident
-    let manifest = serde_json::json!({
-        "zemtik_version": "0.5.1",
-        "bundle_version": 2,
-        "created_at": timestamp,
-        "sidecar_hash": sidecar_hash,
-        "algorithm": "sha256"
-    });
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).context("serialize manifest")?;
-
-    // Build request_meta.json
+    // Build request_meta.json BEFORE manifest (its hash goes into the manifest)
     let request_meta = serde_json::json!({
         "bundle_id": bundle_id,
-        "bundle_version": 2,
+        "bundle_version": 3,
         "request_hash": request_hash.unwrap_or(""),
         "prompt_hash": prompt_hash.unwrap_or(""),
         "timestamp_utc": timestamp,
         "bb_version": bb_version,
         "proof_status": proof_status,
         "raw_rows_sent_to_llm": 0,
-        // Rust-layer commitment to what was sent to the LLM.
-        // NOTE: Not a ZK public input — circuit-level commitment deferred to Sprint 3.
         "outgoing_prompt_hash": outgoing_prompt_hash.unwrap_or(""),
         "agg_type": agg_type,
         "query_params": {
@@ -150,6 +149,37 @@ pub fn generate_bundle(
     });
     let request_meta_bytes =
         serde_json::to_vec_pretty(&request_meta).context("serialize request_meta")?;
+    let request_meta_hash = format!("sha256:{}", hex::encode(Sha256::digest(&request_meta_bytes)));
+
+    // Build v3 manifest and sign with ed25519 (JCS — RFC 8785: sorted keys, compact JSON).
+    // Sign-then-embed: build the payload WITHOUT manifest_sig, sign it, then add manifest_sig.
+    let manifest_bytes = {
+        let seed: [u8; 32] = signing_key_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("signing_key_bytes must be exactly 32 bytes"))?;
+        let (signing_key, _) = crate::keys::derive_manifest_signing_keypair(&seed)
+            .context("derive manifest signing keypair")?;
+
+        // JCS: BTreeMap serializes in alphabetical key order; serde_json compact = no whitespace.
+        let mut payload_map: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        payload_map.insert("algorithm",          serde_json::json!("sha256"));
+        payload_map.insert("bundle_version",     serde_json::json!(3u32));
+        payload_map.insert("created_at",         serde_json::json!(timestamp));
+        payload_map.insert("proof_hash",         serde_json::json!(proof_hash_hex));
+        payload_map.insert("public_inputs_hash", serde_json::json!(public_inputs_hash_hex));
+        payload_map.insert("request_meta_hash",  serde_json::json!(request_meta_hash));
+        payload_map.insert("sidecar_hash",       serde_json::json!(sidecar_hash));
+        payload_map.insert("vk_hash",            serde_json::json!(vk_hash_hex));
+
+        let signing_payload = serde_json::to_string(&payload_map)
+            .context("serialize manifest signing payload (JCS)")?;
+        let signature = signing_key.sign(signing_payload.as_bytes());
+        let manifest_sig = hex::encode(signature.to_bytes()); // 128 hex chars (64-byte ed25519 sig)
+
+        // Add manifest_sig and serialize with pretty-print for storage (readability).
+        payload_map.insert("manifest_sig", serde_json::json!(manifest_sig));
+        serde_json::to_vec_pretty(&payload_map).context("serialize manifest.json")?
+    };
 
     // Resolve output paths
     let tmp_dir = receipts_dir.parent()
