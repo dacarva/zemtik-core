@@ -1707,10 +1707,10 @@ async fn handle_zk_slow_lane(
         if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
             response.headers_mut().insert("x-zemtik-bundle-id", val);
         }
-        let verify_url = format!(
-            "http://localhost:{}/verify/{}",
-            state.config.proxy_port, br.bundle_id
-        );
+        let verify_url = match state.public_url.as_deref() {
+            Some(base) => format!("{}/verify/{}", base, br.bundle_id),
+            None => format!("http://localhost:{}/verify/{}", state.config.proxy_port, br.bundle_id),
+        };
         if let Ok(val) = HeaderValue::from_str(&verify_url) {
             response.headers_mut().insert("x-zemtik-verify-url", val);
         }
@@ -1849,17 +1849,21 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Compute the BN254 Field element encoding of a user prompt for circuit public input #6.
+/// Compute the BN254 Fr field element encoding of a user prompt for circuit public input #6.
 ///
-/// Spec: SHA-256(prompt_bytes) → mask top 2 bits (AND 0x3f on byte 0) → "0x<64 hex chars>"
-/// This ensures the value fits within the BN254 scalar field (< p).
+/// Spec: SHA-256(prompt_bytes) → mask top 3 bits (AND 0x1f on byte 0) → "0x<64 hex chars>"
+///
+/// Masking top 3 bits guarantees the value is strictly less than the BN254 Fr modulus p
+/// (p ≈ 0x30644e72... — first byte 0x30 means any value with byte[0] ≤ 0x1f is < p).
+/// Using 0x3f (2 bits) is insufficient: values 0x31...–0x3f... would exceed p and be
+/// silently reduced mod p by the proving backend, creating a verifier/prover mismatch.
 ///
 /// Independent verification:
-///   Python: import hashlib; h = hashlib.sha256(prompt.encode()).digest(); h = bytes([h[0]&0x3f]) + h[1:]; print("0x" + h.hex())
-pub(crate) fn compute_prompt_hash_field(prompt: &str) -> String {
+///   Python: import hashlib; h = hashlib.sha256(prompt.encode()).digest(); h = bytes([h[0]&0x1f]) + h[1:]; print("0x" + h.hex())
+pub fn compute_prompt_hash_field(prompt: &str) -> String {
     let hash = Sha256::digest(prompt.as_bytes());
     let mut buf: [u8; 32] = hash.into();
-    buf[0] &= 0x3f; // clear top 2 bits → fits in BN254 Field
+    buf[0] &= 0x1f; // clear top 3 bits → guaranteed < BN254 Fr modulus
     format!("0x{}", hex::encode(buf))
 }
 
@@ -2439,18 +2443,25 @@ mod proxy_error_tests {
 
     // ── compute_prompt_hash_field tests ──────────────────────────────────────
 
-    /// Known-answer test: SHA-256("hello world") with top-2 bits masked must produce
+    /// Known-answer test: SHA-256("hello world") with top-3 bits masked must produce
     /// a stable hex output. Pins the derivation spec across refactors.
     #[test]
     fn test_compute_prompt_hash_field_known_answer() {
-        // SHA-256("hello world") = b94d27b9...
-        // byte[0] = 0xb9 = 0b10111001; after &= 0x3f: 0b00111001 = 0x39
+        // SHA-256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        // byte[0] = 0xb9 = 0b10111001; after &= 0x1f: 0b00011001 = 0x19
+        // Full expected: 0x194d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
         let result = compute_prompt_hash_field("hello world");
+        assert_eq!(
+            result,
+            "0x194d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            "SHA-256('hello world') with 0x1f mask must match known-answer value"
+        );
+        // Redundant checks kept for clarity.
         assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
         assert_eq!(result.len(), 66, "must be 0x + 64 hex chars (32 bytes)");
-        // Verify top-2-bits mask: first byte of result must have bits 7 and 6 clear.
+        // Top-3-bits mask: byte[0] & 0xe0 must be zero (bits 7, 6, 5 clear).
         let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
-        assert_eq!(first_byte & 0xc0, 0, "top 2 bits of field element must be clear (BN254 safety)");
+        assert_eq!(first_byte & 0xe0, 0, "top 3 bits of field element must be clear (BN254 Fr safety)");
     }
 
     /// Empty string produces a valid, non-zero field element (SHA-256 of empty = non-zero).
@@ -2458,9 +2469,12 @@ mod proxy_error_tests {
     fn test_compute_prompt_hash_field_empty_string_is_nonzero() {
         let result = compute_prompt_hash_field("");
         assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
-        // SHA-256("") = e3b0c44298... — first byte after masking is 0x23 (non-zero)
+        // SHA-256("") = e3b0c44298... — byte[0] = 0xe3 & 0x1f = 0x03 (non-zero)
         assert_ne!(result, "0x0000000000000000000000000000000000000000000000000000000000000000",
             "SHA-256 of empty string is never zero");
+        // Top 3 bits must still be clear.
+        let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
+        assert_eq!(first_byte & 0xe0, 0, "top 3 bits must be clear for BN254 Fr safety");
     }
 
     /// Different prompts produce different field values (no collision in test vectors).

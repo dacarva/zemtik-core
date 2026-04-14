@@ -473,7 +473,6 @@ pub struct AppConfig {
     /// When set, adds a `verify_url` hint to `zemtik_meta` blocks pointing to the receipt audit endpoint.
     /// No startup error if unset — the hint is omitted silently.
     /// Env: ZEMTIK_PUBLIC_URL
-    #[serde(skip)]
     pub public_url: Option<String>,
 }
 
@@ -605,6 +604,13 @@ pub fn load_from_sources(
         config.db_path = expand_tilde(&config.db_path.to_string_lossy());
         config.receipts_db_path = expand_tilde(&config.receipts_db_path.to_string_lossy());
         config.receipts_dir = expand_tilde(&config.receipts_dir.to_string_lossy());
+        // Normalize public_url from YAML: trim whitespace and trailing slashes (same as env path).
+        if let Some(url) = config.public_url.take() {
+            let normalized = url.trim().trim_end_matches('/').to_owned();
+            if !normalized.is_empty() {
+                config.public_url = Some(normalized);
+            }
+        }
     }
 
     // Layer 3: env vars

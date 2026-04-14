@@ -188,7 +188,14 @@ pub fn generate_prover_toml(
     sig: &SignatureData,
     params: &QueryParams,
     circuit_dir: &Path,
+    outgoing_prompt_hash: &str,
 ) -> anyhow::Result<()> {
+    // v3 circuits assert(outgoing_prompt_hash != 0); reject the all-zero sentinel early.
+    let is_zero = outgoing_prompt_hash.trim_start_matches("0x").chars().all(|c| c == '0');
+    anyhow::ensure!(!is_zero,
+        "outgoing_prompt_hash must be non-zero for v3 circuits; \
+         pass compute_prompt_hash_field(prompt) instead of the zero literal"
+    );
     generate_batched_prover_toml(
         &[(txns.to_vec(), SignatureData {
             pub_key_x: sig.pub_key_x.clone(),
@@ -199,7 +206,7 @@ pub fn generate_prover_toml(
         })],
         params,
         circuit_dir,
-        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        outgoing_prompt_hash,
     )
 }
 

@@ -182,12 +182,15 @@ async fn main() -> anyhow::Result<()> {
     // The CLI pipeline hardcodes a SUM query (aws_spend). Use the sum/ sub-circuit.
     let pipeline_circuit_dir = prover::circuit_dir_for(&AggFn::Sum, &app_config.circuit_dir);
 
+    // Compute a canonical OPH for the hardcoded CLI query so v3 circuits
+    // don't trip the assert(outgoing_prompt_hash != 0) gate.
+    let cli_oph = proxy::compute_prompt_hash_field("aws_spend Q1 2024 client 123");
     print!("[NOIR] Writing Prover.toml ({} batches)... ", batch_count);
     prover::generate_batched_prover_toml(
         &batches,
         &params,
         &pipeline_circuit_dir,
-        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        &cli_oph,
     )?;
     let toml_secs = toml_start.elapsed().as_secs_f32();
     println!("OK ({:.2}s)", toml_secs);

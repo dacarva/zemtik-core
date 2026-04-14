@@ -105,6 +105,12 @@ pub fn generate_bundle(
     let public_inputs_bytes = std::fs::read(&public_inputs_path)
         .with_context(|| format!("read public_inputs from {}", public_inputs_path.display()))?;
 
+    // bundle_version=3 requires outgoing_prompt_hash — circuit asserts it non-zero.
+    let oph = outgoing_prompt_hash.ok_or_else(|| anyhow::anyhow!(
+        "outgoing_prompt_hash is required for bundle_version=3 bundles; \
+         pass compute_prompt_hash_field(prompt) before calling generate_bundle"
+    ))?;
+
     // Build human-readable public inputs JSON (v3: includes outgoing_prompt_hash)
     let public_inputs_readable = serde_json::json!({
         "target_category_hash": params.target_category_hash,
@@ -113,7 +119,7 @@ pub fn generate_bundle(
         "end_time": params.end_time,
         "bank_pub_key_x": sig.pub_key_x,
         "bank_pub_key_y": sig.pub_key_y,
-        "outgoing_prompt_hash": outgoing_prompt_hash.unwrap_or(""),
+        "outgoing_prompt_hash": oph,
         "verified_aggregate": aggregate,
         "agg_type": agg_type,
         "actual_row_count": actual_row_count
@@ -137,7 +143,7 @@ pub fn generate_bundle(
         "bb_version": bb_version,
         "proof_status": proof_status,
         "raw_rows_sent_to_llm": 0,
-        "outgoing_prompt_hash": outgoing_prompt_hash.unwrap_or(""),
+        "outgoing_prompt_hash": oph,
         "agg_type": agg_type,
         "query_params": {
             "client_id": params.client_id,

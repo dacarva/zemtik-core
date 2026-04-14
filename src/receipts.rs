@@ -50,9 +50,10 @@ pub struct Receipt {
     /// prompt (no text transformation applied). For LLM rewrites: the LLM-produced rewritten
     /// query. None when no rewriting was performed. Added in v6.
     pub rewritten_query: Option<String>,
-    /// SHA-256(ed25519_manifest_pub hex bytes) — fingerprint of the ed25519 signing key
-    /// used to sign this bundle. Cross-receipt consistency check: all receipts from the
-    /// same deployment must share the same manifest_key_id. Added in v8.
+    /// SHA-256(raw ed25519 verifying key bytes) — fingerprint of the ed25519 signing key
+    /// used to sign this bundle. Computed as SHA-256(verifying_key.as_bytes()), not the hex string.
+    /// Cross-receipt consistency check: all receipts from the same deployment must share the
+    /// same manifest_key_id. Added in v8.
     pub manifest_key_id: Option<String>,
 }
 

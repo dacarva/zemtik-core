@@ -30,8 +30,8 @@ fn process_batch(
 //   start_time           - UNIX timestamp range start (inclusive)
 //   end_time             - UNIX timestamp range end (inclusive)
 //   bank_pub_key_x/y     - BabyJubJub public key of the bank signing KMS
-//   outgoing_prompt_hash - SHA-256(original_user_prompt) as BN254 Field (top 2 bits masked)
-//                          independently verifiable: SHA-256(prompt), AND first_byte with 0x3f
+//   outgoing_prompt_hash - SHA-256(original_user_prompt) as BN254 Field (top 3 bits masked)
+//                          independently verifiable: SHA-256(prompt), AND first_byte with 0x1f
 //
 // Private inputs (hidden from verifier):
 //   batches[i].transactions - raw TX_COUNT-row payload per batch

@@ -28,8 +28,8 @@ fn process_batch(
 //   start_time           - UNIX timestamp range start (inclusive)
 //   end_time             - UNIX timestamp range end (inclusive)
 //   bank_pub_key_x/y     - BabyJubJub public key of the bank signing KMS
-//   outgoing_prompt_hash - SHA-256(original_user_prompt) as BN254 Field (top 2 bits masked)
-//                          independently verifiable: SHA-256(prompt), AND first_byte with 0x3f
+//   outgoing_prompt_hash - SHA-256(original_user_prompt) as BN254 Field (top 3 bits masked)
+//                          independently verifiable: SHA-256(prompt), AND first_byte with 0x1f
 //
 // Private inputs (hidden from verifier):
 //   batches[i].transactions - raw TX_COUNT-row payload per batch
@@ -62,8 +62,9 @@ fn main(
     // Both x and y become circuit witnesses. The optimizer cannot remove them.
     // `let _ = ...` (dead-code discard) is insufficient; the Noir optimizer eliminates
     // gates whose results are never used. An assert is a side effect that survives.
-    // In practice outgoing_prompt_hash is SHA-256(prompt) with top 2 bits masked.
-    // the probability it equals zero is ~2^-254 (top 2 bits masked to fit BN254 field).
+    // In practice outgoing_prompt_hash is SHA-256(prompt) with top 3 bits masked (AND 0x1f).
+    // Masking 3 bits guarantees the value < BN254 Fr modulus p ≈ 0x30644e72...
+    // The probability it equals zero is ~2^-253 (top 3 bits masked).
     assert(outgoing_prompt_hash != 0);
     total
 }

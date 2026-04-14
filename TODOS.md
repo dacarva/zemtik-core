@@ -128,7 +128,7 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 ## ~~Stage 1 — Audit Trail Integrity (2026-04-14)~~ **Completed: v0.12.0-dev**
 
 - ed25519 manifest signing, `outgoing_prompt_hash` as ZK circuit public input, bundle_version=3, GET /public-key endpoint, `manifest_key_id` in receipts.
-- All 10 manual QA checks passed. 285 unit + integration tests green.
+- All 10 manual QA checks passed. 299 unit + integration tests green.
 - Bundle-demotion-attack (flip bundle_version 3→2): blocked by public_inputs size check (224 vs 192 bytes). Incidental but effective defense.
 - Known gap: v2 `outgoing_prompt_hash` display in `zemtik verify` shows "Circuit public input #6" even though for v2 it's sidecar-sourced. Cosmetic only.
 - Known gap: CLI pipeline passes `outgoing_prompt_hash=0` to nargo execute — breaks with v3 circuit (assert(outgoing_prompt_hash != 0)). CLI pipeline must be updated to hash the hardcoded query before passing it as a witness.
