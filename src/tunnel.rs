@@ -450,6 +450,7 @@ async fn run_fork2_pipeline(
                 let key_bytes = state.signing_key_bytes.clone();
                 let rh = request_hash.clone();
                 let ph = prompt_hash.clone();
+                let phf = crate::proxy::compute_prompt_hash_field(&prompt);
                 let intent_c = intent.clone();
                 let agg_fn_c = agg_fn.clone();
 
@@ -476,7 +477,7 @@ async fn run_fork2_pipeline(
                             .enable_all()
                             .build()
                             .map_err(|e| anyhow::anyhow!("build local runtime: {}", e))?;
-                        rt.block_on(run_avg_pipeline(state2, rh, ph, intent_c, effective_client_id))
+                        rt.block_on(run_avg_pipeline(state2, rh, ph, phf, intent_c, effective_client_id))
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking join: {}", e)))
@@ -491,7 +492,7 @@ async fn run_fork2_pipeline(
                             .enable_all()
                             .build()
                             .map_err(|e| anyhow::anyhow!("build local runtime: {}", e))?;
-                        rt.block_on(run_zk_pipeline(config, key_bytes, rh, ph, intent_c, effective_client_id, agg_fn_c))
+                        rt.block_on(run_zk_pipeline(config, key_bytes, rh, ph, phf, intent_c, effective_client_id, agg_fn_c))
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking join: {}", e)))

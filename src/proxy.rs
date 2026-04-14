@@ -68,6 +68,19 @@ pub(crate) struct ProxyState {
     pub(crate) general_rate_limiter: Option<Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>>,
     /// Max requests/minute for GeneralLane (0 = unlimited).
     pub(crate) general_max_rpm: u32,
+    /// ed25519 manifest signing public key, hex-encoded. Derived from bank_sk at startup.
+    /// Served on GET /public-key. Stable across restarts as long as bank_sk is unchanged.
+    pub(crate) ed25519_manifest_pub_hex: String,
+    /// SHA-256(raw ed25519 verifying key bytes) — key fingerprint added to every receipt.
+    pub(crate) manifest_key_id: String,
+    /// BabyJubJub public key components, precomputed at startup for GET /public-key.
+    /// Avoids per-request scalar multiplication (expensive) on the /public-key hot path.
+    pub(crate) bjj_pub_x: String,
+    pub(crate) bjj_pub_y: String,
+    /// Optional public base URL for this deployment (e.g. "https://zemtik.example.com").
+    /// When set, zemtik_meta blocks include a verify_url hint.
+    #[allow(dead_code)]
+    pub(crate) public_url: Option<String>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -168,6 +181,32 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         .context("load or generate signing key")?;
     let signing_key_bytes = signing_key.key.to_vec();
 
+    // Derive ed25519 manifest signing key and compute key fingerprint.
+    let (ed25519_manifest_pub_hex, manifest_key_id) = {
+        let seed: [u8; 32] = signing_key_bytes.as_slice().try_into()
+            .context("bank_sk must be exactly 32 bytes")?;
+        let (_, verifying_key) = keys::derive_manifest_signing_keypair(&seed)
+            .context("derive manifest signing keypair at startup")?;
+        let pub_hex = hex::encode(verifying_key.as_bytes());
+        // Fingerprint: SHA-256 of the raw 32-byte public key (not the hex string).
+        // Standard practice: auditors independently compute fingerprint from raw key bytes.
+        let key_id = hex::encode(sha2::Sha256::digest(verifying_key.as_bytes()));
+        (pub_hex, key_id)
+    };
+
+    // Precompute BabyJubJub public key at startup to avoid per-request scalar multiplication
+    // on the GET /public-key endpoint.
+    let (bjj_pub_x, bjj_pub_y) = match babyjubjub_rs::PrivateKey::import(signing_key_bytes.clone()) {
+        Ok(sk) => {
+            let pk = sk.public();
+            (pk.x.to_string(), pk.y.to_string())
+        }
+        Err(e) => {
+            eprintln!("[STARTUP] Warning: failed to derive BabyJubJub public key: {}", e);
+            ("error".to_owned(), "error".to_owned())
+        }
+    };
+
     let mut pipeline_locks = HashMap::new();
     pipeline_locks.insert(AggFn::Sum, tokio::sync::Mutex::new(()));
     pipeline_locks.insert(AggFn::Count, tokio::sync::Mutex::new(()));
@@ -242,6 +281,11 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         general_passthrough_enabled: config.general_passthrough_enabled,
         general_rate_limiter,
         general_max_rpm: config.general_max_rpm,
+        ed25519_manifest_pub_hex,
+        manifest_key_id,
+        bjj_pub_x,
+        bjj_pub_y,
+        public_url: config.public_url.clone(),
     });
 
     // If any configured origin is "*", use the wildcard policy.
@@ -276,11 +320,13 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
     let app = match config.mode {
         ZemtikMode::Standard => Router::new()
             .route("/health", get(handle_health))
+            .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(handle_chat_completions))
             .route("/verify/{id}", get(handle_verify))
             .route("/{*path}", any(handle_passthrough)),
         ZemtikMode::Tunnel => Router::new()
             .route("/health", get(handle_health))
+            .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(crate::tunnel::handle_tunnel))
             .route("/tunnel/audit", get(crate::tunnel::handle_audit))
             .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
@@ -547,7 +593,7 @@ async fn handle_chat_completions(
                     }
                     return match route {
                         Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
-                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
+                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), resolved, effective_client_id, total_start).await,
                         Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                     };
                 }
@@ -601,7 +647,7 @@ async fn handle_chat_completions(
                                 }
                                 return match route {
                                     Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
-                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
+                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), r, effective_client_id, total_start).await,
                                     Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                                 };
                             }
@@ -715,7 +761,7 @@ async fn handle_chat_completions(
             handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
         }
         Route::ZkSlowLane => {
-            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt, intent_result, effective_client_id, total_start).await
         }
         Route::GeneralLane => {
             // GeneralLane variant is never produced by decide_route (it only returns
@@ -938,6 +984,7 @@ async fn handle_fast_lane(
                 actual_row_count: None,
                 rewrite_method: intent_result.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent_result.rewritten_query.clone(),
+                manifest_key_id: Some(state.manifest_key_id.clone()),
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
@@ -1097,6 +1144,7 @@ async fn handle_general_lane(
                 actual_row_count: None,
                 rewrite_method: None,
                 rewritten_query: None,
+                manifest_key_id: None,
             }) {
                 eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
             }
@@ -1149,6 +1197,7 @@ async fn handle_general_lane(
             actual_row_count: None,
             rewrite_method: None,
             rewritten_query: None,
+            manifest_key_id: None,
         })
     };
     if let Err(e) = receipt_write_result {
@@ -1351,11 +1400,13 @@ async fn handle_zk_slow_lane(
     api_key: String,
     request_hash: String,
     prompt_hash: String,
+    original_prompt: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
+    let prompt_hash_field = compute_prompt_hash_field(&original_prompt);
 
     // Resolve the aggregation function for this table from schema_config.
     let agg_fn = state.config.schema_config
@@ -1379,7 +1430,7 @@ async fn handle_zk_slow_lane(
             .expect("pipeline_locks must contain Count")
             .lock()
             .await;
-        run_avg_pipeline(Arc::clone(&state), request_hash.clone(), prompt_hash.clone(), intent.clone(), effective_client_id)
+        run_avg_pipeline(Arc::clone(&state), request_hash.clone(), prompt_hash.clone(), prompt_hash_field.clone(), intent.clone(), effective_client_id)
             .await
             .map_err(|e| {
                 let msg = e.to_string();
@@ -1403,6 +1454,7 @@ async fn handle_zk_slow_lane(
         let key_bytes = state.signing_key_bytes.clone();
         let req_hash = request_hash.clone();
         let prm_hash = prompt_hash.clone();
+        let prm_hash_field = prompt_hash_field.clone();
         let intent_clone = intent.clone();
         let agg_fn_clone = agg_fn.clone();
 
@@ -1411,7 +1463,7 @@ async fn handle_zk_slow_lane(
                 .enable_all()
                 .build()
                 .context("build local runtime")?;
-            rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id, agg_fn_clone))
+            rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, prm_hash_field, intent_clone, effective_client_id, agg_fn_clone))
         })
         .await
         .context("ZK blocking task panicked")?
@@ -1451,10 +1503,11 @@ async fn handle_zk_slow_lane(
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent.confidence),
                 outgoing_prompt_hash: zk.outgoing_prompt_hash.clone(),
-                signing_version: None,
+                signing_version: Some(3),
                 actual_row_count: Some(zk.actual_row_count),
                 rewrite_method: intent.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent.rewritten_query.clone(),
+                manifest_key_id: Some(state.manifest_key_id.clone()),
             },
         ) {
             Ok(()) => Some(br),
@@ -1654,10 +1707,10 @@ async fn handle_zk_slow_lane(
         if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
             response.headers_mut().insert("x-zemtik-bundle-id", val);
         }
-        let verify_url = format!(
-            "http://localhost:{}/verify/{}",
-            state.config.proxy_port, br.bundle_id
-        );
+        let verify_url = match state.public_url.as_deref() {
+            Some(base) => format!("{}/verify/{}", base, br.bundle_id),
+            None => format!("http://localhost:{}/verify/{}", state.config.proxy_port, br.bundle_id),
+        };
         if let Ok(val) = HeaderValue::from_str(&verify_url) {
             response.headers_mut().insert("x-zemtik-verify-url", val);
         }
@@ -1796,6 +1849,24 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Compute the BN254 Fr field element encoding of a user prompt for circuit public input #6.
+///
+/// Spec: SHA-256(prompt_bytes) → mask top 3 bits (AND 0x1f on byte 0) → "0x<64 hex chars>"
+///
+/// Masking top 3 bits guarantees the value is strictly less than the BN254 Fr modulus p
+/// (p ≈ 0x30644e72... — first byte 0x30 means any value with byte[0] ≤ 0x1f is < p).
+/// Using 0x3f (2 bits) is insufficient: values 0x31...–0x3f... would exceed p and be
+/// silently reduced mod p by the proving backend, creating a verifier/prover mismatch.
+///
+/// Independent verification:
+///   Python: import hashlib; h = hashlib.sha256(prompt.encode()).digest(); h = bytes([h[0]&0x1f]) + h[1:]; print("0x" + h.hex())
+pub fn compute_prompt_hash_field(prompt: &str) -> String {
+    let hash = Sha256::digest(prompt.as_bytes());
+    let mut buf: [u8; 32] = hash.into();
+    buf[0] &= 0x1f; // clear top 3 bits → guaranteed < BN254 Fr modulus
+    format!("0x{}", hex::encode(buf))
+}
+
 /// RAII guard that removes a per-run work directory on drop (success or error).
 struct RunDirGuard(std::path::PathBuf);
 impl Drop for RunDirGuard {
@@ -1806,11 +1877,17 @@ impl Drop for RunDirGuard {
 
 /// Run the full ZK pipeline (DB → sign → circuit → proof → bundle).
 /// Called from within spawn_blocking so DbBackend's !Sync is not an issue.
+///
+/// `outgoing_prompt_hash_field` — BN254 Field encoding of SHA-256(original_user_prompt),
+/// written to Prover.toml as circuit public input #6 and included in the signed manifest.
+/// Format: "0x<64 hex chars>" (top 2 bits cleared for BN254 field safety).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_zk_pipeline(
     config: Arc<AppConfig>,
     key_bytes: Vec<u8>,
     request_hash: String,
     prompt_hash: String,
+    outgoing_prompt_hash_field: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
     agg_fn: AggFn,
@@ -1848,6 +1925,7 @@ pub(crate) async fn run_zk_pipeline(
     let batch_count = txns_len / db::BATCH_SIZE;
     println!("[ZK] Loaded {} transactions ({} batches, {} real rows)", txns_len, batch_count, actual_row_count);
 
+    let signing_key_bytes_for_bundle = key_bytes.clone();
     let key = db::PrivateKey::import(key_bytes)
         .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
     let batches = db::sign_transaction_batches(&txns, &key).context("sign batches")?;
@@ -1856,7 +1934,7 @@ pub(crate) async fn run_zk_pipeline(
     // Select the correct mini-circuit directory for this aggregation type.
     let circuit_dir = prover::circuit_dir_for(&agg_fn, &config.circuit_dir);
 
-    prover::generate_batched_prover_toml(&batches, &params, &circuit_dir)
+    prover::generate_batched_prover_toml(&batches, &params, &circuit_dir, &outgoing_prompt_hash_field)
         .context("write Prover.toml")?;
 
     let circuit_json = circuit_dir.join("target/zemtik_circuit.json");
@@ -1901,19 +1979,8 @@ pub(crate) async fn run_zk_pipeline(
         None => (None, None),
     };
 
-    // Compute outgoing_prompt_hash: SHA-256 of the ZK payload that will be sent to LLM.
-    let zk_payload_for_hash = serde_json::json!({
-        "category": intent.category_name,
-        "result": aggregate,
-        "agg_type": agg_fn.as_str(),
-        "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
-        "raw_data_transmitted": false
-    });
-    let outgoing_prompt_hash_str = serde_json::to_string(&zk_payload_for_hash)
-        .context("serialize ZK payload for outgoing hash")?;
-    let outgoing_prompt_hash = hex::encode(Sha256::digest(outgoing_prompt_hash_str.as_bytes()));
-
-    // Generate bundle while run_dir is still present (guard cleans it up after)
+    // Generate bundle while run_dir is still present (guard cleans it up after).
+    // outgoing_prompt_hash_field = SHA-256(original_user_prompt) as BN254 Field — circuit public input #6.
     let bundle_result = if fully_verifiable {
         match bundle::generate_bundle(
             &params,
@@ -1922,12 +1989,13 @@ pub(crate) async fn run_zk_pipeline(
             &first_sig,
             Some(&request_hash),
             Some(&prompt_hash),
-            Some(&outgoing_prompt_hash),
+            Some(&outgoing_prompt_hash_field),
             &run_dir,
             &circuit_dir,
             &config.receipts_dir,
             agg_fn.as_str(),
             Some(actual_row_count),
+            &signing_key_bytes_for_bundle,
         ) {
             Ok(br) => Some(br),
             Err(e) => {
@@ -1941,7 +2009,7 @@ pub(crate) async fn run_zk_pipeline(
 
     // Only commit a hash when there's an actual verifiable bundle to match against.
     let committed_hash = if fully_verifiable {
-        Some(outgoing_prompt_hash)
+        Some(outgoing_prompt_hash_field)
     } else {
         None
     };
@@ -1973,6 +2041,7 @@ pub(crate) async fn run_avg_pipeline(
     state: Arc<ProxyState>,
     request_hash: String,
     prompt_hash: String,
+    outgoing_prompt_hash_field: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
 ) -> anyhow::Result<ZkPipelineResult> {
@@ -1981,6 +2050,7 @@ pub(crate) async fn run_avg_pipeline(
     let key_bytes = state.signing_key_bytes.clone();
     let req_hash = request_hash.clone();
     let prm_hash = prompt_hash.clone();
+    let prm_hash_field = outgoing_prompt_hash_field.clone();
     let intent_clone = intent.clone();
 
     let sum_result = tokio::task::spawn_blocking(move || {
@@ -1988,7 +2058,7 @@ pub(crate) async fn run_avg_pipeline(
             .enable_all()
             .build()
             .context("build local runtime for SUM")?;
-        rt.block_on(run_zk_pipeline(config, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id, AggFn::Sum))
+        rt.block_on(run_zk_pipeline(config, key_bytes, req_hash, prm_hash, prm_hash_field, intent_clone, effective_client_id, AggFn::Sum))
     })
     .await
     .context("AVG/SUM blocking task panicked")??;
@@ -1998,6 +2068,7 @@ pub(crate) async fn run_avg_pipeline(
     let key_bytes2 = state.signing_key_bytes.clone();
     let req_hash2 = request_hash.clone();
     let prm_hash2 = prompt_hash.clone();
+    let prm_hash_field2 = outgoing_prompt_hash_field.clone();
     let intent_clone2 = intent.clone();
 
     let count_result = tokio::task::spawn_blocking(move || {
@@ -2005,7 +2076,7 @@ pub(crate) async fn run_avg_pipeline(
             .enable_all()
             .build()
             .context("build local runtime for COUNT")?;
-        rt.block_on(run_zk_pipeline(config2, key_bytes2, req_hash2, prm_hash2, intent_clone2, effective_client_id, AggFn::Count))
+        rt.block_on(run_zk_pipeline(config2, key_bytes2, req_hash2, prm_hash2, prm_hash_field2, intent_clone2, effective_client_id, AggFn::Count))
     })
     .await
     .context("AVG/COUNT blocking task panicked")??;
@@ -2140,6 +2211,30 @@ async fn handle_passthrough() -> impl IntoResponse {
             }
         })),
     )
+}
+
+/// GET /public-key — unauthenticated. No rate limit implemented (public keys are safe to expose).
+/// TODO: add per-IP rate limiting via governor if abuse is observed.
+///
+/// Returns the ed25519 manifest signing public key and the BabyJubJub public key.
+/// Both derive from the same `bank_sk` seed via different algorithms.
+///   ed25519_manifest_pub — signs manifest.json in every v3 bundle
+///   babyjubjub_pub_x/y  — used for FastLane attestations (not ZK proofs)
+///
+/// Third-party auditors use this to independently verify bundle signatures without
+/// needing bb or nargo installed. See docs/ZK_CIRCUITS.md#independent-verification.
+async fn handle_public_key(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
+    // Both keys are precomputed at startup to avoid per-request scalar multiplication.
+    Json(serde_json::json!({
+        "ed25519_manifest_pub": state.ed25519_manifest_pub_hex,
+        "manifest_key_id": state.manifest_key_id,
+        "babyjubjub_pub_x": state.bjj_pub_x,
+        "babyjubjub_pub_y": state.bjj_pub_y,
+        "algorithm": "ed25519",
+        "curve": "babyjubjub",
+        "_note": "ed25519_manifest_pub signs bundle manifests. babyjubjub_pub_x/y signs FastLane attestations. Both derive from the same bank_sk root via different algorithms.",
+        "created_at": chrono::Utc::now().to_rfc3339()
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2344,5 +2439,58 @@ mod proxy_error_tests {
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             "ProxyError::UnprocessableEntity must map to HTTP 422"
         );
+    }
+
+    // ── compute_prompt_hash_field tests ──────────────────────────────────────
+
+    /// Known-answer test: SHA-256("hello world") with top-3 bits masked must produce
+    /// a stable hex output. Pins the derivation spec across refactors.
+    #[test]
+    fn test_compute_prompt_hash_field_known_answer() {
+        // SHA-256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        // byte[0] = 0xb9 = 0b10111001; after &= 0x1f: 0b00011001 = 0x19
+        // Full expected: 0x194d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        let result = compute_prompt_hash_field("hello world");
+        assert_eq!(
+            result,
+            "0x194d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            "SHA-256('hello world') with 0x1f mask must match known-answer value"
+        );
+        // Redundant checks kept for clarity.
+        assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
+        assert_eq!(result.len(), 66, "must be 0x + 64 hex chars (32 bytes)");
+        // Top-3-bits mask: byte[0] & 0xe0 must be zero (bits 7, 6, 5 clear).
+        let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
+        assert_eq!(first_byte & 0xe0, 0, "top 3 bits of field element must be clear (BN254 Fr safety)");
+    }
+
+    /// Empty string produces a valid, non-zero field element (SHA-256 of empty = non-zero).
+    #[test]
+    fn test_compute_prompt_hash_field_empty_string_is_nonzero() {
+        let result = compute_prompt_hash_field("");
+        assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
+        // SHA-256("") = e3b0c44298... — byte[0] = 0xe3 & 0x1f = 0x03 (non-zero)
+        assert_ne!(result, "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "SHA-256 of empty string is never zero");
+        // Top 3 bits must still be clear.
+        let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
+        assert_eq!(first_byte & 0xe0, 0, "top 3 bits must be clear for BN254 Fr safety");
+    }
+
+    /// Different prompts produce different field values (no collision in test vectors).
+    #[test]
+    fn test_compute_prompt_hash_field_different_prompts_differ() {
+        let h1 = compute_prompt_hash_field("what is the total aws spend for Q1 2024?");
+        let h2 = compute_prompt_hash_field("count transactions for client 123");
+        assert_ne!(h1, h2, "different prompts must produce different field values");
+    }
+
+    /// Same prompt always produces the same field value (deterministic).
+    #[test]
+    fn test_compute_prompt_hash_field_deterministic() {
+        let prompt = "show me the quarterly revenue breakdown";
+        let h1 = compute_prompt_hash_field(prompt);
+        let h2 = compute_prompt_hash_field(prompt);
+        assert_eq!(h1, h2, "same prompt must always produce same field value");
     }
 }

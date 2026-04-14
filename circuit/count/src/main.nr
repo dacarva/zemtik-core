@@ -30,6 +30,8 @@ fn process_batch(
 //   start_time           - UNIX timestamp range start (inclusive)
 //   end_time             - UNIX timestamp range end (inclusive)
 //   bank_pub_key_x/y     - BabyJubJub public key of the bank signing KMS
+//   outgoing_prompt_hash - SHA-256(original_user_prompt) as BN254 Field (top 3 bits masked)
+//                          independently verifiable: SHA-256(prompt), AND first_byte with 0x1f
 //
 // Private inputs (hidden from verifier):
 //   batches[i].transactions - raw TX_COUNT-row payload per batch
@@ -47,6 +49,7 @@ fn main(
     end_time: pub u64,
     bank_pub_key_x: pub Field,
     bank_pub_key_y: pub Field,
+    outgoing_prompt_hash: pub Field,
     batches: [BatchInput; BATCH_COUNT],
 ) -> pub Field {
     let mut total: Field = 0;
@@ -60,5 +63,8 @@ fn main(
             bank_pub_key_y,
         );
     }
+    // Bind outgoing_prompt_hash to the proof via an inverse-witness constraint.
+    // See circuit/sum/src/main.nr for rationale.
+    assert(outgoing_prompt_hash != 0);
     total
 }

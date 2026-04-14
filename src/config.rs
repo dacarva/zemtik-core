@@ -469,6 +469,11 @@ pub struct AppConfig {
     /// Env: ZEMTIK_GENERAL_MAX_RPM
     #[serde(skip)]
     pub general_max_rpm: u32,
+    /// Optional public base URL for this deployment (e.g. "https://zemtik.example.com").
+    /// When set, adds a `verify_url` hint to `zemtik_meta` blocks pointing to the receipt audit endpoint.
+    /// No startup error if unset — the hint is omitted silently.
+    /// Env: ZEMTIK_PUBLIC_URL
+    pub public_url: Option<String>,
 }
 
 impl AppConfig {
@@ -526,6 +531,7 @@ impl Default for AppConfig {
             query_rewriter_max_context_tokens: 2000,
             general_passthrough_enabled: false,
             general_max_rpm: 0,
+            public_url: None,
         }
     }
 }
@@ -598,6 +604,13 @@ pub fn load_from_sources(
         config.db_path = expand_tilde(&config.db_path.to_string_lossy());
         config.receipts_db_path = expand_tilde(&config.receipts_db_path.to_string_lossy());
         config.receipts_dir = expand_tilde(&config.receipts_dir.to_string_lossy());
+        // Normalize public_url from YAML: trim whitespace and trailing slashes (same as env path).
+        if let Some(url) = config.public_url.take() {
+            let normalized = url.trim().trim_end_matches('/').to_owned();
+            if !normalized.is_empty() {
+                config.public_url = Some(normalized);
+            }
+        }
     }
 
     // Layer 3: env vars
@@ -813,6 +826,12 @@ pub fn load_from_sources(
             );
         }
         config.general_max_rpm = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_PUBLIC_URL") {
+        let url = v.trim().trim_end_matches('/').to_owned();
+        if !url.is_empty() {
+            config.public_url = Some(url);
+        }
     }
 
     // Layer 4: CLI flags

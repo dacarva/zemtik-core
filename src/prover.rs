@@ -31,10 +31,14 @@ pub fn circuit_dir_for(agg_fn: &AggFn, base: &Path) -> PathBuf {
 }
 
 /// Serialize the batched circuit inputs to `circuit_dir/Prover.toml`.
+///
+/// `outgoing_prompt_hash_field` is the BN254 Field encoding of SHA-256(original_user_prompt)
+/// written as the 6th public input for bundle_version=3 circuits. Format: "0x<64 hex chars>".
 pub fn generate_batched_prover_toml(
     batches: &[(Vec<Transaction>, SignatureData)],
     params: &QueryParams,
     circuit_dir: &Path,
+    outgoing_prompt_hash_field: &str,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!batches.is_empty(), "no transaction batches to write to Prover.toml");
 
@@ -48,6 +52,7 @@ pub fn generate_batched_prover_toml(
     let (_, first_sig) = &batches[0];
     toml.push_str(&format!("bank_pub_key_x = \"{}\"\n", first_sig.pub_key_x));
     toml.push_str(&format!("bank_pub_key_y = \"{}\"\n", first_sig.pub_key_y));
+    toml.push_str(&format!("outgoing_prompt_hash = \"{}\"\n", outgoing_prompt_hash_field));
 
     for (txns, sig) in batches {
         toml.push_str("\n[[batches]]\n");
@@ -183,7 +188,14 @@ pub fn generate_prover_toml(
     sig: &SignatureData,
     params: &QueryParams,
     circuit_dir: &Path,
+    outgoing_prompt_hash: &str,
 ) -> anyhow::Result<()> {
+    // v3 circuits assert(outgoing_prompt_hash != 0); reject the all-zero sentinel early.
+    let is_zero = outgoing_prompt_hash.trim_start_matches("0x").chars().all(|c| c == '0');
+    anyhow::ensure!(!is_zero,
+        "outgoing_prompt_hash must be non-zero for v3 circuits; \
+         pass compute_prompt_hash_field(prompt) instead of the zero literal"
+    );
     generate_batched_prover_toml(
         &[(txns.to_vec(), SignatureData {
             pub_key_x: sig.pub_key_x.clone(),
@@ -194,6 +206,7 @@ pub fn generate_prover_toml(
         })],
         params,
         circuit_dir,
+        outgoing_prompt_hash,
     )
 }
 

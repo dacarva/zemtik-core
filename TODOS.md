@@ -125,6 +125,17 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 ---
 
+## ~~Stage 1 — Audit Trail Integrity (2026-04-14)~~ **Completed: v0.12.0-dev**
+
+- ed25519 manifest signing, `outgoing_prompt_hash` as ZK circuit public input, bundle_version=3, GET /public-key endpoint, `manifest_key_id` in receipts.
+- All 10 manual QA checks passed. 299 unit + integration tests green.
+- Bundle-demotion-attack (flip bundle_version 3→2): blocked by public_inputs size check (224 vs 192 bytes). Incidental but effective defense.
+- Known gap: v2 `outgoing_prompt_hash` display in `zemtik verify` shows "Circuit public input #6" even though for v2 it's sidecar-sourced. Cosmetic only.
+- Known gap: CLI pipeline passes `outgoing_prompt_hash=0` to nargo execute — breaks with v3 circuit (assert(outgoing_prompt_hash != 0)). CLI pipeline must be updated to hash the hardcoded query before passing it as a witness.
+- Known gap: `verify_bundle` in offline mode requires the prover's local `~/.zemtik/keys/bank_sk` to reconstruct the ed25519 verifying key. Auditors running `zemtik verify` on a third-party bundle need a portable verifying-key sidecar or the `GET /public-key` endpoint. Tracked for Stage 2.
+
+---
+
 ## DX additions — GeneralLane DX review (2026-04-13)
 
 Added from `/plan-devex-review` of fix/general-queries.
@@ -665,3 +676,21 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 - **VALIDATE_ONLY + SKIP_CIRCUIT_VALIDATION** — both flags now stack correctly; VALIDATE_ONLY no longer exits 1 when circuit validation is suppressed.
 - **`/health` status_summary** — reports `"warnings"` when ZK tools are absent, not `"ok"`.
 - **Test safety** — `startup_validation_skipped_when_env_set` uses `#[serial]` to prevent env var race in parallel tests.
+
+---
+
+## BN254 field encoding + HKDF safety (P2, before second Aztec demo)
+
+Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy-yawning-creek).
+
+### SHA-256 → BN254 truncation safety
+- **What:** SHA-256 produces 256 bits; BN254 scalar field is ~254 bits (2^254 - delta). Truncating the 2 MSBs is safe for nearly all inputs but can produce `value == 0` or `value >= field_modulus` in extreme edge cases. Add a check: if truncated value >= BN254_FIELD_ORDER or == 0, return Err with a clear message ("prompt hash encoding out of BN254 range — retry or report this input").
+- **Why:** The Aztec engineer will inspect the public input encoding during review. A panic or silent wrong value would undermine the cryptographic credibility of the commitment.
+- **Context:** The field modulus is `21888242871839275222246405745257275088548364400416034343698204186575808495617` (BN254 scalar field). SHA-256 of any 256-bit random input has probability ~2^-254 of landing out of range — extremely rare but worth a runtime guard.
+- **Effort:** XS (CC: ~5 min)
+
+### HKDF derive_manifest_signing_key() error handling
+- **What:** `derive_manifest_signing_key()` should return `anyhow::Result<ed25519_dalek::SigningKey>` instead of unwrapping HKDF expand. If `hk.expand()` fails (e.g., bad OKM length), it would panic in the hot path.
+- **Why:** Hard startup error is acceptable (matches ZEMTIK_TUNNEL_API_KEY pattern), but panic is not. Use `hk.expand(...)?.` and propagate as startup error.
+- **Context:** HKDF expand can only fail if the output length exceeds 255 * HashLen. For SHA-256 with 32-byte output this will never fail in practice — but the guard is cheap and the Aztec engineer will check error handling.
+- **Effort:** XS (CC: ~2 min)

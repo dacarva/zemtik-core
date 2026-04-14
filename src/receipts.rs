@@ -50,6 +50,11 @@ pub struct Receipt {
     /// prompt (no text transformation applied). For LLM rewrites: the LLM-produced rewritten
     /// query. None when no rewriting was performed. Added in v6.
     pub rewritten_query: Option<String>,
+    /// SHA-256(raw ed25519 verifying key bytes) — fingerprint of the ed25519 signing key
+    /// used to sign this bundle. Computed as SHA-256(verifying_key.as_bytes()), not the hex string.
+    /// Cross-receipt consistency check: all receipts from the same deployment must share the
+    /// same manifest_key_id. Added in v8.
+    pub manifest_key_id: Option<String>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -176,6 +181,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v7")?;
     }
 
+    if version < 8 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN manifest_key_id TEXT DEFAULT NULL;
+             PRAGMA user_version = 8;
+             COMMIT;",
+        )
+        .context("apply migration v8")?;
+    }
+
     Ok(())
 }
 
@@ -186,8 +201,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
              data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
-             actual_row_count, rewrite_method, rewritten_query)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             actual_row_count, rewrite_method, rewritten_query, manifest_key_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -206,6 +221,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.actual_row_count.map(|v| v as i64),
             r.rewrite_method,
             r.rewritten_query,
+            r.manifest_key_id,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -270,7 +286,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     signing_version,
                     actual_row_count,
                     rewrite_method,
-                    rewritten_query
+                    rewritten_query,
+                    manifest_key_id
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -297,6 +314,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 actual_row_count: arc.map(|v| v as usize),
                 rewrite_method: row.get(15)?,
                 rewritten_query: row.get(16)?,
+                manifest_key_id: row.get(17)?,
             })
         })
         .context("query receipts")?;
@@ -319,7 +337,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     signing_version,
                     actual_row_count,
                     rewrite_method,
-                    rewritten_query
+                    rewritten_query,
+                    manifest_key_id
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -346,6 +365,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 actual_row_count: arc.map(|v| v as usize),
                 rewrite_method: row.get(15)?,
                 rewritten_query: row.get(16)?,
+                manifest_key_id: row.get(17)?,
             })
         })
         .context("query receipt")?;

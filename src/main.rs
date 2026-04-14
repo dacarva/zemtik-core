@@ -182,8 +182,16 @@ async fn main() -> anyhow::Result<()> {
     // The CLI pipeline hardcodes a SUM query (aws_spend). Use the sum/ sub-circuit.
     let pipeline_circuit_dir = prover::circuit_dir_for(&AggFn::Sum, &app_config.circuit_dir);
 
+    // Compute a canonical OPH for the hardcoded CLI query so v3 circuits
+    // don't trip the assert(outgoing_prompt_hash != 0) gate.
+    let cli_oph = proxy::compute_prompt_hash_field("aws_spend Q1 2024 client 123");
     print!("[NOIR] Writing Prover.toml ({} batches)... ", batch_count);
-    prover::generate_batched_prover_toml(&batches, &params, &pipeline_circuit_dir)?;
+    prover::generate_batched_prover_toml(
+        &batches,
+        &params,
+        &pipeline_circuit_dir,
+        &cli_oph,
+    )?;
     let toml_secs = toml_start.elapsed().as_secs_f32();
     println!("OK ({:.2}s)", toml_secs);
 
@@ -264,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
             &app_config.receipts_dir,
             "SUM", // CLI pipeline is hardcoded SUM
             None,  // actual_row_count: CLI pipeline uses exactly 500 seeded rows
+            bank_key.key.as_ref(),
         ) {
             Ok(br) => {
                 println!("[BUNDLE] Receipt: {}", br.bundle_path.display());
@@ -290,6 +299,7 @@ async fn main() -> anyhow::Result<()> {
                         actual_row_count: None,    // CLI pipeline uses exactly 500 seeded rows
                         rewrite_method: None,      // CLI pipeline has no query rewriting
                         rewritten_query: None,
+                        manifest_key_id: None,     // CLI pipeline: no ed25519 key fingerprint
                     },
                 )?;
                 Some(br)
