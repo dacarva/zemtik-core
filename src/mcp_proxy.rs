@@ -17,6 +17,8 @@
 //! - zemtik_fetch: in SSE mode, blocks + audits requests to domains not in ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS.
 //!   In STDIO mode, logs bypass events but still executes (observability; local dev trust model).
 //! - SSE mode: Bearer token auth on /mcp/audit, /mcp/summary via constant_time_eq.
+//!   The /mcp tool endpoint itself has no HTTP-layer auth — bind to 127.0.0.1 (default) or
+//!   place behind an authenticating reverse proxy for network-exposed deployments.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -759,6 +761,22 @@ pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
     eprintln!("[MCP] Starting HTTP server on {} (mode: {})", config.mcp_bind_addr, config.mcp_mode);
     eprintln!("[MCP] Audit DB: {}", config.mcp_audit_db_path.display());
     eprintln!("[MCP] /mcp/audit and /mcp/summary require Bearer token.");
+
+    // Warn when binding to a non-localhost address. The /mcp tool endpoint (zemtik_read_file,
+    // zemtik_fetch) does not require authentication at the HTTP layer — only the audit/summary
+    // endpoints do. Exposing this on a non-loopback interface means any network client can call
+    // tools without credentials. Use a reverse proxy with auth if you need network exposure.
+    let is_localhost = config.mcp_bind_addr.starts_with("127.0.0.1:")
+        || config.mcp_bind_addr.starts_with("localhost:")
+        || config.mcp_bind_addr.starts_with("[::1]:");
+    if !is_localhost {
+        eprintln!(
+            "[MCP] WARNING: binding to {} — /mcp tool endpoints (zemtik_read_file, \
+             zemtik_fetch) have no HTTP-layer auth. Add a reverse proxy with auth if \
+             this address is reachable from untrusted networks.",
+            config.mcp_bind_addr
+        );
+    }
 
     let state_clone = Arc::clone(&state);
     let ct = CancellationToken::new();
