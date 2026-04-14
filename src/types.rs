@@ -511,3 +511,65 @@ pub struct OriginalResponseData {
     pub response_body_hash: String,
     pub latency_ms: u64,
 }
+
+// ---------------------------------------------------------------------------
+// MCP attestation types (v0.10.0+)
+// ---------------------------------------------------------------------------
+
+/// MCP server operating mode.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpMode {
+    /// Observe silently: FORK 1 returns tool result, FORK 2 attests in background.
+    #[default]
+    Tunnel,
+    /// Return attestation sidecar in every tool response.
+    Governed,
+}
+
+impl McpMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            McpMode::Tunnel => "tunnel",
+            McpMode::Governed => "governed",
+        }
+    }
+}
+
+/// One signed audit record written to mcp_audit.db for each MCP tool call.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpAuditRecord {
+    /// UUID v4 for this call.
+    pub receipt_id: String,
+    /// ISO 8601 UTC timestamp.
+    pub ts: String,
+    /// Tool name ("zemtik_read_file", "zemtik_fetch", etc.).
+    pub tool_name: String,
+    /// SHA-256("sha256:" + hex) of the JSON-serialized tool arguments.
+    pub input_hash: String,
+    /// SHA-256("sha256:" + hex) of the JSON-serialized tool result.
+    pub output_hash: String,
+    /// First 500 chars of JSON-serialized input arguments.
+    pub preview_input: String,
+    /// First 500 chars of JSON-serialized tool result.
+    pub preview_output: String,
+    /// BabyJubJub EdDSA signature over (tool_name||input_hash||output_hash||ts) as hex.
+    pub attestation_sig: String,
+    /// BabyJubJub public key hex (enables offline verification without side-channel access).
+    pub public_key_hex: String,
+    /// FORK 1 execution time in milliseconds.
+    pub duration_ms: u64,
+    /// "tunnel" or "governed".
+    pub mode: String,
+}
+
+/// Dynamic tool definition loaded from mcp_tools.json.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpToolDef {
+    /// Tool name (must be unique, ASCII alphanumeric + underscore).
+    pub name: String,
+    /// Human-readable description shown to the LLM.
+    pub description: String,
+    /// JSON Schema for input parameters (serde_json::Value of type "object").
+    pub input_schema: serde_json::Value,
+}

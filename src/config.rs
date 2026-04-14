@@ -455,6 +455,42 @@ pub struct AppConfig {
     /// Env: ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS
     #[serde(skip)]
     pub query_rewriter_max_context_tokens: usize,
+
+    // --- MCP attestation server fields (v0.10.0+) ---
+
+    /// Bind address for the MCP HTTP server. Default: "127.0.0.1:4001".
+    /// Env: ZEMTIK_MCP_BIND_ADDR. Used only in mcp-serve (SSE) mode.
+    #[serde(skip)]
+    pub mcp_bind_addr: String,
+    /// Bearer API key for /mcp/audit and /mcp/summary. Hard startup error in mcp-serve mode if unset.
+    /// Env: ZEMTIK_MCP_API_KEY.
+    #[serde(skip)]
+    pub mcp_api_key: Option<String>,
+    /// MCP operating mode. Default: "tunnel". Env: ZEMTIK_MCP_MODE=tunnel|governed.
+    #[serde(skip)]
+    pub mcp_mode: String,
+    /// Path to mcp_audit.db SQLite database. Default: ~/.zemtik/mcp_audit.db.
+    /// Env: ZEMTIK_MCP_AUDIT_DB_PATH.
+    #[serde(skip)]
+    pub mcp_audit_db_path: PathBuf,
+    /// HTTP fetch timeout seconds for zemtik_fetch tool. Default: 30.
+    /// Env: ZEMTIK_MCP_FETCH_TIMEOUT_SECS.
+    #[serde(skip)]
+    pub mcp_fetch_timeout_secs: u64,
+    /// Comma-separated glob-style path allowlist for zemtik_read_file.
+    /// Empty = allow-all in STDIO mode, deny-all in SSE mode (operator must set explicitly).
+    /// Env: ZEMTIK_MCP_ALLOWED_PATHS.
+    #[serde(skip)]
+    pub mcp_allowed_paths: Vec<String>,
+    /// Comma-separated domain allowlist for zemtik_fetch.
+    /// Empty = allow-all in STDIO mode, deny-all in SSE mode.
+    /// Env: ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS.
+    #[serde(skip)]
+    pub mcp_allowed_fetch_domains: Vec<String>,
+    /// Path to mcp_tools.json for dynamic tool registration. None = use builtin tools only.
+    /// Env: ZEMTIK_MCP_TOOLS_PATH.
+    #[serde(skip)]
+    pub mcp_tools_path: Option<PathBuf>,
 }
 
 impl AppConfig {
@@ -510,6 +546,14 @@ impl Default for AppConfig {
             query_rewriter_scan_messages: 5,
             query_rewriter_timeout_secs: 10,
             query_rewriter_max_context_tokens: 2000,
+            mcp_bind_addr: "127.0.0.1:4001".to_owned(),
+            mcp_api_key: None,
+            mcp_mode: "tunnel".to_owned(),
+            mcp_audit_db_path: base.join("mcp_audit.db"),
+            mcp_fetch_timeout_secs: 30,
+            mcp_allowed_paths: vec![],
+            mcp_allowed_fetch_domains: vec![],
+            mcp_tools_path: None,
         }
     }
 }
@@ -772,6 +816,64 @@ pub fn load_from_sources(
             anyhow::bail!("ZEMTIK_QUERY_REWRITER_MAX_CONTEXT_TOKENS must be a positive integer (got 0)");
         }
         config.query_rewriter_max_context_tokens = n;
+    }
+
+    // MCP attestation server env vars
+    if let Some(v) = env.get("ZEMTIK_MCP_BIND_ADDR") {
+        config.mcp_bind_addr = v.trim().to_owned();
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_API_KEY") {
+        config.mcp_api_key = Some(v.trim().to_owned());
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_MODE") {
+        let s = v.trim().to_lowercase();
+        match s.as_str() {
+            "tunnel" | "governed" => config.mcp_mode = s,
+            other => anyhow::bail!(
+                "ZEMTIK_MCP_MODE: unrecognized value {:?}; accepted: tunnel, governed",
+                other
+            ),
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_TRANSPORT") {
+        let s = v.trim().to_lowercase();
+        if s == "sse" {
+            anyhow::bail!(
+                "ZEMTIK_MCP_TRANSPORT=sse is deprecated (sunset 2026-04-01). \
+                 Use ZEMTIK_MCP_TRANSPORT=http for Streamable HTTP transport."
+            );
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_AUDIT_DB_PATH") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.mcp_audit_db_path = expand_tilde(trimmed);
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_FETCH_TIMEOUT_SECS") {
+        let n = v.trim().parse::<u64>().context("parse ZEMTIK_MCP_FETCH_TIMEOUT_SECS")?;
+        anyhow::ensure!(n >= 1, "ZEMTIK_MCP_FETCH_TIMEOUT_SECS must be >= 1 (got {})", n);
+        config.mcp_fetch_timeout_secs = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_ALLOWED_PATHS") {
+        config.mcp_allowed_paths = v
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS") {
+        config.mcp_allowed_fetch_domains = v
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_TOOLS_PATH") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.mcp_tools_path = Some(expand_tilde(trimmed));
+        }
     }
 
     // Layer 4: CLI flags
