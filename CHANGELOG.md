@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-04-14
+
+### Added
+- **Stage 1 audit trail integrity** — proof bundles now carry a cryptographic chain of custody from the bank signing key to the manifest.
+- **ed25519 manifest signing**: `bundle_version=3` bundles include `manifest_sig` — a 64-byte ed25519 signature over the JCS-canonical (RFC 8785) manifest JSON. Key derived via HKDF-SHA256(bank_sk, info="zemtik-manifest-signing-v1"). `manifest_key_id` is SHA-256(raw verifying key bytes).
+- **`GET /public-key`** endpoint (unauthenticated): returns `ed25519_manifest_pub` (hex), `manifest_key_id` (hex), `babyjubjub_pub_x`, `babyjubjub_pub_y`. Auditors can retrieve the verifying key and independently check manifest signatures.
+- **`outgoing_prompt_hash` ZK circuit input**: SHA-256(original user prompt) with top 2 bits masked to fit BN254 field — now a public input to both the SUM and COUNT circuits. Binds the proof to the exact prompt that triggered it. Circuit enforces `assert(outgoing_prompt_hash != 0)` (probability of collision ~2^-254).
+- **Receipts DB v8 migration**: adds `manifest_key_id TEXT` column to the receipts ledger.
+- **BJJ public key precomputed at startup**: `bjj_pub_x` and `bjj_pub_y` computed once from `bank_sk` and stored in `ProxyState` — no per-request scalar multiplication.
+
+### Changed
+- **v3 public inputs layout** (7 fields, 224 bytes): adds `outgoing_prompt_hash` at index 5 (bytes 160–192); `verified_aggregate` moves to index 6 (bytes 192–224). v1/v2 bundles (192 bytes, 6 fields) continue to verify unchanged.
+- **`cross_verify_sidecar`** updated for v3 field layout: aggregate is now read from bytes 216–224 in v3 bundles.
+
+### Fixed (security)
+- **Bundle demotion attack**: `bundle_version` is now derived from the binary size of `public_inputs` (224 bytes → v3 forced; 192 bytes → v1/v2 trusted from claim) rather than from the untrusted `request_meta.json`. Claiming `bundle_version < 3` for a 224-byte inputs file is a hard integrity failure.
+- **JCS truncation attack**: manifest reconstruction now uses `bail!` for every required field (algorithm, bundle_version, created_at, proof_hash, public_inputs_hash, request_meta_hash, sidecar_hash, vk_hash). A missing field is a hard bundle rejection — no silent partial-manifest reconstruction.
+- **`manifest_key_id` fingerprint**: was SHA-256(hex-encoded string); corrected to SHA-256(raw verifying key bytes) — standard auditor convention.
+
+### Tests
+- **`test_keys.rs`**: 4 new tests for `derive_manifest_signing_keypair` — deterministic derivation, sign/verify roundtrip, unique-per-seed, tampered-payload rejection.
+- **`test_verify.rs`**: 7 new v3 bundle tests — valid manifest sig passes, tampered sig rejected, tampered request_meta rejected, demotion attack detected, v3 cross_verify sidecar passes, v3 cross_verify OPH mismatch detected.
+- **`src/proxy.rs`**: 4 new tests for `compute_prompt_hash_field` — known-answer, empty string non-zero, different prompts differ, deterministic.
+- **`src/verify.rs`**: 2 new inline tests for v3 `cross_verify_sidecar`.
+
 ## [0.11.0] - 2026-04-13
 
 ### Added
