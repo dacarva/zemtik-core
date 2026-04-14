@@ -47,25 +47,38 @@ RUN apt-get update \
 # On first ZK proof, bb downloads the SRS (~1GB) to /home/zemtik/.bb/.
 # Mount a named volume at /home/zemtik/.bb to persist the SRS across restarts.
 # Pinned ZK tool versions — update these together when bumping nargo/bb.
-# To get the sha256: docker build with INSTALL_ZK_TOOLS=false, then manually
-# download and run: sha256sum <archive>
+# bb version must match nargo version; check bb-versions.json in the Aztec repo:
+#   https://github.com/AztecProtocol/aztec-packages/blob/next/barretenberg/bbup/bb-versions.json
 ARG NARGO_VERSION=1.0.0-beta.19
-ARG BB_VERSION=v0.82.2
+ARG BB_VERSION=4.0.0-nightly.20260120
 
-# NOTE: curl|bash@main is intentionally avoided here (S3 fix).
-# Instead we download pinned release tarballs and verify sha256.
-# When building internally, you can set INSTALL_ZK_TOOLS_INTERNAL=true to use
-# the noirup/bbup installers on a trusted build host — but never in CI/CD.
+# NOTE: curl|bash@main is intentionally avoided here (supply-chain safety).
+# Instead we download pinned release tarballs directly from GitHub.
+# noirup/bbup installers pull from @master and must not be used in CI/CD.
+# When building internally on a trusted host you can set INSTALL_ZK_TOOLS_INTERNAL=true
+# to use the official installers — but never in a published Docker image.
+#
+# Multi-platform: Docker sets TARGETARCH to "amd64" or "arm64" during buildx.
+# Declare it as an ARG so the RUN step can read it.
+ARG TARGETARCH
 RUN if [ "$INSTALL_ZK_TOOLS" = "true" ]; then \
     apt-get update && apt-get install -y --no-install-recommends git jq && rm -rf /var/lib/apt/lists/* \
-    # Install nargo from pinned GitHub release (linux/amd64)
-    && NARGO_URL="https://github.com/noir-lang/noir/releases/download/v${NARGO_VERSION}/nargo-x86_64-unknown-linux-gnu.tar.gz" \
+    # Map Docker TARGETARCH to nargo and barretenberg arch strings
+    && case "${TARGETARCH:-amd64}" in \
+         amd64) NARGO_ARCH="x86_64-unknown-linux-gnu" ; BB_ARCH="amd64-linux" ;; \
+         arm64) NARGO_ARCH="aarch64-unknown-linux-gnu" ; BB_ARCH="arm64-linux" ;; \
+         *) echo "Unsupported TARGETARCH: ${TARGETARCH}" && exit 1 ;; \
+       esac \
+    # Install nargo from pinned GitHub release
+    && NARGO_URL="https://github.com/noir-lang/noir/releases/download/v${NARGO_VERSION}/nargo-${NARGO_ARCH}.tar.gz" \
     && curl -fsSL "$NARGO_URL" -o /tmp/nargo.tar.gz \
     && mkdir -p /root/.nargo/bin \
     && tar -xzf /tmp/nargo.tar.gz -C /root/.nargo/bin \
     && chmod +x /root/.nargo/bin/nargo \
-    # Install bb from pinned Aztec release (linux/amd64)
-    && BB_URL="https://github.com/AztecProtocol/aztec-packages/releases/download/aztec-packages-${BB_VERSION}/barretenberg-x86_64-linux-gnu.tar.gz" \
+    # Install bb from pinned Aztec release
+    # Tag format changed from "aztec-packages-vX.Y.Z" to "vX.Y.Z" for nightly builds.
+    # Artifact renamed from barretenberg-x86_64-linux-gnu.tar.gz to barretenberg-{arch}-linux.tar.gz.
+    && BB_URL="https://github.com/AztecProtocol/aztec-packages/releases/download/v${BB_VERSION}/barretenberg-${BB_ARCH}.tar.gz" \
     && curl -fsSL "$BB_URL" -o /tmp/bb.tar.gz \
     && mkdir -p /root/.bb \
     && tar -xzf /tmp/bb.tar.gz -C /root/.bb \
