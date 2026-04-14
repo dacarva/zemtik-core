@@ -705,3 +705,280 @@ async fn multi_turn_llm_table_switch_integration() {
         "expected rewrite_method: llm in evidence envelope, body: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GeneralLane helpers
+// ---------------------------------------------------------------------------
+
+/// Spin up a zemtik proxy with ZEMTIK_GENERAL_PASSTHROUGH=1.
+/// `max_rpm=0` means unlimited (default behavior).
+async fn spawn_test_proxy_with_general_passthrough(max_rpm: u32) -> (SocketAddr, MockServer) {
+    let mock_openai = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+
+    config.general_passthrough_enabled = true;
+    config.general_max_rpm = max_rpm;
+
+    let app = build_proxy_router(config)
+        .await
+        .expect("build_proxy_router failed");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum serve failed");
+    });
+
+    (addr, mock_openai)
+}
+
+// ---------------------------------------------------------------------------
+// GeneralLane integration tests
+// ---------------------------------------------------------------------------
+
+/// Regression: when ZEMTIK_GENERAL_PASSTHROUGH is unset, a non-data prompt still
+/// returns 400 NoTableIdentified — existing behavior unchanged.
+#[tokio::test]
+async fn general_passthrough_disabled_returns_400_no_table() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Can you explain machine learning?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "NoTableIdentified");
+}
+
+/// GeneralLane happy path: a non-data prompt with ZEMTIK_GENERAL_PASSTHROUGH=1 returns
+/// 200 with a zemtik_meta body field, X-Zemtik-Engine header, and X-Zemtik-Meta header.
+#[tokio::test]
+async fn general_passthrough_enabled_forwards_non_data_query() {
+    let (addr, mock_openai) = spawn_test_proxy_with_general_passthrough(0).await;
+    mount_openai_chat_mock(&mock_openai).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Can you explain machine learning to me?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 200, "GeneralLane must return 200");
+
+    // X-Zemtik-Engine header present.
+    assert_eq!(
+        resp.headers().get("x-zemtik-engine").and_then(|v| v.to_str().ok()),
+        Some("general_lane"),
+        "X-Zemtik-Engine must be general_lane"
+    );
+
+    // X-Zemtik-Meta header present.
+    assert!(
+        resp.headers().contains_key("x-zemtik-meta"),
+        "X-Zemtik-Meta header must be present"
+    );
+
+    let body: Value = resp.json().await.expect("body not JSON");
+
+    // zemtik_meta injected into body.
+    let meta = &body["zemtik_meta"];
+    assert_eq!(meta["engine_used"], "general_lane");
+    assert_eq!(meta["zk_coverage"], "none");
+    assert_eq!(meta["reason"], "no_table_match");
+    assert!(
+        meta["receipt_id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "receipt_id must be a non-empty string"
+    );
+
+    // Original OpenAI response fields preserved.
+    assert!(body["choices"].is_array(), "choices must be present");
+}
+
+/// GeneralLane must not intercept data queries — FastLane handles them normally
+/// and X-Zemtik-Engine returns fast_lane.
+#[tokio::test]
+async fn general_passthrough_does_not_affect_data_queries() {
+    let (addr, mock_openai) = spawn_test_proxy_with_general_passthrough(0).await;
+    mount_openai_chat_mock(&mock_openai).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "What was the total aws_spend in Q1 2024?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 200, "data query must still return 200");
+    assert_eq!(
+        resp.headers().get("x-zemtik-engine").and_then(|v| v.to_str().ok()),
+        Some("fast_lane"),
+        "data query must route via FastLane"
+    );
+}
+
+/// Streaming guard still returns 400 when ZEMTIK_GENERAL_PASSTHROUGH is NOT set.
+/// Regression for the existing streaming_guard_returns_400_in_standard_mode test.
+#[tokio::test]
+async fn streaming_still_400_without_general_passthrough() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "stream": true,
+            "messages": [{"role": "user", "content": "What was Q1 2024 aws_spend?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "StreamingNotSupported");
+}
+
+/// When ZEMTIK_GENERAL_PASSTHROUGH=1 and stream:true is sent with a data query
+/// (intent succeeds → data lane), it must still return 400 StreamingNotSupported.
+#[tokio::test]
+async fn general_passthrough_blocks_streaming_for_data_queries() {
+    let (addr, _mock) = spawn_test_proxy_with_general_passthrough(0).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "stream": true,
+            "messages": [{"role": "user", "content": "What was Q1 2024 aws_spend?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "StreamingNotSupported");
+}
+
+/// FastLane responses now include X-Zemtik-Engine: fast_lane header.
+#[tokio::test]
+async fn fast_lane_has_x_zemtik_engine_header() {
+    let (addr, mock_openai) = spawn_test_proxy().await;
+    mount_openai_chat_mock(&mock_openai).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Total aws_spend Q1 2024"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-zemtik-engine").and_then(|v| v.to_str().ok()),
+        Some("fast_lane"),
+        "FastLane must set X-Zemtik-Engine: fast_lane"
+    );
+}
+
+/// /health response includes general_queries_today and intent_failures_today counters.
+#[tokio::test]
+async fn health_includes_general_lane_counters() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body.get("general_queries_today").is_some(),
+        "health must include general_queries_today, body: {body}"
+    );
+    assert!(
+        body.get("intent_failures_today").is_some(),
+        "health must include intent_failures_today, body: {body}"
+    );
+}
+
+/// GeneralLane rate limiter: with max_rpm=1, the second rapid request returns 429.
+#[tokio::test]
+async fn general_lane_rpm_budget_exceeded() {
+    let (addr, mock_openai) = spawn_test_proxy_with_general_passthrough(1).await;
+    mount_openai_chat_mock(&mock_openai).await;
+    let client = reqwest::Client::new();
+
+    let general_body = json!({
+        "model": "gpt-5.4-nano",
+        "messages": [{"role": "user", "content": "Explain cloud computing to me."}]
+    });
+
+    // First request — should be allowed (under limit).
+    let resp1 = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&general_body)
+        .send()
+        .await
+        .expect("request 1 failed");
+    assert_eq!(resp1.status(), 200, "first request must be allowed");
+
+    // Second request — same window, over limit.
+    let resp2 = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&general_body)
+        .send()
+        .await
+        .expect("request 2 failed");
+    assert_eq!(resp2.status(), 429, "second request must be rate-limited");
+    let body2: Value = resp2.json().await.unwrap();
+    assert_eq!(body2["code"], "GeneralLaneBudgetExceeded");
+}

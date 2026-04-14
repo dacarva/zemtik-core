@@ -301,10 +301,11 @@ pub struct IntentResult {
     pub rewrite_method: Option<RewriteMethod>,
 }
 
-/// Routing decision: fast BabyJubJub attestation vs. full ZK proof.
+/// Routing decision: fast BabyJubJub attestation vs. full ZK proof vs. general passthrough.
 pub enum Route {
     FastLane,
     ZkSlowLane,
+    GeneralLane,
 }
 
 /// Result of the FastLane engine.
@@ -375,6 +376,7 @@ pub enum ZemtikErrorCode {
     InvalidRequest,
     QueryFailed,
     RewritingFailed,
+    GeneralLaneBudgetExceeded,
 }
 
 impl std::fmt::Display for ZemtikErrorCode {
@@ -385,6 +387,7 @@ impl std::fmt::Display for ZemtikErrorCode {
             Self::InvalidRequest => write!(f, "InvalidRequest"),
             Self::QueryFailed => write!(f, "QueryFailed"),
             Self::RewritingFailed => write!(f, "RewritingFailed"),
+            Self::GeneralLaneBudgetExceeded => write!(f, "GeneralLaneBudgetExceeded"),
         }
     }
 }

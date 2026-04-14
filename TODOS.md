@@ -180,6 +180,28 @@ Added from `/plan-devex-review` of the query rewriting plan (worktree-worktree-g
 
 ---
 
+## ~~Stage 1 — Audit Trail Integrity (2026-04-14)~~ **Completed: v0.12.0-dev**
+
+- ed25519 manifest signing, `outgoing_prompt_hash` as ZK circuit public input, bundle_version=3, GET /public-key endpoint, `manifest_key_id` in receipts.
+- All 10 manual QA checks passed. 299 unit + integration tests green.
+- Bundle-demotion-attack (flip bundle_version 3→2): blocked by public_inputs size check (224 vs 192 bytes). Incidental but effective defense.
+- Known gap: v2 `outgoing_prompt_hash` display in `zemtik verify` shows "Circuit public input #6" even though for v2 it's sidecar-sourced. Cosmetic only.
+- Known gap: CLI pipeline passes `outgoing_prompt_hash=0` to nargo execute — breaks with v3 circuit (assert(outgoing_prompt_hash != 0)). CLI pipeline must be updated to hash the hardcoded query before passing it as a witness.
+- Known gap: `verify_bundle` in offline mode requires the prover's local `~/.zemtik/keys/bank_sk` to reconstruct the ed25519 verifying key. Auditors running `zemtik verify` on a third-party bundle need a portable verifying-key sidecar or the `GET /public-key` endpoint. Tracked for Stage 2.
+
+---
+
+## DX additions — GeneralLane DX review (2026-04-13)
+
+Added from `/plan-devex-review` of fix/general-queries.
+
+### ~~intent_failures_today counter approach (P1, v0.11.0)~~ **Completed: v0.11.0 (2026-04-13)**
+
+- **What:** `intent_failures_today: u64` and `general_queries_today: u64` added to `/health` response. Uses `count_engine_today("general_lane")` and `count_intent_failures_today()` — both backed by the v7 composite index. Intent failures use the existing `intent_rejections` table (no new DB writes on error paths).
+- **Completed:** fix/general-queries PR.
+
+---
+
 ## P1 — Gating questions (blocking implementation)
 
 ### SF client demand confirmation (feat/routing-engine, before implementation)
@@ -653,6 +675,48 @@ See canonical entry below: [PostgREST smoke-test at startup (P2, v0.9.2)](#postg
 
 ---
 
+## GeneralLane post-launch TODOs (added 2026-04-13, plan-ceo-review fix/general-queries)
+
+### Per-table general_passthrough override (P3)
+- **What:** Add `general_passthrough: bool` field to `TableConfig` in `schema_config.json`. When false, GeneralLane is blocked for requests that partially matched this table (intent identified the table but routing failed).
+- **Why:** Operators with sensitive tables want GeneralLane opt-out at table granularity without disabling it globally.
+- **Pros:** Defense-in-depth for sensitive schemas.
+- **Cons:** Only applies to partial-match cases where intent resolved a table. Cannot apply when intent fails entirely (NoTableIdentified) — the full-miss case that GeneralLane primarily handles. Needs redesign to clarify semantics before implementing.
+- **Context:** Rejected from fix/general-queries PR (Codex found it logically broken for the primary use case). Revisit if an operator requests it with a concrete partial-match scenario.
+- **Effort:** S (human: ~2h / CC: ~10min)
+- **Priority:** P3
+- **Depends on:** fix/general-queries merged, operator feedback on real use cases
+
+### Cluster-aware GeneralLane rate limiting (P2)
+- **What:** Move `ZEMTIK_GENERAL_MAX_RPM` from per-instance `VecDeque<Instant>` sliding window to a Redis-backed sliding window.
+- **Why:** Replicated Zemtik deployments (multiple proxy instances behind a load balancer) get N × MAX_RPM effective throughput. Per-instance limiting is only accurate for single-instance deployments.
+- **Pros:** Accurate cluster-wide enforcement. Required for production multi-instance deployments.
+- **Cons:** New external dependency (Redis). Adds operational complexity (Redis availability becomes a proxy dependency).
+- **Context:** v1 GeneralLane rate limiter is per-instance by design. Acceptable for single-instance pilots. Block for multi-instance production launch.
+- **Effort:** M (human: ~4h / CC: ~20min + Redis dep)
+- **Priority:** P2 — block for multi-instance production
+
+### GeneralLane adversarial intent-miss threat model (P3)
+- **What:** Document and optionally implement detection for prompts that deliberately cause intent classifier miss to force routing into GeneralLane when `ZEMTIK_GENERAL_PASSTHROUGH=1`.
+- **Why:** BGE-small-en (the embedding backend) is not adversarially robust. An attacker who knows `ZEMTIK_GENERAL_PASSTHROUGH=1` could craft prompts that always fail intent extraction to reach OpenAI without ZK verification — potentially extracting data-adjacent information via the general lane.
+- **Pros:** Closes a known attack surface for operators who have enabled passthrough.
+- **Cons:** Hard to implement well without false positives. Most Zemtik deployments are enterprise-internal, reducing exposure. The receipt audit trail is the primary mitigation today.
+- **Context:** Raised during fix/general-queries eng review (outside voice). Applies only when `ZEMTIK_GENERAL_PASSTHROUGH=1`. A basic mitigation could be a second-pass similarity check against known data patterns before allowing GeneralLane to fire.
+- **Effort:** M (human: ~4h / CC: ~20min)
+- **Priority:** P3 — non-blocking, mitigated by opt-in flag and receipt audit trail
+- **Depends on:** fix/general-queries merged
+
+### GeneralLane idempotency key support (P3)
+- **What:** Support `Idempotency-Key` request header to deduplicate rapid retries. Same key within a TTL window returns the cached receipt_id and skips a second forward to OpenAI.
+- **Why:** Network retries or client double-submits write two receipts and forward twice. Audit trail shows duplicate entries; operator billed twice.
+- **Pros:** Clean audit trail. Prevents duplicate OpenAI billing on retries.
+- **Cons:** Requires in-memory cache or DB lookup per GeneralLane request. Cache TTL adds state to the rate limiter. More complexity than the value warrants in v1.
+- **Context:** Added as P3 during fix/general-queries review. No operator has reported duplicate receipt issues yet.
+- **Effort:** M (human: ~3h / CC: ~15min)
+- **Priority:** P3
+
+---
+
 ## Completed — v0.9.1 (2026-04-11)
 
 All items below shipped in `fix/integration-issues` → PR merged to main.
@@ -699,3 +763,21 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 - **Context:** When promoting, make empty `ZEMTIK_MCP_ALLOWED_PATHS` warn at startup ("no path allowlist configured — all paths allowed"). Add a startup validation block entry for MCP similar to schema_config.json. Document in TROUBLESHOOTING.md.
 - **Depends on:** MCP STDIO mode shipped (feat/mcp-attestation-proxy)
 - **Partial fix by /qa 2026-04-14:** SSE mode with empty `ZEMTIK_MCP_ALLOWED_PATHS` now denies all reads (ISSUE-002, commit 118f438). STDIO mode still allow-all when empty. This TODO tracks promoting STDIO to the same enforcement.
+
+---
+
+## BN254 field encoding + HKDF safety (P2, before second Aztec demo)
+
+Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy-yawning-creek).
+
+### SHA-256 → BN254 truncation safety
+- **What:** SHA-256 produces 256 bits; BN254 scalar field is ~254 bits (2^254 - delta). Truncating the 2 MSBs is safe for nearly all inputs but can produce `value == 0` or `value >= field_modulus` in extreme edge cases. Add a check: if truncated value >= BN254_FIELD_ORDER or == 0, return Err with a clear message ("prompt hash encoding out of BN254 range — retry or report this input").
+- **Why:** The Aztec engineer will inspect the public input encoding during review. A panic or silent wrong value would undermine the cryptographic credibility of the commitment.
+- **Context:** The field modulus is `21888242871839275222246405745257275088548364400416034343698204186575808495617` (BN254 scalar field). SHA-256 of any 256-bit random input has probability ~2^-254 of landing out of range — extremely rare but worth a runtime guard.
+- **Effort:** XS (CC: ~5 min)
+
+### HKDF derive_manifest_signing_key() error handling
+- **What:** `derive_manifest_signing_key()` should return `anyhow::Result<ed25519_dalek::SigningKey>` instead of unwrapping HKDF expand. If `hk.expand()` fails (e.g., bad OKM length), it would panic in the hot path.
+- **Why:** Hard startup error is acceptable (matches ZEMTIK_TUNNEL_API_KEY pattern), but panic is not. Use `hk.expand(...)?.` and propagate as startup error.
+- **Context:** HKDF expand can only fail if the output length exceeds 255 * HashLen. For SHA-256 with 32-byte output this will never fail in practice — but the guard is cheap and the Aztec engineer will check error handling.
+- **Effort:** XS (CC: ~2 min)

@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-04-14
+
+### Added
+- **Stage 1 audit trail integrity** — proof bundles now carry a cryptographic chain of custody from the bank signing key to the manifest.
+- **ed25519 manifest signing**: `bundle_version=3` bundles include `manifest_sig` — a 64-byte ed25519 signature over the JCS-canonical (RFC 8785) manifest JSON. Key derived via HKDF-SHA256(bank_sk, info="zemtik-manifest-signing-v1"). `manifest_key_id` is SHA-256(raw verifying key bytes).
+- **`GET /public-key`** endpoint (unauthenticated): returns `ed25519_manifest_pub` (hex), `manifest_key_id` (hex), `babyjubjub_pub_x`, `babyjubjub_pub_y`. Auditors can retrieve the verifying key and independently check manifest signatures.
+- **`outgoing_prompt_hash` ZK circuit input**: SHA-256(original user prompt) with top 2 bits masked to fit BN254 field — now a public input to both the SUM and COUNT circuits. Binds the proof to the exact prompt that triggered it. Circuit enforces `assert(outgoing_prompt_hash != 0)` (probability of collision ~2^-254).
+- **Receipts DB v8 migration**: adds `manifest_key_id TEXT` column to the receipts ledger.
+- **BJJ public key precomputed at startup**: `bjj_pub_x` and `bjj_pub_y` computed once from `bank_sk` and stored in `ProxyState` — no per-request scalar multiplication.
+
+### Changed
+- **v3 public inputs layout** (7 fields, 224 bytes): adds `outgoing_prompt_hash` at index 5 (bytes 160–192); `verified_aggregate` moves to index 6 (bytes 192–224). v1/v2 bundles (192 bytes, 6 fields) continue to verify unchanged.
+- **`cross_verify_sidecar`** updated for v3 field layout: aggregate is now read from bytes 216–224 in v3 bundles.
+
+### Fixed (security)
+- **Bundle demotion attack**: `bundle_version` is now derived from the binary size of `public_inputs` (224 bytes → v3 forced; 192 bytes → v1/v2 trusted from claim) rather than from the untrusted `request_meta.json`. Claiming `bundle_version < 3` for a 224-byte inputs file is a hard integrity failure.
+- **JCS truncation attack**: manifest reconstruction now uses `bail!` for every required field (algorithm, bundle_version, created_at, proof_hash, public_inputs_hash, request_meta_hash, sidecar_hash, vk_hash). A missing field is a hard bundle rejection — no silent partial-manifest reconstruction.
+- **`manifest_key_id` fingerprint**: was SHA-256(hex-encoded string); corrected to SHA-256(raw verifying key bytes) — standard auditor convention.
+
+### Tests
+- **`test_keys.rs`**: 4 new tests for `derive_manifest_signing_keypair` — deterministic derivation, sign/verify roundtrip, unique-per-seed, tampered-payload rejection.
+- **`test_verify.rs`**: 7 new v3 bundle tests — valid manifest sig passes, tampered sig rejected, tampered request_meta rejected, demotion attack detected, v3 cross_verify sidecar passes, v3 cross_verify OPH mismatch detected.
+- **`src/proxy.rs`**: 4 new tests for `compute_prompt_hash_field` — known-answer, empty string non-zero, different prompts differ, deterministic.
+- **`src/verify.rs`**: 2 new inline tests for v3 `cross_verify_sidecar`.
+
+## [0.11.0] - 2026-04-13
+
+### Added
+- **GeneralLane**: non-data query passthrough via `ZEMTIK_GENERAL_PASSTHROUGH=1`. When intent extraction fails to match any configured table (after rewriter exhaustion), requests are forwarded to OpenAI with a receipt and `zemtik_meta` response block instead of returning HTTP 400.
+- **`ZEMTIK_GENERAL_MAX_RPM`**: per-instance rate limiter for the general lane (default: 0/unlimited). Sliding 60-second window; returns HTTP 429 `GeneralLaneBudgetExceeded` on breach.
+- **`zemtik_meta` field** in GeneralLane JSON responses: `{ engine_used, zk_coverage, reason, receipt_id }`. `reason` is `"no_table_match"` (NoTableIdentified) or `"time_range_ambiguous"` (TimeRangeAmbiguous).
+- **`X-Zemtik-Meta` header**: URL-encoded JSON of `zemtik_meta` — primary metadata signal for streaming responses.
+- **`general_queries_today`** and **`intent_failures_today`** counters in `/health` response.
+- **Receipts DB v7 migration**: composite index `idx_receipts_engine_created` on `(engine_used, created_at)` for `/health` counter queries.
+- **Streaming passthrough for GeneralLane**: when `ZEMTIK_GENERAL_PASSTHROUGH=1` and `stream: true`, general queries are forwarded as SSE. `zemtik_meta` is NOT injected into the SSE body; use `X-Zemtik-Meta` header instead.
+
+### Changed (behavioral)
+- **`X-Zemtik-Engine: <lane>` header** is now present on ALL proxy responses (FastLane, ZK SlowLane, GeneralLane). Previously absent on ZK SlowLane responses without a committed bundle. Clients that validate response headers should allow this header.
+- **NoTableIdentified 400 hint** updated to mention `ZEMTIK_GENERAL_PASSTHROUGH=1` as the opt-in for non-data queries.
+- **CORS `expose_headers`** now includes `x-zemtik-engine` and `x-zemtik-meta` so cross-origin clients can read them.
+- **Shared SSE helper** extracted from `tunnel.rs` to `proxy.rs` (`is_hop_by_hop`, `stream_openai_passthrough`) to avoid duplication.
+
+### Fixed
+- **GeneralLane 429 audit trail**: rate-limited requests now write a receipt with `proof_status = "general_lane_rate_limited"` so they appear in audit logs and `general_queries_today`.
+- **`Retry-After` header on 429**: GeneralLane rate-limit responses now include `Retry-After: N` computed from the sliding window oldest entry.
+- **Upstream `Content-Type` passthrough**: GeneralLane non-streaming responses now forward the upstream `Content-Type` instead of hardcoding `application/json`.
+- **Streaming task timeout**: `stream_openai_passthrough` now applies a 60s per-chunk timeout — stalled upstream connections release the connection pool entry instead of hanging indefinitely.
+- **Receipts v7 migration tests**: updated assertions to match schema version 7; added `test_migration_v6_to_v7_adds_index`.
+- **Daily counter tests**: `count_engine_today` and `count_intent_failures_today` now have direct unit tests including old-timestamp boundary cases.
+- **Config tests**: `ZEMTIK_GENERAL_PASSTHROUGH` and `ZEMTIK_GENERAL_MAX_RPM` now have dedicated parse and validation tests.
+
 ## [0.10.0] - 2026-04-12
 
 ### Added

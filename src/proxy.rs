@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::config::{AggFn, AppConfig, RewriterConfig, ZemtikMode};
-use crate::intent::IntentBackend;
+use crate::intent::{IntentBackend, IntentError};
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
     OpenAiRequestLog, OpenAiResponseLog, QueryParams, RewriteMethod, Route, SchemaValidationResult,
@@ -62,6 +62,25 @@ pub(crate) struct ProxyState {
     pub(crate) schema_validation: Arc<SchemaValidationResult>,
     /// Query rewriter configuration. None when ZEMTIK_QUERY_REWRITER is off (default).
     pub(crate) rewriter_config: Option<Arc<RewriterConfig>>,
+    /// Whether ZEMTIK_GENERAL_PASSTHROUGH is enabled. Copied from config at startup.
+    pub(crate) general_passthrough_enabled: bool,
+    /// Sliding-window rate limiter for GeneralLane. None when general_max_rpm == 0 (unlimited).
+    pub(crate) general_rate_limiter: Option<Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>>,
+    /// Max requests/minute for GeneralLane (0 = unlimited).
+    pub(crate) general_max_rpm: u32,
+    /// ed25519 manifest signing public key, hex-encoded. Derived from bank_sk at startup.
+    /// Served on GET /public-key. Stable across restarts as long as bank_sk is unchanged.
+    pub(crate) ed25519_manifest_pub_hex: String,
+    /// SHA-256(raw ed25519 verifying key bytes) — key fingerprint added to every receipt.
+    pub(crate) manifest_key_id: String,
+    /// BabyJubJub public key components, precomputed at startup for GET /public-key.
+    /// Avoids per-request scalar multiplication (expensive) on the /public-key hot path.
+    pub(crate) bjj_pub_x: String,
+    pub(crate) bjj_pub_y: String,
+    /// Optional public base URL for this deployment (e.g. "https://zemtik.example.com").
+    /// When set, zemtik_meta blocks include a verify_url hint.
+    #[allow(dead_code)]
+    pub(crate) public_url: Option<String>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -162,6 +181,32 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         .context("load or generate signing key")?;
     let signing_key_bytes = signing_key.key.to_vec();
 
+    // Derive ed25519 manifest signing key and compute key fingerprint.
+    let (ed25519_manifest_pub_hex, manifest_key_id) = {
+        let seed: [u8; 32] = signing_key_bytes.as_slice().try_into()
+            .context("bank_sk must be exactly 32 bytes")?;
+        let (_, verifying_key) = keys::derive_manifest_signing_keypair(&seed)
+            .context("derive manifest signing keypair at startup")?;
+        let pub_hex = hex::encode(verifying_key.as_bytes());
+        // Fingerprint: SHA-256 of the raw 32-byte public key (not the hex string).
+        // Standard practice: auditors independently compute fingerprint from raw key bytes.
+        let key_id = hex::encode(sha2::Sha256::digest(verifying_key.as_bytes()));
+        (pub_hex, key_id)
+    };
+
+    // Precompute BabyJubJub public key at startup to avoid per-request scalar multiplication
+    // on the GET /public-key endpoint.
+    let (bjj_pub_x, bjj_pub_y) = match babyjubjub_rs::PrivateKey::import(signing_key_bytes.clone()) {
+        Ok(sk) => {
+            let pk = sk.public();
+            (pk.x.to_string(), pk.y.to_string())
+        }
+        Err(e) => {
+            eprintln!("[STARTUP] Warning: failed to derive BabyJubJub public key: {}", e);
+            ("error".to_owned(), "error".to_owned())
+        }
+    };
+
     let mut pipeline_locks = HashMap::new();
     pipeline_locks.insert(AggFn::Sum, tokio::sync::Mutex::new(()));
     pipeline_locks.insert(AggFn::Count, tokio::sync::Mutex::new(()));
@@ -209,6 +254,14 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         None
     };
 
+    let general_rate_limiter = if config.general_max_rpm > 0 {
+        Some(Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::<std::time::Instant>::new(),
+        )))
+    } else {
+        None
+    };
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_locks,
@@ -225,16 +278,32 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         backpressure_count: std::sync::atomic::AtomicU64::new(0),
         schema_validation,
         rewriter_config,
+        general_passthrough_enabled: config.general_passthrough_enabled,
+        general_rate_limiter,
+        general_max_rpm: config.general_max_rpm,
+        ed25519_manifest_pub_hex,
+        manifest_key_id,
+        bjj_pub_x,
+        bjj_pub_y,
+        public_url: config.public_url.clone(),
     });
 
     // If any configured origin is "*", use the wildcard policy.
     // Mixing "*" with specific origins (e.g. "*, https://app") is unsupported —
     // the "*" takes precedence so callers don't get surprising no-CORS responses.
+    let exposed_headers: Vec<axum::http::HeaderName> = vec![
+        axum::http::HeaderName::from_static("x-zemtik-engine"),
+        axum::http::HeaderName::from_static("x-zemtik-meta"),
+        axum::http::HeaderName::from_static("x-zemtik-receipt-id"),
+        axum::http::HeaderName::from_static("x-zemtik-bundle-id"),
+        axum::http::HeaderName::from_static("x-zemtik-verify-url"),
+    ];
     let cors = if config.cors_origins.iter().any(|o| o == "*") {
         CorsLayer::new()
             .allow_origin(tower_http::cors::Any)
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any)
+            .expose_headers(exposed_headers)
     } else {
         let origins: Vec<HeaderValue> = config
             .cors_origins
@@ -245,16 +314,19 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .allow_origin(origins)
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any)
+            .expose_headers(exposed_headers)
     };
 
     let app = match config.mode {
         ZemtikMode::Standard => Router::new()
             .route("/health", get(handle_health))
+            .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(handle_chat_completions))
             .route("/verify/{id}", get(handle_verify))
             .route("/{*path}", any(handle_passthrough)),
         ZemtikMode::Tunnel => Router::new()
             .route("/health", get(handle_health))
+            .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(crate::tunnel::handle_tunnel))
             .route("/tunnel/audit", get(crate::tunnel::handle_audit))
             .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
@@ -373,10 +445,14 @@ async fn handle_chat_completions(
         })
         .unwrap_or_default();
 
-    // Streaming guard (standard mode only). Tunnel mode explicitly supports stream:true
-    // via forward_streaming — do NOT apply this guard in tunnel mode.
+    // Streaming guard (standard mode only). Tunnel mode supports stream:true via
+    // forward_streaming. GeneralLane also supports streaming when
+    // ZEMTIK_GENERAL_PASSTHROUGH=1 — allow stream:true through so intent extraction
+    // can run; data lanes reject stream:true at their own dispatch point below.
+    let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
     if state.config.mode == crate::config::ZemtikMode::Standard
-        && body.get("stream").and_then(|v| v.as_bool()) == Some(true)
+        && is_streaming
+        && !state.general_passthrough_enabled
     {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -441,10 +517,24 @@ async fn handle_chat_completions(
         Err(intent_err) => {
             println!("[ROUTE] Intent rejection: {}", intent_err);
 
+            // True when GeneralLane will handle this request — not a user-visible failure.
+            // Used to suppress the intent_rejection receipt so that intent_failures_today
+            // only counts queries that resulted in a 400, not queries rescued by GeneralLane.
+            let divert_to_general_lane = state.general_passthrough_enabled
+                && matches!(
+                    intent_err,
+                    IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous
+                );
+
             // Helper: log rejection to receipts DB synchronously.
             // Called only on final failure paths so that a successful rewrite does not
             // produce a phantom rejection record alongside the success receipt.
+            // Skipped when divert_to_general_lane is true — the general_lane receipt
+            // already records the request, and the query was never rejected from the user's POV.
             let log_rejection = |db: &std::sync::MutexGuard<rusqlite::Connection>, msg: &str| {
+                if divert_to_general_lane {
+                    return;
+                }
                 if let Err(db_err) = receipts::insert_intent_rejection(db, &prompt, msg) {
                     eprintln!("[WARN] Failed to log intent rejection to receipts DB: {}", db_err);
                 }
@@ -497,9 +587,14 @@ async fn handle_chat_completions(
                         .get(&resolved.table)
                         .and_then(|tc| tc.client_id)
                         .unwrap_or(state.config.client_id);
+                    // Data lanes do not support streaming.
+                    if is_streaming {
+                        return Ok(streaming_not_supported_for_data_lane());
+                    }
                     return match route {
                         Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
-                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
+                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), resolved, effective_client_id, total_start).await,
+                        Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                     };
                 }
 
@@ -546,22 +641,41 @@ async fn handle_chat_completions(
                                     .and_then(|tc| tc.client_id)
                                     .unwrap_or(state.config.client_id);
                                 // Rewrite succeeded — do NOT log intent_rejection.
+                                // Data lanes do not support streaming.
+                                if is_streaming {
+                                    return Ok(streaming_not_supported_for_data_lane());
+                                }
                                 return match route {
                                     Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
-                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
+                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), r, effective_client_id, total_start).await,
+                                    Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                                 };
                             }
                             None => {
-                                // LLM rewrote but re-intent failed — final failure, log rejection.
-                                let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
-                                log_rejection(&db_guard, &intent_err.to_string());
+                                // LLM rewrote but re-intent failed — final failure.
+                                {
+                                    let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                                    log_rejection(&db_guard, &intent_err.to_string());
+                                } // drop db_guard before potential GeneralLane dispatch
+                                if state.general_passthrough_enabled
+                                    && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
+                                {
+                                    return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                                }
                                 return Ok(rewriting_failed_400("unresolvable"));
                             }
                         }
                     }
                     Ok(rewriter::RewriteResult::Unresolvable) => {
-                        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
-                        log_rejection(&db_guard, &intent_err.to_string());
+                        {
+                            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                            log_rejection(&db_guard, &intent_err.to_string());
+                        } // drop db_guard before potential GeneralLane dispatch
+                        if state.general_passthrough_enabled
+                            && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
+                        {
+                            return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                        }
                         return Ok(rewriting_failed_400("unresolvable"));
                     }
                     Err(e) => {
@@ -581,15 +695,24 @@ async fn handle_chat_completions(
                         };
                         let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
                         log_rejection(&db_guard, &intent_err.to_string());
+                        // Rewriter timeout is a transient infra error — do NOT route to GeneralLane
+                        // (an operator who hits a timeout wants to debug the rewriter, not silently
+                        // fall back). Only Unresolvable/NoTableIdentified routes to GeneralLane.
                         return Ok(rewriting_failed_400(&hint_kind));
                     }
                 }
             }
 
-            // Rewriter disabled — log rejection and return the original 400.
+            // Rewriter disabled (or exhausted without rewriter path above) — log rejection.
             {
                 let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
                 log_rejection(&db_guard, &intent_err.to_string());
+            }
+            // Route to GeneralLane if enabled and the error is a genuine non-data query.
+            if state.general_passthrough_enabled
+                && matches!(intent_err, crate::intent::IntentError::NoTableIdentified | crate::intent::IntentError::TimeRangeAmbiguous)
+            {
+                return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
             }
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -598,7 +721,7 @@ async fn handle_chat_completions(
                         "type": "zemtik_intent_error",
                         "code": ZemtikErrorCode::NoTableIdentified,
                         "message": format!("Intent extraction failed: {}", intent_err),
-                        "hint": "Add aliases matching your users' phrasing to your table config in schema_config.json.",
+                        "hint": "If this query references your data, add aliases to schema_config.json (see docs/HOW_TO_ADD_TABLE.md). If this is a general (non-data) query, set ZEMTIK_GENERAL_PASSTHROUGH=1 to route it through the general lane.",
                         "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/HOW_TO_ADD_TABLE.md"
                     }
                 })),
@@ -615,12 +738,35 @@ async fn handle_chat_completions(
         .and_then(|tc| tc.client_id)
         .unwrap_or(state.config.client_id);
 
+    // Data lanes do not support streaming (ZK pipeline must complete before response).
+    // If general_passthrough is enabled and stream:true reached here via a resolved data
+    // query, reject it explicitly rather than sending stream:true to the ZK/fast pipeline.
+    if is_streaming {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "zemtik_config_error",
+                    "code": ZemtikErrorCode::StreamingNotSupported,
+                    "message": "Set stream: false in your client configuration.",
+                    "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+                    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+                }
+            })),
+        ).into_response());
+    }
+
     match route {
         Route::FastLane => {
             handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
         }
         Route::ZkSlowLane => {
-            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt, intent_result, effective_client_id, total_start).await
+        }
+        Route::GeneralLane => {
+            // GeneralLane variant is never produced by decide_route (it only returns
+            // FastLane or ZkSlowLane for successfully resolved intents). Handled defensively.
+            handle_general_lane(state, body, api_key, prompt, prompt_hash, None, total_start).await
         }
     }
 }
@@ -838,6 +984,7 @@ async fn handle_fast_lane(
                 actual_row_count: None,
                 rewrite_method: intent_result.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent_result.rewritten_query.clone(),
+                manifest_key_id: Some(state.manifest_key_id.clone()),
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
@@ -915,6 +1062,241 @@ fn rewriting_disabled_400() -> Response {
         })),
     )
         .into_response()
+}
+
+/// HTTP 400 for stream:true sent to a data lane (FastLane or ZK SlowLane).
+/// Separate from the entry guard so rewriter dispatch paths can also call it.
+fn streaming_not_supported_for_data_lane() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "type": "zemtik_config_error",
+                "code": ZemtikErrorCode::StreamingNotSupported,
+                "message": "Set stream: false in your client configuration.",
+                "hint": "The ZK pipeline must complete before any part of the response can be sent.",
+                "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Handle a GeneralLane request: forward non-data queries to OpenAI with a receipt and
+/// zemtik_meta metadata block. Supports both streaming (SSE passthrough) and non-streaming.
+///
+/// Called when ZEMTIK_GENERAL_PASSTHROUGH=1 and intent extraction fails to match a table.
+/// `intent_err`: the original IntentError that triggered the GeneralLane route; None for
+/// the rare defensive GeneralLane arm from the happy-path route match (should not occur).
+async fn handle_general_lane(
+    state: Arc<ProxyState>,
+    body: Value,
+    api_key: String,
+    _prompt: String,
+    prompt_hash: String,
+    intent_err: Option<IntentError>,
+    _total_start: Instant,
+) -> Result<Response, ProxyError> {
+    use std::time::Duration;
+    use axum::http::HeaderName;
+
+    let receipt_id = Uuid::new_v4().to_string();
+
+    // ── Rate limit check ────────────────────────────────────────────────────
+    if let Some(ref limiter) = state.general_rate_limiter {
+        let mut window = limiter.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let cutoff = now - Duration::from_secs(60);
+        window.retain(|&t| t > cutoff);
+        if window.len() as u32 >= state.general_max_rpm {
+            // Compute Retry-After: seconds until the oldest window entry expires.
+            let retry_after = window
+                .front()
+                .map(|oldest| {
+                    let elapsed = now.duration_since(*oldest);
+                    if elapsed < Duration::from_secs(60) {
+                        (Duration::from_secs(60) - elapsed).as_secs() + 1
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(60);
+
+            // Write a receipt so rate-limited requests appear in audit trail
+            // and general_queries_today counts them.
+            let now_str = Utc::now().to_rfc3339();
+            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = receipts::insert_receipt(&db_guard, &receipts::Receipt {
+                id: receipt_id.clone(),
+                bundle_path: String::new(),
+                proof_status: receipts::PROOF_STATUS_GENERAL_LANE_RATE_LIMITED.to_owned(),
+                circuit_hash: String::new(),
+                bb_version: String::new(),
+                prompt_hash: prompt_hash.clone(),
+                request_hash: prompt_hash.clone(),
+                created_at: now_str,
+                engine_used: "general_lane".to_owned(),
+                proof_hash: None,
+                data_exfiltrated: 0,
+                intent_confidence: None,
+                outgoing_prompt_hash: None,
+                signing_version: None,
+                actual_row_count: None,
+                rewrite_method: None,
+                rewritten_query: None,
+                manifest_key_id: None,
+            }) {
+                eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
+            }
+            drop(db_guard);
+
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "code": "GeneralLaneBudgetExceeded",
+                    "message": "General lane rate limit exceeded. Increase ZEMTIK_GENERAL_MAX_RPM or set to 0 for unlimited.",
+                    "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/CONFIGURATION.md#general-passthrough-v0110"
+                })),
+            ).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after.to_string())
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("60")),
+            );
+            return Ok(resp);
+        }
+        window.push_back(now);
+    }
+
+    // ── reason string from intent error ────────────────────────────────────
+    let reason = match &intent_err {
+        Some(IntentError::NoTableIdentified) => "no_table_match",
+        Some(IntentError::TimeRangeAmbiguous) => "time_range_ambiguous",
+        _ => "intent_error",
+    };
+
+    // ── Write receipt BEFORE forwarding (FastLane parity) ──────────────────
+    let now_str = Utc::now().to_rfc3339();
+    let receipt_write_result = {
+        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+        receipts::insert_receipt(&db_guard, &receipts::Receipt {
+            id: receipt_id.clone(),
+            bundle_path: String::new(),
+            proof_status: receipts::PROOF_STATUS_GENERAL_LANE.to_owned(),
+            circuit_hash: String::new(),
+            bb_version: String::new(),
+            prompt_hash: prompt_hash.clone(),
+            request_hash: prompt_hash.clone(),
+            created_at: now_str.clone(),
+            engine_used: "general_lane".to_owned(),
+            proof_hash: None,
+            data_exfiltrated: 0,
+            intent_confidence: None,
+            outgoing_prompt_hash: None,
+            signing_version: None,
+            actual_row_count: None,
+            rewrite_method: None,
+            rewritten_query: None,
+            manifest_key_id: None,
+        })
+    };
+    if let Err(e) = receipt_write_result {
+        eprintln!("[GENERAL_LANE] Warning: failed to write receipt {}: {}", receipt_id, e);
+        // Continue — receipt failure does not block the response (FastLane parity).
+    }
+
+    let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
+
+    let zemtik_meta = serde_json::json!({
+        "engine_used": "general_lane",
+        "zk_coverage": "none",
+        "reason": reason,
+        "receipt_id": receipt_id,
+    });
+    let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
+
+    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
+
+    if is_streaming {
+        // ── Streaming path: SSE passthrough, metadata via header only ──────
+        let upstream = state
+            .http_client
+            .post(&openai_url)
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane upstream error: {}", e)))?;
+
+        let mut resp = stream_openai_passthrough(upstream).await;
+        resp.headers_mut().insert(
+            HeaderName::from_static("x-zemtik-engine"),
+            HeaderValue::from_static("general_lane"),
+        );
+        if let Ok(v) = HeaderValue::from_str(&meta_header_val) {
+            resp.headers_mut().insert(HeaderName::from_static("x-zemtik-meta"), v);
+        }
+        return Ok(resp);
+    }
+
+    // ── Non-streaming path ──────────────────────────────────────────────────
+    let upstream = state
+        .http_client
+        .post(&openai_url)
+        .bearer_auth(&api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane upstream error: {}", e)))?;
+
+    let resp_status = upstream.status();
+    let content_type = upstream
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+
+    let resp_bytes = upstream
+        .bytes()
+        .await
+        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane read body: {}", e)))?;
+
+    // Inject zemtik_meta into the response body when Content-Type is application/json
+    // and the body is a JSON object (not array). Fall back to header-only for other cases.
+    let final_body: Vec<u8> = if content_type.contains("application/json") {
+        if let Ok(mut v) = serde_json::from_slice::<Value>(&resp_bytes) {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("zemtik_meta".to_string(), zemtik_meta);
+                serde_json::to_vec(&v).unwrap_or_else(|_| resp_bytes.to_vec())
+            } else {
+                resp_bytes.to_vec()
+            }
+        } else {
+            resp_bytes.to_vec()
+        }
+    } else {
+        resp_bytes.to_vec()
+    };
+
+    let http_status = StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK);
+    let effective_content_type = if content_type.is_empty() {
+        "application/json"
+    } else {
+        &content_type
+    };
+    let mut response = Response::builder()
+        .status(http_status)
+        .header(axum::http::header::CONTENT_TYPE, effective_content_type)
+        .header(HeaderName::from_static("x-zemtik-engine"), "general_lane")
+        .body(axum::body::Body::from(final_body))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()));
+
+    if let Ok(v) = HeaderValue::from_str(&meta_header_val) {
+        response.headers_mut().insert(HeaderName::from_static("x-zemtik-meta"), v);
+    }
+
+    Ok(response)
 }
 
 /// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
@@ -1018,11 +1400,13 @@ async fn handle_zk_slow_lane(
     api_key: String,
     request_hash: String,
     prompt_hash: String,
+    original_prompt: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
     total_start: Instant,
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
+    let prompt_hash_field = compute_prompt_hash_field(&original_prompt);
 
     // Resolve the aggregation function for this table from schema_config.
     let agg_fn = state.config.schema_config
@@ -1046,7 +1430,7 @@ async fn handle_zk_slow_lane(
             .expect("pipeline_locks must contain Count")
             .lock()
             .await;
-        run_avg_pipeline(Arc::clone(&state), request_hash.clone(), prompt_hash.clone(), intent.clone(), effective_client_id)
+        run_avg_pipeline(Arc::clone(&state), request_hash.clone(), prompt_hash.clone(), prompt_hash_field.clone(), intent.clone(), effective_client_id)
             .await
             .map_err(|e| {
                 let msg = e.to_string();
@@ -1070,6 +1454,7 @@ async fn handle_zk_slow_lane(
         let key_bytes = state.signing_key_bytes.clone();
         let req_hash = request_hash.clone();
         let prm_hash = prompt_hash.clone();
+        let prm_hash_field = prompt_hash_field.clone();
         let intent_clone = intent.clone();
         let agg_fn_clone = agg_fn.clone();
 
@@ -1078,7 +1463,7 @@ async fn handle_zk_slow_lane(
                 .enable_all()
                 .build()
                 .context("build local runtime")?;
-            rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id, agg_fn_clone))
+            rt.block_on(run_zk_pipeline(config_clone, key_bytes, req_hash, prm_hash, prm_hash_field, intent_clone, effective_client_id, agg_fn_clone))
         })
         .await
         .context("ZK blocking task panicked")?
@@ -1118,10 +1503,11 @@ async fn handle_zk_slow_lane(
                 data_exfiltrated: 0,
                 intent_confidence: Some(intent.confidence),
                 outgoing_prompt_hash: zk.outgoing_prompt_hash.clone(),
-                signing_version: None,
+                signing_version: Some(3),
                 actual_row_count: Some(zk.actual_row_count),
                 rewrite_method: intent.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent.rewritten_query.clone(),
+                manifest_key_id: Some(state.manifest_key_id.clone()),
             },
         ) {
             Ok(()) => Some(br),
@@ -1313,19 +1699,20 @@ async fn handle_zk_slow_lane(
     )
         .into_response();
 
+    // Always present — machine-readable lane signal.
+    if let Ok(val) = HeaderValue::from_str("zk_slow_lane") {
+        response.headers_mut().insert("x-zemtik-engine", val);
+    }
     if let Some(br) = committed_bundle {
         if let Ok(val) = HeaderValue::from_str(&br.bundle_id) {
             response.headers_mut().insert("x-zemtik-bundle-id", val);
         }
-        let verify_url = format!(
-            "http://localhost:{}/verify/{}",
-            state.config.proxy_port, br.bundle_id
-        );
+        let verify_url = match state.public_url.as_deref() {
+            Some(base) => format!("{}/verify/{}", base, br.bundle_id),
+            None => format!("http://localhost:{}/verify/{}", state.config.proxy_port, br.bundle_id),
+        };
         if let Ok(val) = HeaderValue::from_str(&verify_url) {
             response.headers_mut().insert("x-zemtik-verify-url", val);
-        }
-        if let Ok(val) = HeaderValue::from_str("zk_slow_lane") {
-            response.headers_mut().insert("x-zemtik-engine", val);
         }
     }
 
@@ -1462,6 +1849,24 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Compute the BN254 Fr field element encoding of a user prompt for circuit public input #6.
+///
+/// Spec: SHA-256(prompt_bytes) → mask top 3 bits (AND 0x1f on byte 0) → "0x<64 hex chars>"
+///
+/// Masking top 3 bits guarantees the value is strictly less than the BN254 Fr modulus p
+/// (p ≈ 0x30644e72... — first byte 0x30 means any value with byte[0] ≤ 0x1f is < p).
+/// Using 0x3f (2 bits) is insufficient: values 0x31...–0x3f... would exceed p and be
+/// silently reduced mod p by the proving backend, creating a verifier/prover mismatch.
+///
+/// Independent verification:
+///   Python: import hashlib; h = hashlib.sha256(prompt.encode()).digest(); h = bytes([h[0]&0x1f]) + h[1:]; print("0x" + h.hex())
+pub fn compute_prompt_hash_field(prompt: &str) -> String {
+    let hash = Sha256::digest(prompt.as_bytes());
+    let mut buf: [u8; 32] = hash.into();
+    buf[0] &= 0x1f; // clear top 3 bits → guaranteed < BN254 Fr modulus
+    format!("0x{}", hex::encode(buf))
+}
+
 /// RAII guard that removes a per-run work directory on drop (success or error).
 struct RunDirGuard(std::path::PathBuf);
 impl Drop for RunDirGuard {
@@ -1472,11 +1877,17 @@ impl Drop for RunDirGuard {
 
 /// Run the full ZK pipeline (DB → sign → circuit → proof → bundle).
 /// Called from within spawn_blocking so DbBackend's !Sync is not an issue.
+///
+/// `outgoing_prompt_hash_field` — BN254 Field encoding of SHA-256(original_user_prompt),
+/// written to Prover.toml as circuit public input #6 and included in the signed manifest.
+/// Format: "0x<64 hex chars>" (top 2 bits cleared for BN254 field safety).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_zk_pipeline(
     config: Arc<AppConfig>,
     key_bytes: Vec<u8>,
     request_hash: String,
     prompt_hash: String,
+    outgoing_prompt_hash_field: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
     agg_fn: AggFn,
@@ -1514,6 +1925,7 @@ pub(crate) async fn run_zk_pipeline(
     let batch_count = txns_len / db::BATCH_SIZE;
     println!("[ZK] Loaded {} transactions ({} batches, {} real rows)", txns_len, batch_count, actual_row_count);
 
+    let signing_key_bytes_for_bundle = key_bytes.clone();
     let key = db::PrivateKey::import(key_bytes)
         .map_err(|e| anyhow::anyhow!("import signing key: {}", e))?;
     let batches = db::sign_transaction_batches(&txns, &key).context("sign batches")?;
@@ -1522,7 +1934,7 @@ pub(crate) async fn run_zk_pipeline(
     // Select the correct mini-circuit directory for this aggregation type.
     let circuit_dir = prover::circuit_dir_for(&agg_fn, &config.circuit_dir);
 
-    prover::generate_batched_prover_toml(&batches, &params, &circuit_dir)
+    prover::generate_batched_prover_toml(&batches, &params, &circuit_dir, &outgoing_prompt_hash_field)
         .context("write Prover.toml")?;
 
     let circuit_json = circuit_dir.join("target/zemtik_circuit.json");
@@ -1567,19 +1979,8 @@ pub(crate) async fn run_zk_pipeline(
         None => (None, None),
     };
 
-    // Compute outgoing_prompt_hash: SHA-256 of the ZK payload that will be sent to LLM.
-    let zk_payload_for_hash = serde_json::json!({
-        "category": intent.category_name,
-        "result": aggregate,
-        "agg_type": agg_fn.as_str(),
-        "data_provenance": "ZEMTIK_VALID_ZK_PROOF",
-        "raw_data_transmitted": false
-    });
-    let outgoing_prompt_hash_str = serde_json::to_string(&zk_payload_for_hash)
-        .context("serialize ZK payload for outgoing hash")?;
-    let outgoing_prompt_hash = hex::encode(Sha256::digest(outgoing_prompt_hash_str.as_bytes()));
-
-    // Generate bundle while run_dir is still present (guard cleans it up after)
+    // Generate bundle while run_dir is still present (guard cleans it up after).
+    // outgoing_prompt_hash_field = SHA-256(original_user_prompt) as BN254 Field — circuit public input #6.
     let bundle_result = if fully_verifiable {
         match bundle::generate_bundle(
             &params,
@@ -1588,12 +1989,13 @@ pub(crate) async fn run_zk_pipeline(
             &first_sig,
             Some(&request_hash),
             Some(&prompt_hash),
-            Some(&outgoing_prompt_hash),
+            Some(&outgoing_prompt_hash_field),
             &run_dir,
             &circuit_dir,
             &config.receipts_dir,
             agg_fn.as_str(),
             Some(actual_row_count),
+            &signing_key_bytes_for_bundle,
         ) {
             Ok(br) => Some(br),
             Err(e) => {
@@ -1607,7 +2009,7 @@ pub(crate) async fn run_zk_pipeline(
 
     // Only commit a hash when there's an actual verifiable bundle to match against.
     let committed_hash = if fully_verifiable {
-        Some(outgoing_prompt_hash)
+        Some(outgoing_prompt_hash_field)
     } else {
         None
     };
@@ -1639,6 +2041,7 @@ pub(crate) async fn run_avg_pipeline(
     state: Arc<ProxyState>,
     request_hash: String,
     prompt_hash: String,
+    outgoing_prompt_hash_field: String,
     intent: crate::types::IntentResult,
     effective_client_id: i64,
 ) -> anyhow::Result<ZkPipelineResult> {
@@ -1647,6 +2050,7 @@ pub(crate) async fn run_avg_pipeline(
     let key_bytes = state.signing_key_bytes.clone();
     let req_hash = request_hash.clone();
     let prm_hash = prompt_hash.clone();
+    let prm_hash_field = outgoing_prompt_hash_field.clone();
     let intent_clone = intent.clone();
 
     let sum_result = tokio::task::spawn_blocking(move || {
@@ -1654,7 +2058,7 @@ pub(crate) async fn run_avg_pipeline(
             .enable_all()
             .build()
             .context("build local runtime for SUM")?;
-        rt.block_on(run_zk_pipeline(config, key_bytes, req_hash, prm_hash, intent_clone, effective_client_id, AggFn::Sum))
+        rt.block_on(run_zk_pipeline(config, key_bytes, req_hash, prm_hash, prm_hash_field, intent_clone, effective_client_id, AggFn::Sum))
     })
     .await
     .context("AVG/SUM blocking task panicked")??;
@@ -1664,6 +2068,7 @@ pub(crate) async fn run_avg_pipeline(
     let key_bytes2 = state.signing_key_bytes.clone();
     let req_hash2 = request_hash.clone();
     let prm_hash2 = prompt_hash.clone();
+    let prm_hash_field2 = outgoing_prompt_hash_field.clone();
     let intent_clone2 = intent.clone();
 
     let count_result = tokio::task::spawn_blocking(move || {
@@ -1671,7 +2076,7 @@ pub(crate) async fn run_avg_pipeline(
             .enable_all()
             .build()
             .context("build local runtime for COUNT")?;
-        rt.block_on(run_zk_pipeline(config2, key_bytes2, req_hash2, prm_hash2, intent_clone2, effective_client_id, AggFn::Count))
+        rt.block_on(run_zk_pipeline(config2, key_bytes2, req_hash2, prm_hash2, prm_hash_field2, intent_clone2, effective_client_id, AggFn::Count))
     })
     .await
     .context("AVG/COUNT blocking task panicked")??;
@@ -1760,7 +2165,16 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         }
     }
 
-    // Step 4: append schema_validation results.
+    // Step 4: append GeneralLane counters (SQLite only; no-op on Supabase backend).
+    if let Some(obj) = body.as_object_mut() {
+        let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+        let general_today = receipts::count_engine_today(&db_guard, "general_lane").unwrap_or(0);
+        let intent_failures = receipts::count_intent_failures_today(&db_guard).unwrap_or(0);
+        obj.insert("general_queries_today".to_string(), serde_json::json!(general_today));
+        obj.insert("intent_failures_today".to_string(), serde_json::json!(intent_failures));
+    }
+
+    // Step 5: append schema_validation results.
     if let Some(obj) = body.as_object_mut() {
         let sv = &state.schema_validation;
         let sv_json = serde_json::json!({
@@ -1797,6 +2211,105 @@ async fn handle_passthrough() -> impl IntoResponse {
             }
         })),
     )
+}
+
+/// GET /public-key — unauthenticated. No rate limit implemented (public keys are safe to expose).
+/// TODO: add per-IP rate limiting via governor if abuse is observed.
+///
+/// Returns the ed25519 manifest signing public key and the BabyJubJub public key.
+/// Both derive from the same `bank_sk` seed via different algorithms.
+///   ed25519_manifest_pub — signs manifest.json in every v3 bundle
+///   babyjubjub_pub_x/y  — used for FastLane attestations (not ZK proofs)
+///
+/// Third-party auditors use this to independently verify bundle signatures without
+/// needing bb or nargo installed. See docs/ZK_CIRCUITS.md#independent-verification.
+async fn handle_public_key(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
+    // Both keys are precomputed at startup to avoid per-request scalar multiplication.
+    Json(serde_json::json!({
+        "ed25519_manifest_pub": state.ed25519_manifest_pub_hex,
+        "manifest_key_id": state.manifest_key_id,
+        "babyjubjub_pub_x": state.bjj_pub_x,
+        "babyjubjub_pub_y": state.bjj_pub_y,
+        "algorithm": "ed25519",
+        "curve": "babyjubjub",
+        "_note": "ed25519_manifest_pub signs bundle manifests. babyjubjub_pub_x/y signs FastLane attestations. Both derive from the same bank_sk root via different algorithms.",
+        "created_at": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Shared streaming helpers (used by GeneralLane and tunnel mode)
+// ---------------------------------------------------------------------------
+
+/// Returns true for HTTP/1.1 hop-by-hop headers that must not be forwarded to clients.
+pub(crate) fn is_hop_by_hop(header: &str) -> bool {
+    matches!(
+        header.to_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+    )
+}
+
+/// Forward an already-obtained upstream SSE response to the client.
+/// Single-consumer variant (no FORK2 tee). Used by GeneralLane streaming passthrough.
+pub(crate) async fn stream_openai_passthrough(upstream: reqwest::Response) -> Response {
+    use axum::body::Body;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let status = upstream.status();
+    let resp_headers = upstream.headers().clone();
+    let (chunk_tx, chunk_rx) =
+        tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1024);
+
+    tokio::spawn(async move {
+        let mut byte_stream = upstream.bytes_stream();
+        // Per-chunk timeout: if no data arrives within 60s, treat as a stalled
+        // connection and terminate the stream to free the connection pool entry.
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                byte_stream.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(chunk))) => {
+                    let _ = chunk_tx.send(Ok(chunk)).await;
+                }
+                Ok(Some(Err(e))) => {
+                    let _ = chunk_tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
+                Ok(None) => break, // stream complete
+                Err(_timeout) => {
+                    eprintln!("[STREAM] Upstream stream stalled for >60s — terminating");
+                    let _ = chunk_tx
+                        .send(Err(std::io::Error::other("upstream stream timed out after 60s")))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(chunk_rx);
+    let mut builder = Response::builder().status(status);
+    for (k, v) in resp_headers.iter() {
+        if !is_hop_by_hop(k.as_str()) {
+            builder = builder.header(k, v);
+        }
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1926,5 +2439,58 @@ mod proxy_error_tests {
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             "ProxyError::UnprocessableEntity must map to HTTP 422"
         );
+    }
+
+    // ── compute_prompt_hash_field tests ──────────────────────────────────────
+
+    /// Known-answer test: SHA-256("hello world") with top-3 bits masked must produce
+    /// a stable hex output. Pins the derivation spec across refactors.
+    #[test]
+    fn test_compute_prompt_hash_field_known_answer() {
+        // SHA-256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        // byte[0] = 0xb9 = 0b10111001; after &= 0x1f: 0b00011001 = 0x19
+        // Full expected: 0x194d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        let result = compute_prompt_hash_field("hello world");
+        assert_eq!(
+            result,
+            "0x194d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            "SHA-256('hello world') with 0x1f mask must match known-answer value"
+        );
+        // Redundant checks kept for clarity.
+        assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
+        assert_eq!(result.len(), 66, "must be 0x + 64 hex chars (32 bytes)");
+        // Top-3-bits mask: byte[0] & 0xe0 must be zero (bits 7, 6, 5 clear).
+        let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
+        assert_eq!(first_byte & 0xe0, 0, "top 3 bits of field element must be clear (BN254 Fr safety)");
+    }
+
+    /// Empty string produces a valid, non-zero field element (SHA-256 of empty = non-zero).
+    #[test]
+    fn test_compute_prompt_hash_field_empty_string_is_nonzero() {
+        let result = compute_prompt_hash_field("");
+        assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
+        // SHA-256("") = e3b0c44298... — byte[0] = 0xe3 & 0x1f = 0x03 (non-zero)
+        assert_ne!(result, "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "SHA-256 of empty string is never zero");
+        // Top 3 bits must still be clear.
+        let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
+        assert_eq!(first_byte & 0xe0, 0, "top 3 bits must be clear for BN254 Fr safety");
+    }
+
+    /// Different prompts produce different field values (no collision in test vectors).
+    #[test]
+    fn test_compute_prompt_hash_field_different_prompts_differ() {
+        let h1 = compute_prompt_hash_field("what is the total aws spend for Q1 2024?");
+        let h2 = compute_prompt_hash_field("count transactions for client 123");
+        assert_ne!(h1, h2, "different prompts must produce different field values");
+    }
+
+    /// Same prompt always produces the same field value (deterministic).
+    #[test]
+    fn test_compute_prompt_hash_field_deterministic() {
+        let prompt = "show me the quarterly revenue breakdown";
+        let h1 = compute_prompt_hash_field(prompt);
+        let h2 = compute_prompt_hash_field(prompt);
+        assert_eq!(h1, h2, "same prompt must always produce same field value");
     }
 }

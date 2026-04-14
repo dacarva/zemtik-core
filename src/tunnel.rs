@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::config::TableConfig;
 use crate::intent;
-use crate::proxy::{ProxyState, run_fast_lane_engine, run_zk_pipeline, run_avg_pipeline};
+use crate::proxy::{ProxyState, is_hop_by_hop, run_fast_lane_engine, run_zk_pipeline, run_avg_pipeline};
 use crate::receipts::{insert_tunnel_audit, query_tunnel_audits, tunnel_summary, TunnelAuditFilters};
 use crate::router;
 use crate::types::{IntentResult, OriginalResponseData, Route, TunnelAuditRecord, TunnelMatchStatus};
@@ -450,6 +450,7 @@ async fn run_fork2_pipeline(
                 let key_bytes = state.signing_key_bytes.clone();
                 let rh = request_hash.clone();
                 let ph = prompt_hash.clone();
+                let phf = crate::proxy::compute_prompt_hash_field(&prompt);
                 let intent_c = intent.clone();
                 let agg_fn_c = agg_fn.clone();
 
@@ -476,7 +477,7 @@ async fn run_fork2_pipeline(
                             .enable_all()
                             .build()
                             .map_err(|e| anyhow::anyhow!("build local runtime: {}", e))?;
-                        rt.block_on(run_avg_pipeline(state2, rh, ph, intent_c, effective_client_id))
+                        rt.block_on(run_avg_pipeline(state2, rh, ph, phf, intent_c, effective_client_id))
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking join: {}", e)))
@@ -491,7 +492,7 @@ async fn run_fork2_pipeline(
                             .enable_all()
                             .build()
                             .map_err(|e| anyhow::anyhow!("build local runtime: {}", e))?;
-                        rt.block_on(run_zk_pipeline(config, key_bytes, rh, ph, intent_c, effective_client_id, agg_fn_c))
+                        rt.block_on(run_zk_pipeline(config, key_bytes, rh, ph, phf, intent_c, effective_client_id, agg_fn_c))
                     })
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking join: {}", e)))
@@ -507,6 +508,8 @@ async fn run_fork2_pipeline(
                     Err(e) => (None, None, None, Some(format!("ZK error: {}", e)), None)
                 }
             }
+            // GeneralLane is never dispatched in tunnel mode (tunnel always routes by intent).
+            Route::GeneralLane => unreachable!("GeneralLane route not used in tunnel mode"),
         };
 
     let zemtik_latency_ms = engine_start.elapsed().as_millis() as u64;
@@ -976,14 +979,6 @@ pub(crate) async fn handle_tunnel_passthrough(
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
-
-fn is_hop_by_hop(header: &str) -> bool {
-    matches!(header.to_lowercase().as_str(),
-        "connection" | "keep-alive" | "proxy-authenticate" |
-        "proxy-authorization" | "te" | "trailer" | "transfer-encoding" |
-        "upgrade" | "host"
-    )
-}
 
 fn check_dashboard_auth(state: &Arc<ProxyState>, headers: &HeaderMap) -> Result<(), Box<Response>> {
     match state.config.dashboard_api_key {

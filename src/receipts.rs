@@ -6,6 +6,17 @@ use sha2::{Digest, Sha256};
 
 use crate::types::TunnelAuditRecord;
 
+// ---------------------------------------------------------------------------
+// Proof status constants
+// ---------------------------------------------------------------------------
+
+/// GeneralLane: no ZK proof, forwarded directly to OpenAI.
+pub const PROOF_STATUS_GENERAL_LANE: &str = "general_lane";
+/// NoTableIdentified: intent extraction failed with no matching table (400 path).
+pub const PROOF_STATUS_NO_TABLE: &str = "no_table_identified";
+/// GeneralLane rate-limited: request was not forwarded (sliding-window budget exceeded).
+pub const PROOF_STATUS_GENERAL_LANE_RATE_LIMITED: &str = "general_lane_rate_limited";
+
 /// A row in the receipts table — one per successfully generated proof bundle.
 pub struct Receipt {
     pub id: String,           // uuid v4
@@ -39,6 +50,11 @@ pub struct Receipt {
     /// prompt (no text transformation applied). For LLM rewrites: the LLM-produced rewritten
     /// query. None when no rewriting was performed. Added in v6.
     pub rewritten_query: Option<String>,
+    /// SHA-256(raw ed25519 verifying key bytes) — fingerprint of the ed25519 signing key
+    /// used to sign this bundle. Computed as SHA-256(verifying_key.as_bytes()), not the hex string.
+    /// Cross-receipt consistency check: all receipts from the same deployment must share the
+    /// same manifest_key_id. Added in v8.
+    pub manifest_key_id: Option<String>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -154,6 +170,27 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v6")?;
     }
 
+    if version < 7 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE INDEX IF NOT EXISTS idx_receipts_engine_created
+                 ON receipts(engine_used, created_at);
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )
+        .context("apply migration v7")?;
+    }
+
+    if version < 8 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN manifest_key_id TEXT DEFAULT NULL;
+             PRAGMA user_version = 8;
+             COMMIT;",
+        )
+        .context("apply migration v8")?;
+    }
+
     Ok(())
 }
 
@@ -164,8 +201,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
              data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
-             actual_row_count, rewrite_method, rewritten_query)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             actual_row_count, rewrite_method, rewritten_query, manifest_key_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -184,6 +221,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.actual_row_count.map(|v| v as i64),
             r.rewrite_method,
             r.rewritten_query,
+            r.manifest_key_id,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -210,6 +248,30 @@ pub fn insert_intent_rejection(
     Ok(())
 }
 
+/// Count receipts for a given engine_used value created today (UTC).
+/// Used by /health to report per-lane daily counters.
+pub fn count_engine_today(conn: &Connection, engine_used: &str) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM receipts
+         WHERE engine_used = ?1
+           AND created_at >= strftime('%Y-%m-%dT00:00:00', 'now')",
+        rusqlite::params![engine_used],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as u64)
+}
+
+/// Count intent rejections logged today (UTC). Used by /health to report intent_failures_today.
+pub fn count_intent_failures_today(conn: &Connection) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM intent_rejections
+         WHERE created_at >= strftime('%Y-%m-%dT00:00:00', 'now')",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as u64)
+}
+
 /// List all receipts ordered by created_at DESC (for `zemtik list`).
 pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
     let mut stmt = conn
@@ -224,7 +286,8 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     signing_version,
                     actual_row_count,
                     rewrite_method,
-                    rewritten_query
+                    rewritten_query,
+                    manifest_key_id
              FROM receipts ORDER BY created_at DESC",
         )
         .context("prepare list_receipts")?;
@@ -251,6 +314,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 actual_row_count: arc.map(|v| v as usize),
                 rewrite_method: row.get(15)?,
                 rewritten_query: row.get(16)?,
+                manifest_key_id: row.get(17)?,
             })
         })
         .context("query receipts")?;
@@ -273,7 +337,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     signing_version,
                     actual_row_count,
                     rewrite_method,
-                    rewritten_query
+                    rewritten_query,
+                    manifest_key_id
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -300,6 +365,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 actual_row_count: arc.map(|v| v as usize),
                 rewrite_method: row.get(15)?,
                 rewritten_query: row.get(16)?,
+                manifest_key_id: row.get(17)?,
             })
         })
         .context("query receipt")?;

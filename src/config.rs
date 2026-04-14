@@ -491,6 +491,25 @@ pub struct AppConfig {
     /// Env: ZEMTIK_MCP_TOOLS_PATH.
     #[serde(skip)]
     pub mcp_tools_path: Option<PathBuf>,
+
+    // --- General Passthrough fields (v0.11.0+) ---
+
+    /// Enable General Passthrough lane. Default: false.
+    /// When enabled, non-data queries that fail intent extraction are forwarded to OpenAI
+    /// with a receipt and zemtik_meta block instead of returning 400 NoTableIdentified.
+    /// Env: ZEMTIK_GENERAL_PASSTHROUGH=1|true
+    #[serde(skip)]
+    pub general_passthrough_enabled: bool,
+    /// Max requests per minute for the General Passthrough lane. Default: 0 (unlimited).
+    /// Sliding 60-second window, per-instance. 429 GeneralLaneBudgetExceeded on breach.
+    /// Env: ZEMTIK_GENERAL_MAX_RPM
+    #[serde(skip)]
+    pub general_max_rpm: u32,
+    /// Optional public base URL for this deployment (e.g. "https://zemtik.example.com").
+    /// When set, adds a `verify_url` hint to `zemtik_meta` blocks pointing to the receipt audit endpoint.
+    /// No startup error if unset — the hint is omitted silently.
+    /// Env: ZEMTIK_PUBLIC_URL
+    pub public_url: Option<String>,
 }
 
 impl AppConfig {
@@ -554,6 +573,9 @@ impl Default for AppConfig {
             mcp_allowed_paths: vec![],
             mcp_allowed_fetch_domains: vec![],
             mcp_tools_path: None,
+            general_passthrough_enabled: false,
+            general_max_rpm: 0,
+            public_url: None,
         }
     }
 }
@@ -626,6 +648,13 @@ pub fn load_from_sources(
         config.db_path = expand_tilde(&config.db_path.to_string_lossy());
         config.receipts_db_path = expand_tilde(&config.receipts_db_path.to_string_lossy());
         config.receipts_dir = expand_tilde(&config.receipts_dir.to_string_lossy());
+        // Normalize public_url from YAML: trim whitespace and trailing slashes (same as env path).
+        if let Some(url) = config.public_url.take() {
+            let normalized = url.trim().trim_end_matches('/').to_owned();
+            if !normalized.is_empty() {
+                config.public_url = Some(normalized);
+            }
+        }
     }
 
     // Layer 3: env vars
@@ -873,6 +902,37 @@ pub fn load_from_sources(
         let trimmed = v.trim();
         if !trimmed.is_empty() {
             config.mcp_tools_path = Some(expand_tilde(trimmed));
+        }
+    }
+
+    // General Passthrough env vars
+    if let Some(v) = env.get("ZEMTIK_GENERAL_PASSTHROUGH") {
+        let s = v.trim();
+        config.general_passthrough_enabled = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_GENERAL_PASSTHROUGH: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_GENERAL_MAX_RPM") {
+        let n = v.trim().parse::<u32>().with_context(|| {
+            format!("ZEMTIK_GENERAL_MAX_RPM: invalid value {:?}; must be a non-negative integer", v.trim())
+        })?;
+        if n > 1_000_000 {
+            anyhow::bail!(
+                "ZEMTIK_GENERAL_MAX_RPM: value {} exceeds maximum of 1,000,000",
+                n
+            );
+        }
+        config.general_max_rpm = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_PUBLIC_URL") {
+        let url = v.trim().trim_end_matches('/').to_owned();
+        if !url.is_empty() {
+            config.public_url = Some(url);
         }
     }
 

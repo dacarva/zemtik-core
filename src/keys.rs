@@ -4,7 +4,30 @@ use std::path::Path;
 
 use anyhow::Context;
 use babyjubjub_rs::PrivateKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use hkdf::Hkdf;
 use rand::Rng;
+use sha2::Sha256;
+
+/// Derive an ed25519 manifest-signing keypair from `bank_sk` seed bytes via HKDF-SHA256.
+///
+/// Derivation spec:
+///   IKM  = seed (32 bytes, the `bank_sk` seed)
+///   salt = [0u8; 32] (all zeros)
+///   info = b"zemtik-manifest-signing-v1"
+///   OKM  = 32 bytes → ed25519_dalek::SigningKey::from_bytes
+///
+/// Key rotation: increment info to "zemtik-manifest-signing-v2" and serve both
+/// public keys with timestamps on GET /public-key.
+pub fn derive_manifest_signing_keypair(seed: &[u8; 32]) -> anyhow::Result<(SigningKey, VerifyingKey)> {
+    let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), seed);
+    let mut okm = [0u8; 32];
+    hk.expand(b"zemtik-manifest-signing-v1", &mut okm)
+        .map_err(|_| anyhow::anyhow!("HKDF expand failed — this should never happen for 32-byte output"))?;
+    let signing_key = SigningKey::from_bytes(&okm);
+    let verifying_key = signing_key.verifying_key();
+    Ok((signing_key, verifying_key))
+}
 
 /// Load the bank's signing key from `keys_dir/bank_sk`, or generate and persist
 /// a fresh 32-byte random key if the file doesn't exist.
