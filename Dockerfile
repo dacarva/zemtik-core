@@ -84,6 +84,30 @@ RUN apt-get update \
 ARG NARGO_VERSION=1.0.0-beta.19
 ARG BB_VERSION=4.0.0-nightly.20260120
 
+# Guard: bb nightly binaries require glibc >= 2.38 (GLIBC_2.38, GLIBC_2.39) and
+# libstdc++ >= GLIBCXX_3.4.31. Debian Bookworm ships glibc 2.36 — too old. Fail
+# fast at build time rather than silently producing a container where bb crashes
+# at runtime and /health reports "bb": false.
+# Ubuntu 24.04 (glibc 2.39) satisfies the requirement; pass RUNTIME_IMAGE=ubuntu:24.04.
+RUN if [ "$INSTALL_ZK_TOOLS" = "true" ]; then \
+    GLIBC_VER=$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+$' || echo "0.0"); \
+    GLIBC_MAJOR=$(echo "$GLIBC_VER" | cut -d. -f1); \
+    GLIBC_MINOR=$(echo "$GLIBC_VER" | cut -d. -f2); \
+    if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 38 ]; }; then \
+        echo ""; \
+        echo "ERROR: INSTALL_ZK_TOOLS=true requires glibc >= 2.38, but this image has glibc $GLIBC_VER."; \
+        echo "       Barretenberg (bb) nightly binaries link against GLIBC_2.38 / GLIBC_2.39 symbols"; \
+        echo "       not present in Debian Bookworm (glibc 2.36). Use RUNTIME_IMAGE=ubuntu:24.04."; \
+        echo ""; \
+        echo "       Correct invocation:"; \
+        echo "         docker build --build-arg INSTALL_ZK_TOOLS=true \\\\"; \
+        echo "                      --build-arg RUNTIME_IMAGE=ubuntu:24.04 \\\\"; \
+        echo "                      --build-arg BUILDER_IMAGE=ubuntu:24.04 ."; \
+        echo ""; \
+        exit 1; \
+    fi; \
+fi
+
 # NOTE: curl|bash@main is intentionally avoided here (supply-chain safety).
 # Instead we download pinned release tarballs directly from GitHub.
 # noirup/bbup installers pull from @master and must not be used in CI/CD.

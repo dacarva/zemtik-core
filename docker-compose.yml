@@ -14,9 +14,18 @@ services:
       context: .
       args:
         # Set to "true" to install nargo + bb inside the image for ZK SlowLane support.
+        # REQUIRED when INSTALL_ZK_TOOLS=true: also set RUNTIME_IMAGE and BUILDER_IMAGE
+        # to ubuntu:24.04 — bb nightly binaries require glibc >= 2.38 (GLIBC_2.38/2.39).
+        # Debian Bookworm (the default runtime) ships glibc 2.36 and will fail at runtime.
         # Also remove the ZEMTIK_SKIP_CIRCUIT_VALIDATION line below and uncomment the
         # zemtik_srs volume mount so the ~1GB SRS is cached across container restarts.
+        #
+        # ZK SlowLane build:
+        #   INSTALL_ZK_TOOLS=true RUNTIME_IMAGE=ubuntu:24.04 BUILDER_IMAGE=ubuntu:24.04 \
+        #     docker compose up --build
         INSTALL_ZK_TOOLS: "${INSTALL_ZK_TOOLS:-false}"
+        RUNTIME_IMAGE: "${RUNTIME_IMAGE:-debian:bookworm-slim}"
+        BUILDER_IMAGE: "${BUILDER_IMAGE:-rust:1.88-bookworm}"
     # Local image tag. Use ZEMTIK_VARIANT to avoid overwriting between builds:
     #   FastLane (default):  docker compose up --build
     #   ZK SlowLane:         ZEMTIK_VARIANT=zk INSTALL_ZK_TOOLS=true docker compose up --build
