@@ -130,6 +130,7 @@ fn main() -> anyhow::Result<()> {
                         let actual_route_str = match actual_route {
                             zemtik::types::Route::FastLane => "FastLane",
                             zemtik::types::Route::ZkSlowLane => "ZkSlowLane",
+                            zemtik::types::Route::GeneralLane => "GeneralLane",
                         };
                         if actual_route_str == entry.expected_route.as_str() {
                             route_correct += 1;
