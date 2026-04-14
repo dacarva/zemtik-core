@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.9.1** (see `CHANGELOG.md`). The ZK slow-lane cryptography is unchanged in spirit from earlier releases.
+**Scope note:** This document is aligned with **v0.13.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography is unchanged in spirit from earlier releases.
 
 - **v0.3.0–v0.4.0:** Intent extraction, routing, and FastLane middleware
 - **v0.5.x:** Timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, configurable `bb verify` timeout
@@ -14,6 +14,9 @@
 - **v0.8.2:** Docker support (multi-stage build, non-root user), `docker-compose.yml`; CI pipeline (`ci.yml`); `build_proxy_router()` extracted; `ZEMTIK_OPENAI_BASE_URL` + `ZEMTIK_OPENAI_MODEL` + `ZEMTIK_SKIP_CIRCUIT_VALIDATION` `ZEMTIK_*` env vars; integration tests (`tests/integration_proxy.rs`)
 - **v0.9.0:** Tunnel Mode (`ZEMTIK_MODE=tunnel`): FORK 1 + FORK 2 passthrough + background ZK; `TunnelAuditRecord` persistence; `TunnelMatchStatus` (six variants: `Matched`, `Diverged`, `Unmatched`, `Error`, `Timeout`, `Backpressure`); dashboard endpoints (`/tunnel/audit`, `/tunnel/summary`)
 - **v0.9.1:** `src/startup.rs` (Postgres column/row validation, ZK tools detection, `example_prompts` warnings, JSONL event log); `ZEMTIK_SKIP_DB_VALIDATION` + `ZEMTIK_VALIDATE_ONLY` `ZEMTIK_*` env vars; `ZemtikErrorCode` enum (`NoTableIdentified`, `StreamingNotSupported`, `InvalidRequest`, `QueryFailed`); streaming guard; `/health` `schema_validation` object; security fixes S1 (`danger_accept_invalid_certs` removed), S2 (`is_safe_identifier` on schema keys), S3 (Postgres errors suppressed from HTTP responses)
+- **v0.10.0:** Hybrid query rewriter (`ZEMTIK_QUERY_REWRITER`): deterministic multi-turn resolution + LLM fallback; per-table `query_rewriting` flag; receipts DB v6 migration (`rewrite_method`, `rewritten_query` columns)
+- **v0.11.0:** General Passthrough lane (`ZEMTIK_GENERAL_PASSTHROUGH`): non-data queries forwarded to OpenAI with receipt and `zemtik_meta` block; `ZEMTIK_GENERAL_MAX_RPM` rate limiter; `X-Zemtik-Engine` response header on all lanes
+- **v0.13.0:** MCP Attestation Proxy (`src/mcp_proxy.rs`, `src/mcp_auth.rs`, `src/mcp_tools.rs`): wraps every MCP tool call with ZK-backed attestation; stdio transport (`zemtik mcp`, Claude Desktop) and Streamable HTTP transport (`zemtik mcp-serve`, `:4001`); `McpAuditRecord` persistence in `mcp_audit.db`; `ZEMTIK_MCP_MODE=tunnel|governed`; built-in tools (`zemtik_fetch`, `zemtik_read_file`) with path/domain allowlists; dynamic tool registration via `mcp_tools.json`
 
 ---
 
@@ -77,6 +80,9 @@ flowchart LR
 | List | `cargo run -- list` | Prints recent rows from `~/.zemtik/receipts.db` (includes `intent_confidence` where present) |
 | List-tunnel | `cargo run -- list-tunnel` | Prints recent tunnel audit records from `~/.zemtik/tunnel_audit.db` |
 | Tunnel proxy | `ZEMTIK_MODE=tunnel cargo run -- proxy` | Transparent passthrough proxy: FORK 1 forwards all traffic unmodified; FORK 2 runs ZK verification in background and logs `TunnelAuditRecord` |
+| MCP stdio | `cargo run -- mcp` | MCP attestation proxy over stdio; integrates with Claude Desktop; wraps every tool call with ZK attestation; logs `McpAuditRecord` to `mcp_audit.db` |
+| MCP HTTP | `cargo run -- mcp-serve` | MCP attestation HTTP server on `:4001` (Streamable HTTP transport) for IDE/CI integrations |
+| List-mcp | `cargo run -- list-mcp` | Prints recent MCP audit records from `~/.zemtik/mcp_audit.db` |
 
 External toolchain on PATH: **Noir** `nargo` (1.0.0-beta.19), **Barretenberg** `bb` (v4.x / UltraHonk; project docs use `v4.0.0-nightly`).
 

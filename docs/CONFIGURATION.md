@@ -199,6 +199,43 @@ Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNN
 | `ZEMTIK_DASHBOARD_API_KEY` | — | string | If set, `/tunnel/audit`, `/tunnel/audit/csv`, and `/tunnel/summary` require `Authorization: Bearer <key>`. |
 | `ZEMTIK_TUNNEL_AUDIT_DB_PATH` | `~/.zemtik/tunnel_audit.db` | file path | Path to the SQLite audit database (WAL mode, separate from receipts.db). |
 
+### MCP attestation proxy (v0.13.0+)
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_MCP_BIND_ADDR` | `127.0.0.1:4001` | `host:port` | Bind address for the MCP HTTP server in `mcp-serve` mode. Not used in stdio mode. |
+| `ZEMTIK_MCP_API_KEY` | — | string | Bearer key protecting `/mcp/audit` and `/mcp/summary`. **Hard startup error in `mcp-serve` mode if unset.** Not required for stdio mode. |
+| `ZEMTIK_MCP_MODE` | `tunnel` | `tunnel`, `governed` | Operating mode. `tunnel` logs attestation records for every tool call but does not block. `governed` blocks tool calls whose attestation fails. |
+| `ZEMTIK_MCP_TRANSPORT` | — | `http` | Deprecated `sse` value is rejected at startup (sunset 2026-04-01). Use `http` for Streamable HTTP transport or omit the variable. |
+| `ZEMTIK_MCP_AUDIT_DB_PATH` | `~/.zemtik/mcp_audit.db` | file path | Path to the SQLite MCP audit database (WAL mode, separate from `receipts.db` and `tunnel_audit.db`). |
+| `ZEMTIK_MCP_FETCH_TIMEOUT_SECS` | `30` | integer >= 1 | HTTP timeout for the `zemtik_fetch` built-in tool. |
+| `ZEMTIK_MCP_ALLOWED_PATHS` | `""` | Comma-separated globs | Path allowlist for `zemtik_read_file`. Empty = allow-all in stdio mode, deny-all in `mcp-serve` mode (operator must set explicitly). |
+| `ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS` | `""` | Comma-separated domains | Domain allowlist for `zemtik_fetch`. Same empty-value semantics as `ZEMTIK_MCP_ALLOWED_PATHS`. |
+| `ZEMTIK_MCP_TOOLS_PATH` | — | file path | Path to `mcp_tools.json` for dynamic tool registration. Omit to use built-in tools only (`zemtik_fetch`, `zemtik_read_file`). |
+
+**Quick start (stdio / Claude Desktop):**
+```bash
+# Add to claude_desktop_config.json mcpServers section:
+# "zemtik": { "command": "zemtik", "args": ["mcp"] }
+export ZEMTIK_MCP_API_KEY=secret
+zemtik mcp
+```
+
+**Quick start (HTTP server):**
+```bash
+export ZEMTIK_MCP_API_KEY=secret
+zemtik mcp-serve   # binds to 127.0.0.1:4001 by default
+```
+
+**List recent MCP audit records:**
+```bash
+zemtik list-mcp
+```
+
+See [docs/MCP_ATTESTATION.md](MCP_ATTESTATION.md) for the full MCP integration guide, audit record schema, and governed-mode enforcement details.
+
+---
+
 ### Startup validation (v0.9.1+)
 
 | Variable | Default | Values | Description |
