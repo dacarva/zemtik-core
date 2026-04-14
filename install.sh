@@ -146,7 +146,7 @@ if [ "$OS" = "Darwin" ]; then
 elif [ -n "$APPDATA" ]; then
     CLAUDE_CONFIG="$APPDATA\\Claude\\claude_desktop_config.json"
 else
-    CLAUDE_CONFIG="~/.config/Claude/claude_desktop_config.json"
+    CLAUDE_CONFIG="$HOME/.config/Claude/claude_desktop_config.json"
 fi
 
 echo ""

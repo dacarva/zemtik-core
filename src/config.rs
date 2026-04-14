@@ -460,36 +460,28 @@ pub struct AppConfig {
 
     /// Bind address for the MCP HTTP server. Default: "127.0.0.1:4001".
     /// Env: ZEMTIK_MCP_BIND_ADDR. Used only in mcp-serve (SSE) mode.
-    #[serde(skip)]
     pub mcp_bind_addr: String,
     /// Bearer API key for /mcp/audit and /mcp/summary. Hard startup error in mcp-serve mode if unset.
     /// Env: ZEMTIK_MCP_API_KEY.
-    #[serde(skip)]
     pub mcp_api_key: Option<String>,
     /// MCP operating mode. Default: "tunnel". Env: ZEMTIK_MCP_MODE=tunnel|governed.
-    #[serde(skip)]
     pub mcp_mode: String,
     /// Path to mcp_audit.db SQLite database. Default: ~/.zemtik/mcp_audit.db.
     /// Env: ZEMTIK_MCP_AUDIT_DB_PATH.
-    #[serde(skip)]
     pub mcp_audit_db_path: PathBuf,
     /// HTTP fetch timeout seconds for zemtik_fetch tool. Default: 30.
     /// Env: ZEMTIK_MCP_FETCH_TIMEOUT_SECS.
-    #[serde(skip)]
     pub mcp_fetch_timeout_secs: u64,
     /// Comma-separated glob-style path allowlist for zemtik_read_file.
     /// Empty = allow-all in STDIO mode, deny-all in SSE mode (operator must set explicitly).
     /// Env: ZEMTIK_MCP_ALLOWED_PATHS.
-    #[serde(skip)]
     pub mcp_allowed_paths: Vec<String>,
     /// Comma-separated domain allowlist for zemtik_fetch.
     /// Empty = allow-all in STDIO mode, deny-all in SSE mode.
     /// Env: ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS.
-    #[serde(skip)]
     pub mcp_allowed_fetch_domains: Vec<String>,
     /// Path to mcp_tools.json for dynamic tool registration. None = use builtin tools only.
     /// Env: ZEMTIK_MCP_TOOLS_PATH.
-    #[serde(skip)]
     pub mcp_tools_path: Option<PathBuf>,
 
     // --- General Passthrough fields (v0.11.0+) ---
@@ -648,6 +640,17 @@ pub fn load_from_sources(
         config.db_path = expand_tilde(&config.db_path.to_string_lossy());
         config.receipts_db_path = expand_tilde(&config.receipts_db_path.to_string_lossy());
         config.receipts_dir = expand_tilde(&config.receipts_dir.to_string_lossy());
+        // MCP path fields can also be set in YAML — expand ~ for them too.
+        config.mcp_audit_db_path = expand_tilde(&config.mcp_audit_db_path.to_string_lossy());
+        if let Some(ref p) = config.mcp_tools_path.clone() {
+            config.mcp_tools_path = Some(expand_tilde(&p.to_string_lossy()));
+        }
+        // Normalize mcp_api_key from YAML: treat blank as absent.
+        if let Some(ref k) = config.mcp_api_key.clone() {
+            if k.trim().is_empty() {
+                config.mcp_api_key = None;
+            }
+        }
         // Normalize public_url from YAML: trim whitespace and trailing slashes (same as env path).
         if let Some(url) = config.public_url.take() {
             let normalized = url.trim().trim_end_matches('/').to_owned();
@@ -852,7 +855,10 @@ pub fn load_from_sources(
         config.mcp_bind_addr = v.trim().to_owned();
     }
     if let Some(v) = env.get("ZEMTIK_MCP_API_KEY") {
-        config.mcp_api_key = Some(v.trim().to_owned());
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.mcp_api_key = Some(trimmed.to_owned());
+        }
     }
     if let Some(v) = env.get("ZEMTIK_MCP_MODE") {
         let s = v.trim().to_lowercase();

@@ -285,7 +285,7 @@ impl ZemtikMcpHandler {
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
 
-        self.fork2_attest(tool_name, input_json, result_json.clone(), duration_ms);
+        self.attest_for_mode(tool_name, input_json, result_json.clone(), duration_ms).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -318,7 +318,9 @@ impl ZemtikMcpHandler {
             let state = Arc::clone(&self.state);
             let url_clone = url_str.clone();
             let is_stdio = self.state.is_stdio;
-            tokio::spawn(async move {
+            // Enqueue into pending_fork2 so STDIO shutdown drains it before exit.
+            // Write is blocking SQLite — must run in spawn_blocking, not bare async.
+            let handle = tokio::spawn(async move {
                 let record = McpAuditRecord {
                     receipt_id: Uuid::new_v4().to_string(),
                     ts: Utc::now().to_rfc3339(),
@@ -332,8 +334,14 @@ impl ZemtikMcpHandler {
                     duration_ms: 0,
                     mode: if is_stdio { "bypass_stdio" } else { "bypass_blocked" }.to_string(),
                 };
-                let _ = write_audit_record(&state.audit_db_path, &record);
+                let _ = tokio::time::timeout(
+                    FORK2_TIMEOUT,
+                    tokio::task::spawn_blocking(move || write_audit_record(&state.audit_db_path, &record)),
+                ).await;
             });
+            let mut handles = self.state.pending_fork2.lock().unwrap_or_else(|e| e.into_inner());
+            handles.retain(|h| !h.is_finished());
+            handles.push(handle);
             // In SSE mode, block the request entirely.
             if !self.state.is_stdio {
                 return Err(rmcp::ErrorData::new(
@@ -394,9 +402,52 @@ impl ZemtikMcpHandler {
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
 
-        self.fork2_attest("zemtik_fetch".to_string(), input_json, result_json.clone(), duration_ms);
+        self.attest_for_mode("zemtik_fetch".to_string(), input_json, result_json.clone(), duration_ms).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
+    }
+
+    /// Attest based on operating mode.
+    /// Tunnel: fire-and-forget FORK 2 (zero latency added).
+    /// Governed: await signing synchronously — return Err to caller if attestation fails.
+    async fn attest_for_mode(
+        &self,
+        tool_name: String,
+        input_json: String,
+        output_json: String,
+        duration_ms: u64,
+    ) -> Result<(), rmcp::ErrorData> {
+        match self.state.mode {
+            McpMode::Tunnel => {
+                self.fork2_attest(tool_name, input_json, output_json, duration_ms);
+                Ok(())
+            }
+            McpMode::Governed => {
+                let state = Arc::clone(&self.state);
+                tokio::time::timeout(
+                    FORK2_TIMEOUT,
+                    tokio::task::spawn_blocking(move || {
+                        sign_and_write(&state, tool_name, input_json, output_json, duration_ms)
+                    }),
+                )
+                .await
+                .map_err(|_| rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode(-32000),
+                    "governed_attestation_timeout: signing did not complete within 1s".to_string(),
+                    None,
+                ))?
+                .map_err(|e| rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode(-32000),
+                    format!("governed_attestation_join_error: {}", e),
+                    None,
+                ))?
+                .map_err(|e: anyhow::Error| rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode(-32000),
+                    format!("governed_attestation_failed: {}", e),
+                    None,
+                ))
+            }
+        }
     }
 
     /// Spawn FORK 2: sign + write audit record with 1-second timeout.
@@ -504,8 +555,8 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         }
     }
 
-    // Metadata check first — fast rejection for obviously oversized files.
-    let metadata = std::fs::metadata(path).map_err(|e| rmcp::ErrorData::new(
+    // Metadata check and subsequent read use canonical — decision and access must be on the same file.
+    let metadata = std::fs::metadata(&canonical).map_err(|e| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
         format!("file_not_found_or_permission_denied: {}", e),
         None,
@@ -525,7 +576,7 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
     // Bounded read: prevents TOCTOU — file may grow between metadata check and read.
     // We read at most FILE_SIZE_CAP+1 bytes; if we get more, the file grew past the cap.
     use std::io::Read as _;
-    let file = std::fs::File::open(path).map_err(|e| rmcp::ErrorData::new(
+    let file = std::fs::File::open(&canonical).map_err(|e| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
         format!("file_open_error: {}", e),
         None,
@@ -572,9 +623,10 @@ fn sign_and_write(
     let message = format!("{}{}{}{}", tool_name, input_hash, output_hash, ts);
     let message_hash = sha256_bytes(message.as_bytes());
 
-    // Use Zeroizing<Vec<u8>> so the heap copy of the seed is zeroed on drop.
-    let seed: Zeroizing<Vec<u8>> = Zeroizing::new(state.key_seed.as_ref().to_vec());
-    let key = babyjubjub_rs::PrivateKey::import(seed.to_vec())
+    // Move the seed bytes into import rather than cloning again — avoids a second unzeroized copy.
+    // std::mem::take replaces the inner Vec with an empty one (which Zeroizing zeroes on drop).
+    let mut seed: Zeroizing<Vec<u8>> = Zeroizing::new(state.key_seed.as_ref().to_vec());
+    let key = babyjubjub_rs::PrivateKey::import(std::mem::take(&mut *seed))
         .map_err(|e| anyhow::anyhow!("import key: {}", e))?;
 
     let msg_raw = BigInt::from_bytes_le(num_bigint::Sign::Plus, &message_hash);
@@ -674,6 +726,11 @@ pub fn list_mcp_audit_records(db_path: &Path, limit: usize) -> anyhow::Result<Ve
     )?;
     let records = stmt
         .query_map(rusqlite::params![limit as i64], |row| {
+            let duration_raw: i64 = row.get(9)?;
+            let duration_ms = u64::try_from(duration_raw).unwrap_or_else(|_| {
+                eprintln!("[MCP] audit DB: negative duration_ms {} clamped to 0", duration_raw);
+                0
+            });
             Ok(McpAuditRecord {
                 receipt_id: row.get(0)?,
                 ts: row.get(1)?,
@@ -684,12 +741,11 @@ pub fn list_mcp_audit_records(db_path: &Path, limit: usize) -> anyhow::Result<Ve
                 preview_output: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 attestation_sig: row.get(7)?,
                 public_key_hex: row.get(8)?,
-                duration_ms: row.get::<_, i64>(9)? as u64,
+                duration_ms,
                 mode: row.get(10)?,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(records)
 }
 
@@ -780,8 +836,8 @@ pub async fn run_mcp_stdio(config: AppConfig) -> anyhow::Result<()> {
 
 /// Run the MCP server in SSE/HTTP mode on ZEMTIK_MCP_BIND_ADDR.
 pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
-    // Hard startup error: ZEMTIK_MCP_API_KEY required in SSE mode
-    if config.mcp_api_key.is_none() {
+    // Hard startup error: ZEMTIK_MCP_API_KEY required in SSE mode (blank counts as absent)
+    if config.mcp_api_key.as_ref().map_or(true, |k| k.trim().is_empty()) {
         anyhow::bail!(
             "ZEMTIK_MCP_API_KEY is required in mcp-serve mode. \
              Generate a key: openssl rand -hex 32"

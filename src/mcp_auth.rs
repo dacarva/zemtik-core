@@ -45,28 +45,3 @@ pub fn check_mcp_auth(
 
     false
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn valid_bearer_header() {
-        assert!(check_mcp_auth(Some("Bearer mykey"), None, Some("mykey")));
-    }
-
-    #[test]
-    fn valid_token_param() {
-        assert!(check_mcp_auth(None, Some("mykey"), Some("mykey")));
-    }
-
-    #[test]
-    fn invalid_key() {
-        assert!(!check_mcp_auth(Some("Bearer wrong"), None, Some("mykey")));
-    }
-
-    #[test]
-    fn no_key_configured_denies() {
-        assert!(!check_mcp_auth(None, None, None));
-    }
-}

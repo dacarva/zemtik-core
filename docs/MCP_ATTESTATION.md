@@ -65,7 +65,7 @@ Each record includes the BabyJubJub public key that produced the signature, enab
 
 The signature covers a SHA-256 digest of the concatenation:
 
-```
+```text
 message = tool_name + input_hash + output_hash + ts
 ```
 
@@ -73,7 +73,7 @@ Where `+` is string concatenation. `input_hash` and `output_hash` are always 71-
 
 The message is then reduced modulo the BN254 scalar field order before signing:
 
-```
+```text
 msg_bigint = SHA-256(message) mod BN254_r
 ```
 
