@@ -14,7 +14,8 @@
 //! Security:
 //! - zemtik_read_file: denies any path under ~/.zemtik/ (key file protection). P0.
 //! - zemtik_read_file: denies files > 10MB (OOM protection). Metadata check, no full read.
-//! - zemtik_fetch: logs bypass events when domain not in ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS.
+//! - zemtik_fetch: in SSE mode, blocks + audits requests to domains not in ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS.
+//!   In STDIO mode, logs bypass events but still executes (observability; local dev trust model).
 //! - SSE mode: Bearer token auth on /mcp/audit, /mcp/summary via constant_time_eq.
 
 use std::path::{Path, PathBuf};
@@ -294,12 +295,16 @@ impl ZemtikMcpHandler {
             ))?
             .to_string();
 
-        // Domain check — log bypass events
+        // Domain check.
+        // In SSE mode: non-allowlisted domain → block + audit (deny-all semantics).
+        // In STDIO mode: non-allowlisted domain → audit only, still execute
+        //   (observability for local dev; operator controls the Claude Desktop env).
         let bypass = self.check_fetch_domain(&url_str);
         if bypass {
             eprintln!("[MCP] SSRF bypass event: url={} not in ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS", url_str);
             let state = Arc::clone(&self.state);
             let url_clone = url_str.clone();
+            let is_stdio = self.state.is_stdio;
             tokio::spawn(async move {
                 let record = McpAuditRecord {
                     receipt_id: Uuid::new_v4().to_string(),
@@ -312,10 +317,21 @@ impl ZemtikMcpHandler {
                     attestation_sig: String::new(),
                     public_key_hex: state.public_key_hex.clone(),
                     duration_ms: 0,
-                    mode: "bypass".to_string(),
+                    mode: if is_stdio { "bypass_stdio" } else { "bypass_blocked" }.to_string(),
                 };
                 let _ = write_audit_record(&state.audit_db_path, &record);
             });
+            // In SSE mode, block the request entirely.
+            if !self.state.is_stdio {
+                return Err(rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode(-32002),
+                    format!(
+                        "fetch_domain_denied: {} is not in ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS",
+                        url_str
+                    ),
+                    None,
+                ));
+            }
         }
 
         // Execute HTTP fetch
