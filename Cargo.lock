@@ -5064,7 +5064,7 @@ dependencies = [
 
 [[package]]
 name = "zemtik"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5107,6 +5107,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wiremock",
+ "zeroize",
  "zip",
 ]
 

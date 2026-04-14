@@ -1,12 +1,13 @@
 [package]
 name = "zemtik"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
 
 [dependencies]
 constant_time_eq = "0.3"
+zeroize = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Use the same poseidon-rs version as babyjubjub-rs to share the Fr type
 poseidon-rs = "0.0.8"

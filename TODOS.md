@@ -25,7 +25,7 @@
 These items were added during `/plan-devex-review` of the MCP attestation proxy plan (worktree-iridescent-forging-globe).
 All target v0.10.0 (pilot ship). Ordered by pilot-blocking priority.
 
-### install.sh MCP wrapper + Claude Desktop config printer (P1, v0.10.0)
+### ~~install.sh MCP wrapper + Claude Desktop config printer~~ **Completed: v0.13.0 (2026-04-14)**
 - **What:** When `ZEMTIK_MCP_ENABLED=true` is set during `install.sh`, the script should: (1) write `~/.zemtik/bin/zemtik-mcp` — a wrapper script that runs the Zemtik Docker container in STDIO mode (`docker exec zemtik zemtik mcp-stdio`), and (2) print the exact JSON block to paste into `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
 - **Why:** Without this, TTHW for MCP setup is ~60 min (manual Docker config + hunting Claude Desktop config format). With it, it's ~5 min: run install.sh, copy-paste one JSON block.
 - **Pros:** Competitive-tier TTHW. Tax director pilot deployable in under 5 minutes. Matches Stripe-tier DX for the first impression.
@@ -34,7 +34,7 @@ All target v0.10.0 (pilot ship). Ordered by pilot-blocking priority.
 - **Effort:** S (CC: ~20 min)
 - **Depends on:** mcp-serve subcommand implemented
 
-### docs/MCP_ATTESTATION.md (P1, v0.10.0)
+### ~~docs/MCP_ATTESTATION.md~~ **Completed: v0.13.0 (2026-04-14)**
 - **What:** New `docs/MCP_ATTESTATION.md` covering: (1) audit record schema (all fields with descriptions), (2) how to verify a BabyJubJub signature using the `public_key` field in each record + example `openssl`/`babyjubjub-cli` command, (3) what tunnel vs governed mode records look like, (4) retention policy. Target audience: compliance/legal team reviewing pilot results.
 - **Why:** The tax director's compliance team will ask "what exactly is Zemtik recording and how do I know it hasn't been tampered with?" Without a doc they can read independently, the founder has to explain it in every meeting.
 - **Pros:** Compliance team can self-serve. Mirrors `docs/COMPLIANCE_RECEIPT.md` pattern for ZK receipts.
@@ -763,6 +763,13 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 - **Context:** When promoting, make empty `ZEMTIK_MCP_ALLOWED_PATHS` warn at startup ("no path allowlist configured — all paths allowed"). Add a startup validation block entry for MCP similar to schema_config.json. Document in TROUBLESHOOTING.md.
 - **Depends on:** MCP STDIO mode shipped (feat/mcp-attestation-proxy)
 - **Partial fix by /qa 2026-04-14:** SSE mode with empty `ZEMTIK_MCP_ALLOWED_PATHS` now denies all reads (ISSUE-002, commit 118f438). STDIO mode still allow-all when empty. This TODO tracks promoting STDIO to the same enforcement.
+
+### Signing message concatenation: add delimiter before mcp_tools.json wiring (P2, before dynamic tool registration)
+
+- **What:** The signed message for BabyJubJub attestation is `tool_name + input_hash + output_hash + ts`. The input/output hashes are fixed-length (71 chars: "sha256:" + 64 hex). But `tool_name` has no delimiter, creating theoretical collision potential once dynamic tools with arbitrary names are registered. Change to null-delimited: `tool_name + "\x00" + input_hash + "\x00" + output_hash + "\x00" + ts`.
+- **Why:** Breaking change to the audit record signing format — existing records signed with the old format will fail verification against the new format. Must be done before `mcp_tools.json` dynamic wiring, not after.
+- **Context:** Found by adversarial review during /ship of v0.13.0. The two builtin tools (`zemtik_read_file`, `zemtik_fetch`) have short names that cannot collide with the hash prefix. Safe today, a liability once arbitrary tool names are registered. Update `docs/MCP_ATTESTATION.md` when fixing to document the new format with a version field.
+- **Depends on:** Ship v0.13.0 first; fix before mcp_tools.json dynamic tool wiring.
 
 ---
 
