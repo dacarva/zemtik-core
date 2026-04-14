@@ -103,10 +103,54 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
         let meta: serde_json::Value =
             serde_json::from_slice(&meta_bytes).context("parse request_meta.json")?;
 
-        let bundle_version = meta
+        // Derive bundle_version with demotion-attack protection:
+        // - 224-byte public_inputs → MUST be v3. Override any lower claim in request_meta.json.
+        //   An attacker cannot demote v3→v2 by editing request_meta.json: the 224-byte binary
+        //   cannot be produced by the v2 circuit (which outputs 192 bytes), so a valid v2 ZK
+        //   proof over tampered data would require regenerating the proof with the old circuit.
+        // - 192-byte public_inputs → trust request_meta.json (v1 or v2 are both possible;
+        //   v1/v2 are indistinguishable by size alone).
+        // - Any other size → reject.
+        let public_inputs_bytes_for_version = std::fs::read(extract_dir.join("public_inputs"))
+            .context("read public_inputs for version detection")?;
+
+        let bundle_version_claimed = meta
             .get("bundle_version")
             .and_then(|v| v.as_u64())
             .unwrap_or(1);
+
+        let bundle_version: u64 = match public_inputs_bytes_for_version.len() {
+            192 => {
+                // v1 or v2 — trust request_meta.json.
+                // Hard fail if claimed version is above 2: a 192-byte bundle can only be v1 or v2.
+                if bundle_version_claimed > 2 {
+                    anyhow::bail!(
+                        "Bundle integrity check FAILED: bundle_version inconsistency.\n  \
+                         request_meta.json claims bundle_version={} but public_inputs size (192 bytes) \
+                         indicates v1 or v2 layout. This bundle has been tampered with.",
+                        bundle_version_claimed
+                    );
+                }
+                bundle_version_claimed
+            }
+            224 => {
+                // Hard fail if request_meta.json claims an older version.
+                // 224 bytes is unambiguously v3; any lower claim is a demotion attempt.
+                if bundle_version_claimed < 3 {
+                    anyhow::bail!(
+                        "Bundle integrity check FAILED: bundle_version demotion attempt detected.\n  \
+                         request_meta.json claims bundle_version={} but public_inputs size (224 bytes) \
+                         indicates bundle_version=3. This bundle has been tampered with.",
+                        bundle_version_claimed
+                    );
+                }
+                3
+            }
+            n => anyhow::bail!(
+                "public_inputs has unrecognized size: {} bytes (expected 192 for v1/v2, 224 for v3)",
+                n
+            ),
+        };
 
         let timestamp = meta
             .get("timestamp_utc")
@@ -197,13 +241,21 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
                 let (_, verifying_key) = crate::keys::derive_manifest_signing_keypair(&seed)
                     .context("derive manifest verifying key")?;
 
-                // Reconstruct JCS signing payload: all fields except manifest_sig, sorted, compact
+                // Reconstruct JCS signing payload: all fields except manifest_sig, sorted, compact.
+                // Hard-fail if any required key is absent — a truncated payload would allow
+                // an attacker to construct a fresh payload with the same missing keys and resign.
+                const REQUIRED_MANIFEST_KEYS: &[&str] = &[
+                    "algorithm", "bundle_version", "created_at", "proof_hash",
+                    "public_inputs_hash", "request_meta_hash", "sidecar_hash", "vk_hash",
+                ];
                 let mut payload_map: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
-                for key in &["algorithm", "bundle_version", "created_at", "proof_hash",
-                             "public_inputs_hash", "request_meta_hash", "sidecar_hash", "vk_hash"] {
-                    if let Some(v) = manifest.get(*key) {
-                        payload_map.insert(key, v.clone());
-                    }
+                for key in REQUIRED_MANIFEST_KEYS {
+                    let v = manifest.get(*key).ok_or_else(|| anyhow::anyhow!(
+                        "Bundle integrity check FAILED: manifest.json is missing required field '{}'. \
+                         The manifest has been tampered with or is incomplete.",
+                        key
+                    ))?;
+                    payload_map.insert(key, v.clone());
                 }
                 let signing_payload = serde_json::to_string(&payload_map)
                     .context("reconstruct manifest signing payload")?;
@@ -363,6 +415,7 @@ pub fn verify_bundle(zip_path: &Path) -> anyhow::Result<VerifyResult> {
 mod tests {
     use num_bigint::BigUint;
     use tempfile::tempdir;
+    use hex;
 
     // -----------------------------------------------------------------------
     // cross_verify_sidecar tests
@@ -473,6 +526,114 @@ mod tests {
         assert!(
             err.to_string().contains("verified_aggregate"),
             "expected field name in error: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // v3 cross_verify_sidecar tests — 7-field layout with outgoing_prompt_hash
+    // -----------------------------------------------------------------------
+
+    /// Build a 224-byte v3 public_inputs binary.
+    /// Layout: [target_category_hash(0), start_time(1), end_time(2),
+    ///          bank_pub_key_x(3), bank_pub_key_y(4),
+    ///          outgoing_prompt_hash(5), verified_aggregate(6)]
+    fn build_v3_public_inputs_binary(
+        category_hash_bytes: &[u8; 32],
+        start: u64,
+        end: u64,
+        pk_x: &[u8; 32],
+        pk_y: &[u8; 32],
+        outgoing_prompt_hash_field: &[u8; 32], // 32-byte BN254 field (big-endian)
+        aggregate: u64,
+    ) -> [u8; 224] {
+        let mut buf = [0u8; 224];
+        let encode_u64 = |val: u64, slot: &mut [u8]| {
+            slot[24..32].copy_from_slice(&val.to_be_bytes());
+        };
+        buf[0..32].copy_from_slice(category_hash_bytes);
+        encode_u64(start, &mut buf[32..64]);
+        encode_u64(end, &mut buf[64..96]);
+        buf[96..128].copy_from_slice(pk_x);
+        buf[128..160].copy_from_slice(pk_y);
+        buf[160..192].copy_from_slice(outgoing_prompt_hash_field);
+        encode_u64(aggregate, &mut buf[192..224]);
+        buf
+    }
+
+    /// v3 layout: valid binary + sidecar → cross_verify_sidecar passes.
+    #[test]
+    fn test_v3_cross_verify_sidecar_passes() {
+        let dir = tempdir().unwrap();
+        let pk_x = [0u8; 32];
+        let pk_y = [0u8; 32];
+        let hash_bytes = aws_spend_hash_bytes();
+        let hash_decimal = BigUint::from_bytes_be(&hash_bytes).to_string();
+
+        // outgoing_prompt_hash: arbitrary non-zero BN254 field value
+        let mut oph = [0u8; 32];
+        oph[31] = 0x42; // "0x...42" in hex
+        let oph_decimal = BigUint::from_bytes_be(&oph).to_string();
+        let oph_hex = format!("0x{}", hex::encode(&oph));
+
+        let binary = build_v3_public_inputs_binary(&hash_bytes, 1000, 2000, &pk_x, &pk_y, &oph, 99);
+        std::fs::write(dir.path().join("public_inputs"), &binary).unwrap();
+
+        let json = serde_json::json!({
+            "target_category_hash": hash_decimal,
+            "category_name": "aws_spend",
+            "start_time": 1000u64,
+            "end_time": 2000u64,
+            "bank_pub_key_x": "0",
+            "bank_pub_key_y": "0",
+            "outgoing_prompt_hash": oph_hex,
+            "verified_aggregate": 99u64
+        });
+        std::fs::write(
+            dir.path().join("public_inputs_readable.json"),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        ).unwrap();
+
+        let result = super::cross_verify_sidecar(dir.path(), 3);
+        assert!(result.is_ok(), "v3 cross_verify_sidecar must pass for valid fixture, got {:?}", result);
+        let _ = oph_decimal;
+    }
+
+    /// v3 layout: outgoing_prompt_hash mismatch between binary and sidecar → Err.
+    #[test]
+    fn test_v3_cross_verify_sidecar_oph_mismatch_detected() {
+        let dir = tempdir().unwrap();
+        let pk_x = [0u8; 32];
+        let pk_y = [0u8; 32];
+        let hash_bytes = aws_spend_hash_bytes();
+        let hash_decimal = BigUint::from_bytes_be(&hash_bytes).to_string();
+
+        let mut oph = [0u8; 32];
+        oph[31] = 0x42;
+
+        let binary = build_v3_public_inputs_binary(&hash_bytes, 1000, 2000, &pk_x, &pk_y, &oph, 99);
+        std::fs::write(dir.path().join("public_inputs"), &binary).unwrap();
+
+        // Sidecar claims a different outgoing_prompt_hash
+        let json = serde_json::json!({
+            "target_category_hash": hash_decimal,
+            "category_name": "aws_spend",
+            "start_time": 1000u64,
+            "end_time": 2000u64,
+            "bank_pub_key_x": "0",
+            "bank_pub_key_y": "0",
+            "outgoing_prompt_hash": "0xdeadbeef",
+            "verified_aggregate": 99u64
+        });
+        std::fs::write(
+            dir.path().join("public_inputs_readable.json"),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        ).unwrap();
+
+        let err = super::cross_verify_sidecar(dir.path(), 3).unwrap_err();
+        assert!(
+            err.to_string().contains("outgoing_prompt_hash"),
+            "expected 'outgoing_prompt_hash' in error, got: {}",
             err
         );
     }

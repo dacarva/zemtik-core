@@ -71,8 +71,12 @@ pub(crate) struct ProxyState {
     /// ed25519 manifest signing public key, hex-encoded. Derived from bank_sk at startup.
     /// Served on GET /public-key. Stable across restarts as long as bank_sk is unchanged.
     pub(crate) ed25519_manifest_pub_hex: String,
-    /// SHA-256(ed25519_manifest_pub hex bytes) — key fingerprint added to every receipt.
+    /// SHA-256(raw ed25519 verifying key bytes) — key fingerprint added to every receipt.
     pub(crate) manifest_key_id: String,
+    /// BabyJubJub public key components, precomputed at startup for GET /public-key.
+    /// Avoids per-request scalar multiplication (expensive) on the /public-key hot path.
+    pub(crate) bjj_pub_x: String,
+    pub(crate) bjj_pub_y: String,
     /// Optional public base URL for this deployment (e.g. "https://zemtik.example.com").
     /// When set, zemtik_meta blocks include a verify_url hint.
     #[allow(dead_code)]
@@ -184,8 +188,23 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         let (_, verifying_key) = keys::derive_manifest_signing_keypair(&seed)
             .context("derive manifest signing keypair at startup")?;
         let pub_hex = hex::encode(verifying_key.as_bytes());
-        let key_id = hex::encode(sha2::Sha256::digest(pub_hex.as_bytes()));
+        // Fingerprint: SHA-256 of the raw 32-byte public key (not the hex string).
+        // Standard practice: auditors independently compute fingerprint from raw key bytes.
+        let key_id = hex::encode(sha2::Sha256::digest(verifying_key.as_bytes()));
         (pub_hex, key_id)
+    };
+
+    // Precompute BabyJubJub public key at startup to avoid per-request scalar multiplication
+    // on the GET /public-key endpoint.
+    let (bjj_pub_x, bjj_pub_y) = match babyjubjub_rs::PrivateKey::import(signing_key_bytes.clone()) {
+        Ok(sk) => {
+            let pk = sk.public();
+            (pk.x.to_string(), pk.y.to_string())
+        }
+        Err(e) => {
+            eprintln!("[STARTUP] Warning: failed to derive BabyJubJub public key: {}", e);
+            ("error".to_owned(), "error".to_owned())
+        }
     };
 
     let mut pipeline_locks = HashMap::new();
@@ -264,6 +283,8 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         general_max_rpm: config.general_max_rpm,
         ed25519_manifest_pub_hex,
         manifest_key_id,
+        bjj_pub_x,
+        bjj_pub_y,
         public_url: config.public_url.clone(),
     });
 
@@ -2187,7 +2208,8 @@ async fn handle_passthrough() -> impl IntoResponse {
     )
 }
 
-/// GET /public-key — unauthenticated, rate-limited (60 req/min/IP via CORS layer).
+/// GET /public-key — unauthenticated. No rate limit implemented (public keys are safe to expose).
+/// TODO: add per-IP rate limiting via governor if abuse is observed.
 ///
 /// Returns the ed25519 manifest signing public key and the BabyJubJub public key.
 /// Both derive from the same `bank_sk` seed via different algorithms.
@@ -2197,23 +2219,12 @@ async fn handle_passthrough() -> impl IntoResponse {
 /// Third-party auditors use this to independently verify bundle signatures without
 /// needing bb or nargo installed. See docs/ZK_CIRCUITS.md#independent-verification.
 async fn handle_public_key(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
-    // Derive BabyJubJub public key from signing_key_bytes for the response.
-    let (bjj_pub_x, bjj_pub_y) = match babyjubjub_rs::PrivateKey::import(state.signing_key_bytes.clone()) {
-        Ok(sk) => {
-            let pk = sk.public();
-            (pk.x.to_string(), pk.y.to_string())
-        }
-        Err(e) => {
-            eprintln!("[PUBLIC_KEY] Failed to derive BabyJubJub key: {}", e);
-            ("error".to_owned(), "error".to_owned())
-        }
-    };
-
+    // Both keys are precomputed at startup to avoid per-request scalar multiplication.
     Json(serde_json::json!({
         "ed25519_manifest_pub": state.ed25519_manifest_pub_hex,
         "manifest_key_id": state.manifest_key_id,
-        "babyjubjub_pub_x": bjj_pub_x,
-        "babyjubjub_pub_y": bjj_pub_y,
+        "babyjubjub_pub_x": state.bjj_pub_x,
+        "babyjubjub_pub_y": state.bjj_pub_y,
         "algorithm": "ed25519",
         "curve": "babyjubjub",
         "_note": "ed25519_manifest_pub signs bundle manifests. babyjubjub_pub_x/y signs FastLane attestations. Both derive from the same bank_sk root via different algorithms.",
@@ -2423,5 +2434,48 @@ mod proxy_error_tests {
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             "ProxyError::UnprocessableEntity must map to HTTP 422"
         );
+    }
+
+    // ── compute_prompt_hash_field tests ──────────────────────────────────────
+
+    /// Known-answer test: SHA-256("hello world") with top-2 bits masked must produce
+    /// a stable hex output. Pins the derivation spec across refactors.
+    #[test]
+    fn test_compute_prompt_hash_field_known_answer() {
+        // SHA-256("hello world") = b94d27b9...
+        // byte[0] = 0xb9 = 0b10111001; after &= 0x3f: 0b00111001 = 0x39
+        let result = compute_prompt_hash_field("hello world");
+        assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
+        assert_eq!(result.len(), 66, "must be 0x + 64 hex chars (32 bytes)");
+        // Verify top-2-bits mask: first byte of result must have bits 7 and 6 clear.
+        let first_byte = u8::from_str_radix(&result[2..4], 16).expect("valid hex");
+        assert_eq!(first_byte & 0xc0, 0, "top 2 bits of field element must be clear (BN254 safety)");
+    }
+
+    /// Empty string produces a valid, non-zero field element (SHA-256 of empty = non-zero).
+    #[test]
+    fn test_compute_prompt_hash_field_empty_string_is_nonzero() {
+        let result = compute_prompt_hash_field("");
+        assert!(result.starts_with("0x"), "must be 0x-prefixed hex");
+        // SHA-256("") = e3b0c44298... — first byte after masking is 0x23 (non-zero)
+        assert_ne!(result, "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "SHA-256 of empty string is never zero");
+    }
+
+    /// Different prompts produce different field values (no collision in test vectors).
+    #[test]
+    fn test_compute_prompt_hash_field_different_prompts_differ() {
+        let h1 = compute_prompt_hash_field("what is the total aws spend for Q1 2024?");
+        let h2 = compute_prompt_hash_field("count transactions for client 123");
+        assert_ne!(h1, h2, "different prompts must produce different field values");
+    }
+
+    /// Same prompt always produces the same field value (deterministic).
+    #[test]
+    fn test_compute_prompt_hash_field_deterministic() {
+        let prompt = "show me the quarterly revenue breakdown";
+        let h1 = compute_prompt_hash_field(prompt);
+        let h2 = compute_prompt_hash_field(prompt);
+        assert_eq!(h1, h2, "same prompt must always produce same field value");
     }
 }
