@@ -46,6 +46,11 @@
       "sourceType": "github",
       "computedHash": "7c0cb31b80f601a4394449bf27bc865a9ff31cd0daaa1088a017fdb57b7ae306"
     },
+    "qa-test-planner": {
+      "source": "softaworks/agent-toolkit",
+      "sourceType": "github",
+      "computedHash": "c7a27e535b0a21a9ed22578ca0e37a00a00f43b775efe791a2d4be849ce8ffa9"
+    },
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",
