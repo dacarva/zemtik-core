@@ -35,12 +35,12 @@ curl http://localhost:4000/health
 curl -X POST http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"Q1 2024 client_portfolios total"}]}'
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
 ```
 
 The response includes `evidence.data_exfiltrated: 0` — a cryptographic receipt showing no raw records were sent to OpenAI. See [COMPLIANCE_RECEIPT.md](COMPLIANCE_RECEIPT.md) for field descriptions.
 
-**Using your own data:** mount your `schema_config.json` — see the commented volume in `docker-compose.yml`. The demo dataset uses the `transactions` table with `client_id=123`.
+**Using your own data:** `docker-compose.yml` already mounts `schema_config.example.json` with demo tables (aws\_spend, payroll, travel, and more). Replace that mount with your own `schema_config.json`. The demo dataset uses the `transactions` table with `client_id=123`.
 
 ---
 
