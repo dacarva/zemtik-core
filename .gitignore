@@ -35,3 +35,4 @@ tmp/
 .gstack/
 zemtik-course/
 skills-lock.json
+out/

@@ -28,13 +28,13 @@ curl -X POST http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
     "model": "gpt-5.4-nano",
-    "messages": [{"role": "user", "content": "Q1 2024 client_portfolios total"}]
+    "messages": [{"role": "user", "content": "What was our total AWS spend for Q1 2024?"}]
   }'
 ```
 
 The response includes an `evidence` block with `data_exfiltrated: 0` and `attestation_hash` — a cryptographic receipt you can show to auditors. See [docs/COMPLIANCE_RECEIPT.md](docs/COMPLIANCE_RECEIPT.md) for field descriptions.
 
-To use your own data: mount a custom `schema_config.json` — see the commented volume in `docker-compose.yml`.
+The `docker-compose.yml` already mounts `schema_config.example.json` (aws\_spend, payroll, travel, and more). To use your own data, replace that mount with your own `schema_config.json`.
 
 **Build variants** — the default image uses regex-based intent matching (~150MB). Two optional upgrades:
 
