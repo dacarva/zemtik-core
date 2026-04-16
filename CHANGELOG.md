@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.3] - 2026-04-16
+
+### Added
+- **Evidence Pack Auditor Guide** (`docs/EVIDENCE_PACK_AUDITOR_GUIDE.md`) — field-by-field reference for external auditors and compliance officers, with SOC 2 criteria mapping (preliminary), independent ZK proof verification steps, and questions to ask the institution. Designed for non-cryptographers.
+
+### Fixed
+- **AVG audit trail understated check count** — `checks_performed` for AVG composite queries now correctly lists 11 checks (was 9). The COUNT circuit runs the full 4-step pipeline (babyjubjub_signing → poseidon_commitment → ultrahonk_proof → bb_verify_local), identical to SUM. The original list only recorded 2 steps for COUNT, producing factually incomplete compliance evidence.
+- **AVG `evidence_summary()` unreachable in production** — match guard `agg_fn == "avg"` never matched because `AggFn::as_str()` returns uppercase `"AVG"`. Changed to `agg_fn.eq_ignore_ascii_case("avg")`. Added regression test `test_zk_slow_lane_avg_human_summary_uppercase`.
+- **`serde(default)` on v3 fields** — `human_summary` and `checks_performed` now deserialize gracefully from pre-v3 evidence packs (empty string / empty vec). Prevents panics when loading historical JSON from `receipts.db`.
+
 ## [0.13.2] - 2026-04-15
 
 ### Added
