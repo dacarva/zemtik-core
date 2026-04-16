@@ -126,7 +126,7 @@ POST /v1/chat/completions (user prompt)
 | `openai.rs` | OpenAI Chat Completions API client |
 | `config.rs` | Layered config + `SchemaConfig` / `TableConfig` loading from `schema_config.json`; `AggFn` enum (SUM/COUNT/AVG); identifier validation; `use_supabase_fast_lane()` |
 | `startup.rs` | Startup validation: Postgres column+row checks per table, ZK tools detection, formatted validation block, `ZEMTIK_VALIDATE_ONLY` exit path, startup events JSONL log |
-| `receipts.rs` | SQLite receipts ledger (CRUD + v9 migration: adds `evidence_json TEXT`; v8: `manifest_key_id`; v7: idx; v6: rewrite fields; v5: `actual_row_count`; v3: `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`); `count_receipts()` and `update_evidence_json()` added in v0.13.4 |
+| `receipts.rs` | SQLite receipts ledger (CRUD + v9 migration: adds `evidence_json TEXT`; v8: `manifest_key_id`; v7: idx; v6: rewrite fields; v5: `actual_row_count`; v4: `signing_version`; v3: `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`); `count_receipts()` and `update_evidence_json()` added in v0.13.4 |
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |

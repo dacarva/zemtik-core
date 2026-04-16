@@ -426,7 +426,7 @@ Response `evidence` field:
   "proof_hash": "7b2c...",
   "actual_row_count": 50,
   "data_exfiltrated": 0,
-  "human_summary": "Computed AVG over 50 rows from 'deals' using two sequential zero-knowledge circuits (SUM + COUNT, each UltraHonk proof), then attested the division result with BabyJubJub EdDSA. Raw records never left the institution's infrastructure. SUM proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
+  "human_summary": "Computed AVG over 50 rows from 'deals' using two sequential zero-knowledge circuits (SUM + COUNT, each UltraHonk proof), then attested the division result with BabyJubJub EdDSA. Raw records never left the institution's infrastructure. Both proofs are independently verifiable offline via `zemtik verify <bundle.zip>`.",
   "checks_performed": ["intent_classification", "schema_sensitivity_check", "babyjubjub_signing", "poseidon_commitment", "ultrahonk_proof", "bb_verify_local", "ultrahonk_proof", "bb_verify_local", "babyjubjub_attestation"]
 }
 ```

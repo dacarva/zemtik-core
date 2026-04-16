@@ -482,7 +482,7 @@ zemtik-core/
 │   ├── prover.rs         # nargo / bb subprocess pipeline
 │   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs          # Audit record writer
-│   ├── receipts.rs       # Receipts ledger (CRUD + migrations: v9 evidence_json; v8 manifest_key_id; v5 actual_row_count; v3 outgoing_prompt_hash; v2 engine_used, intent_confidence); count_receipts(), update_evidence_json()
+│   ├── receipts.rs       # Receipts ledger (CRUD + migrations: v9 evidence_json; v8 manifest_key_id; v5 actual_row_count; v4 signing_version; v3 outgoing_prompt_hash; v2 engine_used, intent_confidence); count_receipts(), update_evidence_json()
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── startup.rs        # Startup validation: Postgres checks, ZK tools detection, JSONL event log

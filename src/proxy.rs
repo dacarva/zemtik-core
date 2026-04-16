@@ -995,7 +995,13 @@ async fn handle_fast_lane(
                 rewrite_method: intent_result.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent_result.rewritten_query.clone(),
                 manifest_key_id: Some(state.manifest_key_id.clone()),
-                evidence_json: serde_json::to_string(&ev).ok(),
+                evidence_json: match serde_json::to_string(&ev) {
+                    Ok(json) => Some(json),
+                    Err(e) => {
+                        eprintln!("[WARN] FastLane: failed to serialize evidence_json: {}", e);
+                        None
+                    }
+                },
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
