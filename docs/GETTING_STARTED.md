@@ -423,16 +423,11 @@ Response `evidence` field:
 "evidence": {
   "evidence_version": 3,
   "engine": "ZkSlowLane",
-  "sum_proof_hash": "7b2c...",
-  "count_proof_hash": "a3f9...",
-  "avg": 56200,
-  "sum": 2810000,
-  "count": 50,
+  "proof_hash": "7b2c...",
   "actual_row_count": 50,
-  "avg_evidence_model": "zk_composite+attestation",
   "data_exfiltrated": 0,
-  "human_summary": "Computed AVG over 50 rows from 'deals' inside a zero-knowledge circuit (UltraHonk proof). Raw records never left the institution's infrastructure. Proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
-  "checks_performed": ["intent_classification", "schema_sensitivity_check", "babyjubjub_signing", "poseidon_commitment", "ultrahonk_proof", "bb_verify_local"]
+  "human_summary": "Computed AVG over 50 rows from 'deals' using two sequential zero-knowledge circuits (SUM + COUNT, each UltraHonk proof), then attested the division result with BabyJubJub EdDSA. Raw records never left the institution's infrastructure. SUM proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
+  "checks_performed": ["intent_classification", "schema_sensitivity_check", "babyjubjub_signing", "poseidon_commitment", "ultrahonk_proof", "bb_verify_local", "ultrahonk_proof", "bb_verify_local", "babyjubjub_attestation"]
 }
 ```
 

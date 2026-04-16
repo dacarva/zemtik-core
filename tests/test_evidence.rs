@@ -49,6 +49,11 @@ fn test_fast_lane_human_summary_non_empty() {
         "human_summary should contain row count, got: {:?}",
         ev.human_summary
     );
+    assert!(
+        ev.human_summary.contains("SUM"),
+        "human_summary should embed agg_fn, got: {:?}",
+        ev.human_summary
+    );
     assert_eq!(
         ev.row_count, 10,
         "row_count in pack should match evidence_summary row_count"
@@ -91,4 +96,48 @@ fn test_zk_slow_lane_human_summary_non_empty() {
         ],
         "checks_performed mismatch for zk_slow_lane"
     );
+}
+
+#[test]
+fn test_zk_slow_lane_avg_human_summary_uppercase() {
+    // Regression: ISSUE-001 — AggFn::as_str() returns "AVG" (uppercase) but the original
+    // match guard used agg_fn == "avg" (lowercase), causing the AVG arm to never trigger
+    // in production. Found by /qa on 2026-04-16.
+    // Report: .gstack/qa-reports/qa-report-zemtik-core-2026-04-16.md
+    let (summary, checks) = evidence_summary("zk_slow_lane", "deals", "AVG", 50);
+    assert!(
+        summary.contains("two sequential zero-knowledge circuits"),
+        "uppercase AVG should still hit the AVG composite arm, got: {:?}",
+        summary
+    );
+    assert_eq!(checks.len(), 11, "uppercase AVG should produce 11 checks, got: {:?}", checks);
+    assert_eq!(checks[10], "babyjubjub_attestation", "last check should be division attestation");
+}
+
+#[test]
+fn test_zk_slow_lane_avg_human_summary() {
+    let (summary, checks) = evidence_summary("zk_slow_lane", "deals", "avg", 50);
+    assert!(
+        summary.contains("deals"),
+        "AVG summary should contain table name, got: {:?}",
+        summary
+    );
+    assert!(
+        summary.contains("50 rows"),
+        "AVG summary should contain row count, got: {:?}",
+        summary
+    );
+    assert!(
+        summary.contains("AVG"),
+        "AVG summary should mention AVG, got: {:?}",
+        summary
+    );
+    assert!(
+        summary.contains("two sequential zero-knowledge circuits"),
+        "AVG summary should describe composite nature, got: {:?}",
+        summary
+    );
+    assert_eq!(checks.len(), 11, "AVG checks_performed should have 11 entries, got: {:?}", checks);
+    assert_eq!(checks[0], "intent_classification");
+    assert_eq!(checks[10], "babyjubjub_attestation", "last check should be division attestation");
 }

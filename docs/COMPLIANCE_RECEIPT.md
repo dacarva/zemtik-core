@@ -3,6 +3,8 @@
 Every query intercepted by Zemtik returns an `evidence` object alongside the LLM response.
 This document explains each field for compliance review, audit, and regulatory purposes.
 
+> **For auditors:** See [`docs/EVIDENCE_PACK_AUDITOR_GUIDE.md`](./EVIDENCE_PACK_AUDITOR_GUIDE.md) for a non-technical explanation of the Evidence Pack, field-by-field guidance for audit review, independent verification instructions, and a preliminary SOC 2 criteria mapping.
+
 ## What is a Compliance Receipt?
 
 A compliance receipt is a cryptographically-bound record that proves:
@@ -95,6 +97,34 @@ Present only when the hybrid query rewriter resolved the request (v0.10.0+, requ
 |--------|------|-------------|
 | `rewrite_method` | `TEXT` | `"deterministic"`, `"llm"`, or `NULL` when no rewriting occurred |
 | `rewritten_query` | `TEXT` | The rewritten query string sent to intent extraction, or `NULL` when no rewriting occurred |
+
+### `human_summary`
+
+**(v3+)** Plain-language description of what computation ran, what data stayed local, and (for ZK SlowLane) how to verify the result independently. Written for compliance officers and auditors who do not have a background in cryptography.
+
+Examples:
+- FastLane: *"Aggregated 47 rows from 'aws_spend' into a single SUM attested by Zemtik (BabyJubJub EdDSA). No individual records left the institution's infrastructure."*
+- ZK SlowLane (SUM/COUNT): *"Computed COUNT over 47 rows from 'employee_records' inside a zero-knowledge circuit (UltraHonk proof). Raw records never left the institution's infrastructure. Proof is independently verifiable offline via `zemtik verify <bundle.zip>`."*
+- ZK SlowLane (AVG): *"Computed AVG over 50 rows from 'deals' using two sequential zero-knowledge circuits (SUM + COUNT, each UltraHonk proof), then attested the division result with BabyJubJub EdDSA. Raw records never left the institution's infrastructure. SUM proof is independently verifiable offline via `zemtik verify <bundle.zip>`."*
+
+This field is designed to be copy-pasted into an audit leave-behind or compliance report without modification.
+
+### `checks_performed`
+
+**(v3+)** Ordered list of machine-stable identifiers describing every cryptographic and policy check Zemtik ran before forwarding the result to the LLM. The order reflects the actual execution sequence.
+
+| Identifier | Meaning |
+|------------|---------|
+| `intent_classification` | The user's natural-language prompt was classified against the schema to identify which table and aggregation function to run. |
+| `schema_sensitivity_check` | The identified table's sensitivity level was looked up from `schema_config.json` to determine the routing path (FastLane or ZK SlowLane). |
+| `aggregate_only_enforcement` | (FastLane only) The query was confirmed to produce a single aggregate scalar. No individual records are accessible in this path. |
+| `babyjubjub_attestation` | The aggregate result was signed with the institution's BabyJubJub EdDSA private key. The signature binds the result to the institution's key and cannot be forged. |
+| `babyjubjub_signing` | (ZK SlowLane) Each batch of raw transactions was signed with BabyJubJub before entering the ZK circuit, creating per-batch commitments. |
+| `poseidon_commitment` | (ZK SlowLane) A Poseidon hash commitment was computed over each signed batch inside the circuit. Poseidon is a ZK-native hash function chosen for circuit efficiency. |
+| `ultrahonk_proof` | (ZK SlowLane) The UltraHonk zero-knowledge proof was generated. This proof cryptographically certifies the aggregate is correct without revealing any underlying rows. |
+| `bb_verify_local` | (ZK SlowLane) The proof was verified locally on the institution's host using `bb verify` before the result was forwarded to the LLM. The result was only sent after local verification passed. |
+
+For FastLane queries, four checks are always present. For ZK SlowLane SUM/COUNT queries, six checks are present. For AVG composite queries, eleven checks are present: two complete ZK circuits (SUM: sign→commit→prove→verify, COUNT: sign→commit→prove→verify) plus the division attestation step.
 
 ### `zemtik_confidence`
 

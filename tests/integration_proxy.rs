@@ -379,6 +379,22 @@ async fn fast_lane_evidence_fields_are_correct() {
         evidence["proof_hash"].is_null(),
         "FastLane must NOT have proof_hash"
     );
+
+    // Evidence Pack v3 fields
+    assert_eq!(
+        evidence["evidence_version"], 3,
+        "evidence_version must be 3 (v3)"
+    );
+    assert!(
+        evidence["human_summary"].is_string() && !evidence["human_summary"].as_str().unwrap_or("").is_empty(),
+        "evidence.human_summary must be a non-empty string, got: {:?}",
+        evidence["human_summary"]
+    );
+    assert!(
+        evidence["checks_performed"].is_array() && !evidence["checks_performed"].as_array().unwrap().is_empty(),
+        "evidence.checks_performed must be a non-empty array, got: {:?}",
+        evidence["checks_performed"]
+    );
 }
 
 /// stream:true in standard mode → HTTP 400 with StreamingNotSupported code.

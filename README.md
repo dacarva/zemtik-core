@@ -507,6 +507,7 @@ zemtik-core/
 ├── docs/
 │   ├── ARCHITECTURE.md       # Full component breakdown and data flow
 │   ├── COMPLIANCE_RECEIPT.md # Evidence response field descriptions for auditors
+│   ├── EVIDENCE_PACK_AUDITOR_GUIDE.md # Field-by-field guide for external auditors + SOC 2 mapping
 │   ├── CONFIGURATION.md      # All config fields, env vars, schema_config.json format
 │   ├── GETTING_STARTED.md    # End-to-end setup guide
 │   ├── HOW_TO_ADD_TABLE.md   # Add a new table to the schema (step-by-step)
@@ -599,6 +600,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [Configuration](docs/CONFIGURATION.md) — All config fields, env vars, schema_config.json format
 - [Getting Started](docs/GETTING_STARTED.md) — End-to-end setup guide (Docker + build-from-source)
 - [Compliance Receipt](docs/COMPLIANCE_RECEIPT.md) — Evidence response fields: what each field means, how to verify
+- [Evidence Pack Auditor Guide](docs/EVIDENCE_PACK_AUDITOR_GUIDE.md) — For external auditors and compliance officers: field explanations, independent ZK verification steps, SOC 2 mapping, questions to ask the institution
 - [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
 - [ZK Circuits](docs/ZK_CIRCUITS.md) — Circuit internals: Poseidon Merkle tree, mini-circuit architecture, public input layout, developer constraints (500-tx cap, sentinel padding, category hash rules), bundle format, offline verification, threat model
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
