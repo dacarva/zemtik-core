@@ -1522,7 +1522,7 @@ async fn handle_zk_slow_lane(
                 rewrite_method: intent.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent.rewritten_query.clone(),
                 manifest_key_id: Some(state.manifest_key_id.clone()),
-                evidence_json: None, // Updated after evidence pack is built
+                evidence_json: None, // Populated later via update_evidence_json once the ZK evidence pack is assembled
             },
         ) {
             Ok(()) => Some(br),
@@ -2051,8 +2051,8 @@ fn render_receipts_list(list: &[receipts::Receipt], total: usize, page_size: usi
 </tr>"#,
                 id = html_escape(&r.id),
                 id_short = html_escape(r.id.get(..8).unwrap_or(&r.id)),
-                badge_color = badge_color,
-                badge_label = badge_label,
+                badge_color = html_escape(badge_color),
+                badge_label = html_escape(badge_label),
                 table_cell = html_escape(&table_cell),
                 aggregate_cell = html_escape(&aggregate_cell),
                 ts_short = html_escape(ts_short),

@@ -299,7 +299,7 @@ pub fn count_intent_failures_today(conn: &Connection) -> rusqlite::Result<u64> {
     .map(|n| n as u64)
 }
 
-/// List all receipts ordered by created_at DESC (for `zemtik list`).
+/// Returns the total number of receipts in the database.
 pub fn count_receipts(conn: &Connection) -> anyhow::Result<usize> {
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
@@ -307,6 +307,7 @@ pub fn count_receipts(conn: &Connection) -> anyhow::Result<usize> {
     Ok(n as usize)
 }
 
+/// List up to `limit` receipts ordered by created_at DESC. Used by `zemtik list` and the `/receipts` web UI.
 pub fn list_receipts(conn: &Connection, limit: usize) -> anyhow::Result<Vec<Receipt>> {
     let mut stmt = conn
         .prepare(

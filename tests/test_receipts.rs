@@ -1,7 +1,8 @@
 use rusqlite::Connection;
 use zemtik::receipts::{
-    count_engine_today, count_intent_failures_today, get_receipt, insert_intent_rejection,
-    insert_receipt, list_receipts, run_migration, Receipt, PROOF_STATUS_GENERAL_LANE,
+    count_engine_today, count_intent_failures_today, count_receipts, get_receipt,
+    insert_intent_rejection, insert_receipt, list_receipts, run_migration, update_evidence_json,
+    Receipt, PROOF_STATUS_GENERAL_LANE,
 };
 
 fn open_in_memory() -> anyhow::Result<Connection> {
@@ -522,4 +523,117 @@ fn test_count_intent_failures_today_returns_correct_count() {
 
     let count = count_intent_failures_today(&conn).unwrap();
     assert_eq!(count, 1, "count_intent_failures_today must count only today's intent rejections");
+}
+
+#[test]
+fn test_count_receipts() {
+    let conn = open_in_memory().unwrap();
+    assert_eq!(count_receipts(&conn).unwrap(), 0, "empty DB must return 0");
+    insert_receipt(&conn, &sample_receipt("count-1")).unwrap();
+    assert_eq!(count_receipts(&conn).unwrap(), 1);
+    insert_receipt(&conn, &sample_receipt("count-2")).unwrap();
+    assert_eq!(count_receipts(&conn).unwrap(), 2);
+}
+
+#[test]
+fn test_update_evidence_json() {
+    let conn = open_in_memory().unwrap();
+    let mut r = sample_receipt("ev-json-uuid");
+    r.evidence_json = None;
+    insert_receipt(&conn, &r).unwrap();
+
+    // Verify starts as None
+    let found = get_receipt(&conn, "ev-json-uuid").unwrap().unwrap();
+    assert_eq!(found.evidence_json, None, "evidence_json must start as None");
+
+    // Update to a JSON string
+    let json = r#"{"engine_used":"fast_lane","aggregate":42}"#;
+    update_evidence_json(&conn, "ev-json-uuid", json).unwrap();
+
+    let updated = get_receipt(&conn, "ev-json-uuid").unwrap().unwrap();
+    assert_eq!(
+        updated.evidence_json.as_deref(),
+        Some(json),
+        "update_evidence_json must persist the JSON string"
+    );
+}
+
+#[test]
+fn test_evidence_json_round_trips_through_insert() {
+    let conn = open_in_memory().unwrap();
+    let mut r = sample_receipt("ev-insert-uuid");
+    r.evidence_json = Some(r#"{"engine_used":"fast_lane","aggregate":100}"#.to_owned());
+    insert_receipt(&conn, &r).unwrap();
+
+    let found = get_receipt(&conn, "ev-insert-uuid").unwrap().unwrap();
+    assert_eq!(
+        found.evidence_json,
+        r.evidence_json,
+        "evidence_json must round-trip through insert_receipt"
+    );
+}
+
+#[test]
+fn test_list_receipts_respects_limit() {
+    let conn = open_in_memory().unwrap();
+    for i in 0..10 {
+        insert_receipt(&conn, &sample_receipt(&format!("limit-{}", i))).unwrap();
+    }
+    let list5 = list_receipts(&conn, 5).unwrap();
+    assert_eq!(list5.len(), 5, "list_receipts must respect the limit parameter");
+
+    let list_all = list_receipts(&conn, 100).unwrap();
+    assert_eq!(list_all.len(), 10, "list_receipts with generous limit returns all rows");
+}
+
+#[test]
+fn test_migration_v8_to_v9_adds_evidence_json_column() {
+    // Simulate a v8 database (all columns through manifest_key_id, no evidence_json)
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipts (
+            receipt_id   TEXT PRIMARY KEY,
+            bundle_path  TEXT NOT NULL,
+            proof_status TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            bb_version   TEXT NOT NULL,
+            prompt_hash  TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            engine_used  TEXT DEFAULT 'zk_slow_lane_legacy',
+            proof_hash   TEXT,
+            data_exfiltrated INTEGER DEFAULT 0,
+            intent_confidence REAL DEFAULT NULL,
+            outgoing_prompt_hash TEXT DEFAULT NULL,
+            signing_version INTEGER DEFAULT NULL,
+            actual_row_count INTEGER DEFAULT NULL,
+            rewrite_method TEXT DEFAULT NULL,
+            rewritten_query TEXT DEFAULT NULL,
+            manifest_key_id TEXT DEFAULT NULL
+        );
+        CREATE TABLE IF NOT EXISTS intent_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt TEXT NOT NULL,
+            error TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 8;",
+    )
+    .unwrap();
+
+    run_migration(&conn).unwrap();
+
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 9, "v8→v9 migration must bump to version 9");
+
+    let col_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('receipts') WHERE name='evidence_json'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(col_count, 1, "evidence_json column must exist after v9 migration");
 }
