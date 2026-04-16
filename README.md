@@ -58,7 +58,7 @@ docker build --build-arg BUILD_FEATURES=embed \
 
 The ubuntu:24.04 base is required for embed because the ONNX Runtime C++ layer needs glibc 2.38+ (Debian Bookworm ships 2.36).
 
-> **POC status (v0.13.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.13.4):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -410,7 +410,7 @@ The payload sent to OpenAI contains exactly three data fields:
 }
 ```
 
-The HTTP response to the caller includes an `evidence` object at the top level (`evidence_version: 2`, introduced in v0.8.0). It contains the `actual_row_count` of matching rows (replacing the old `row_count` field), the `proof_hash` or `attestation_hash`, engine name, intent confidence, and `data_exfiltrated: 0`.
+The HTTP response to the caller includes an `evidence` object at the top level (`evidence_version: 3`, introduced in v0.13.2). It contains `human_summary` (plain-language audit narrative), `checks_performed` (ordered list of cryptographic checks), `actual_row_count`, `proof_hash` or `attestation_hash`, engine name, intent confidence, and `data_exfiltrated: 0`.
 
 ### Trust Model
 
@@ -459,7 +459,7 @@ The `attestation_hash` acts as a receipt: it cryptographically binds the aggrega
 
 **Step 3 — OpenAI payload.** The aggregate and `attestation_hash` are included in the substituted user message sent to OpenAI. The raw rows, individual transaction amounts, and any PII columns are never present.
 
-The HTTP response to the caller includes an `evidence` object with `engine: "FastLane"`, `attestation_hash`, `actual_row_count`, `data_exfiltrated: 0`, and `evidence_version: 2`.
+The HTTP response to the caller includes an `evidence` object with `engine: "FastLane"`, `attestation_hash`, `actual_row_count`, `data_exfiltrated: 0`, and `evidence_version: 3`.
 
 > **No offline verification.** Unlike ZK SlowLane bundles, FastLane attestations cannot be independently verified with `bb verify`. An auditor can recompute the descriptor, verify the signature material behind `attestation_hash` with the institution's public key, and confirm the attestation format was followed — but cannot prove the aggregate was computed from real database rows.
 
@@ -482,7 +482,7 @@ zemtik-core/
 │   ├── prover.rs         # nargo / bb subprocess pipeline
 │   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs          # Audit record writer
-│   ├── receipts.rs       # Receipts ledger (CRUD + v5 migration: actual_row_count; v3: outgoing_prompt_hash; v2: engine_used, intent_confidence)
+│   ├── receipts.rs       # Receipts ledger (CRUD + migrations: v9 evidence_json; v8 manifest_key_id; v5 actual_row_count; v4 signing_version; v3 outgoing_prompt_hash; v2 engine_used, intent_confidence); count_receipts(), update_evidence_json()
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── startup.rs        # Startup validation: Postgres checks, ZK tools detection, JSONL event log
@@ -544,6 +544,42 @@ An auditor can independently verify the proof from the audit record:
 echo "<proof_hex>" | xxd -r -p > proof
 echo "<vk_hex>"   | xxd -r -p > vk
 bb verify -p proof -k vk
+```
+
+For proxy mode (Steps 5-6 in Getting Started), every query produces a receipt in the local SQLite database (`~/.zemtik/receipts.db`). The full `EvidencePack` JSON is stored in the `evidence_json` column (added in v0.13.4, migration v9).
+
+**CLI:**
+
+```bash
+zemtik list
+# Docker equivalent:
+docker compose exec zemtik zemtik list
+```
+
+**Browser — audit list (`/receipts`):**
+
+```
+http://localhost:4000/receipts
+```
+
+Shows up to 100 most recent receipts with a "Showing N of M total" banner. Columns: Receipt ID (linked), engine badge, table, aggregate (thousands-separated), timestamp.
+
+**Browser — receipt detail (`/verify/{receipt_id}`):**
+
+Copy the `receipt_id` from the `evidence` block of any proxy response, then open:
+
+```
+http://localhost:4000/verify/<receipt_id>
+```
+
+For v0.13.4+ receipts the page renders from `evidence_json`: proof status badge, verified aggregate with thousands separators, table name, `human_summary` plain-language narrative, ordered `checks_performed` list, attestation hash, and a collapsible raw Evidence Pack JSON accordion. Pre-v0.13.4 receipts fall back to the ZK bundle file.
+
+**Proxy logs:**
+
+```bash
+# Source build — logs stream in the terminal running `cargo run -- proxy`
+# Docker:
+docker compose logs -f
 ```
 
 ---

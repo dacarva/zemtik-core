@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                         rewrite_method: None,      // CLI pipeline has no query rewriting
                         rewritten_query: None,
                         manifest_key_id: None,     // CLI pipeline: no ed25519 key fingerprint
+                        evidence_json: None,       // CLI pipeline: evidence in audit/ JSON file
                     },
                 )?;
                 Some(br)
@@ -448,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
 fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     let conn = receipts::open_receipts_db(&config.receipts_db_path)
         .context("open receipts DB")?;
-    let list = receipts::list_receipts(&conn).context("list receipts")?;
+    let list = receipts::list_receipts(&conn, 50).context("list receipts")?;
 
     if list.is_empty() {
         println!("No receipts found. Run zemtik (pipeline) or zemtik proxy to generate receipts.");

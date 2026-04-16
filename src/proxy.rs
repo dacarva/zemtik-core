@@ -322,6 +322,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/health", get(handle_health))
             .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(handle_chat_completions))
+            .route("/receipts", get(handle_receipts_list))
             .route("/verify/{id}", get(handle_verify))
             .route("/{*path}", any(handle_passthrough)),
         ZemtikMode::Tunnel => Router::new()
@@ -331,6 +332,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/tunnel/audit", get(crate::tunnel::handle_audit))
             .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
             .route("/tunnel/summary", get(crate::tunnel::handle_summary))
+            .route("/receipts", get(handle_receipts_list))
             .route("/verify/{id}", get(handle_verify))
             .route("/{*path}", any(crate::tunnel::handle_tunnel_passthrough)),
     };
@@ -993,6 +995,13 @@ async fn handle_fast_lane(
                 rewrite_method: intent_result.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent_result.rewritten_query.clone(),
                 manifest_key_id: Some(state.manifest_key_id.clone()),
+                evidence_json: match serde_json::to_string(&ev) {
+                    Ok(json) => Some(json),
+                    Err(e) => {
+                        eprintln!("[WARN] FastLane: failed to serialize evidence_json: {}", e);
+                        None
+                    }
+                },
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
@@ -1153,6 +1162,7 @@ async fn handle_general_lane(
                 rewrite_method: None,
                 rewritten_query: None,
                 manifest_key_id: None,
+                evidence_json: None,
             }) {
                 eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
             }
@@ -1206,6 +1216,7 @@ async fn handle_general_lane(
             rewrite_method: None,
             rewritten_query: None,
             manifest_key_id: None,
+            evidence_json: None,
         })
     };
     if let Err(e) = receipt_write_result {
@@ -1517,6 +1528,7 @@ async fn handle_zk_slow_lane(
                 rewrite_method: intent.rewrite_method.as_ref().map(|m| m.to_string()),
                 rewritten_query: intent.rewritten_query.clone(),
                 manifest_key_id: Some(state.manifest_key_id.clone()),
+                evidence_json: None, // Populated later via update_evidence_json once the ZK evidence pack is assembled
             },
         ) {
             Ok(()) => Some(br),
@@ -1636,6 +1648,16 @@ async fn handle_zk_slow_lane(
     let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
+    }
+
+    // Persist evidence JSON on the receipt (ZK insert happened before evidence was built)
+    if committed_bundle.is_some() {
+        if let Ok(json) = serde_json::to_string(&ev_zk) {
+            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = receipts::update_evidence_json(&db_guard, &receipt_id_ev, &json) {
+                eprintln!("[WARN] ZK: failed to update evidence_json for {}: {}", receipt_id_ev, e);
+            }
+        }
     }
 
     let elapsed = total_start.elapsed();
@@ -1773,17 +1795,118 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
         _ => ("#ef4444", "INVALID"),
     };
 
-    let aggregate = readable
-        .and_then(|v| v.get("verified_aggregate"))
-        .and_then(|v| v.as_u64())
-        .map(|n| format!("${}", n))
+    // Parse evidence_json for richer data (v9+). Fall back to ZK bundle readable inputs.
+    let ev: Option<serde_json::Value> = r.evidence_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+
+    let aggregate_display = ev
+        .as_ref()
+        .and_then(|v| v.get("aggregate"))
+        .and_then(|v| v.as_i64())
+        .map(|n| {
+            // Format with thousands separator
+            let s = n.abs().to_string();
+            let formatted: String = s.chars().rev().enumerate()
+                .flat_map(|(i, c)| if i > 0 && i % 3 == 0 { vec![',', c] } else { vec![c] })
+                .collect::<String>().chars().rev().collect();
+            if n < 0 { format!("-${}", formatted) } else { format!("${}", formatted) }
+        })
+        .or_else(|| readable
+            .and_then(|v| v.get("verified_aggregate"))
+            .and_then(|v| v.as_u64())
+            .map(|n| format!("${}", n)))
         .unwrap_or_else(|| "—".to_owned());
 
-    let category = readable
-        .and_then(|v| v.get("category_name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+    let table_display = ev
+        .as_ref()
+        .and_then(|v| v.get("engine_used"))
+        .and_then(|_| {
+            // Extract table from human_summary if available
+            ev.as_ref()
+                .and_then(|v| v.get("human_summary"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    // "Aggregated N rows from 'table_key' into..."
+                    let re = s.find("from '")?;
+                    let rest = &s[re + 6..];
+                    let end = rest.find('\'')?;
+                    Some(rest[..end].to_owned())
+                })
+        })
+        .or_else(|| readable
+            .and_then(|v| v.get("category_name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()))
         .unwrap_or_else(|| "—".to_owned());
+
+    let engine_label = ev
+        .as_ref()
+        .and_then(|v| v.get("engine_used"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&r.engine_used);
+
+    let human_summary_html = ev
+        .as_ref()
+        .and_then(|v| v.get("human_summary"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(
+            r#"<div class="summary-box"><strong>Summary</strong><p>{}</p></div>"#,
+            html_escape(s)
+        ))
+        .unwrap_or_default();
+
+    let checks_html = ev
+        .as_ref()
+        .and_then(|v| v.get("checks_performed"))
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+        .map(|checks| {
+            let items: String = checks.iter()
+                .filter_map(|c| c.as_str())
+                .map(|c| format!("<li><code>{}</code></li>", html_escape(c)))
+                .collect();
+            format!(r#"<div class="checks"><strong>Checks Performed</strong><ol>{}</ol></div>"#, items)
+        })
+        .unwrap_or_default();
+
+    let attestation_row = ev
+        .as_ref()
+        .and_then(|v| v.get("attestation_hash"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|h| format!(
+            r#"<tr><td>Attestation Hash</td><td class="mono">{}</td></tr>"#,
+            html_escape(h)
+        ))
+        .unwrap_or_default();
+
+    let proof_row = if !r.circuit_hash.is_empty() || r.proof_hash.is_some() {
+        format!(
+            r#"<tr><td>Circuit Hash</td><td class="mono">{}</td></tr>
+  <tr><td>bb Version</td><td class="mono">{}</td></tr>"#,
+            html_escape(&r.circuit_hash),
+            html_escape(&r.bb_version),
+        )
+    } else {
+        String::new()
+    };
+
+    // Pretty-print evidence JSON for the raw block
+    let evidence_json_pretty = ev
+        .as_ref()
+        .and_then(|v| serde_json::to_string_pretty(v).ok())
+        .map(|s| format!(
+            r#"<details class="json-block">
+  <summary>Evidence Pack JSON</summary>
+  <pre><code>{}</code></pre>
+</details>"#,
+            html_escape(&s)
+        ))
+        .unwrap_or_default();
+
+    let back_link = r#"<p class="back-link"><a href="/receipts">← All receipts</a></p>"#;
 
     format!(
         r#"<!DOCTYPE html>
@@ -1793,51 +1916,216 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Zemtik Receipt — {id}</title>
 <style>
-  body {{ font-family: system-ui, sans-serif; max-width: 700px; margin: 48px auto; padding: 0 24px; color: #1a1a1a; }}
+  body {{ font-family: system-ui, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 24px; color: #1a1a1a; }}
   h1 {{ font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }}
   .subtitle {{ color: #666; font-size: 0.9rem; margin-bottom: 32px; }}
   .badge {{ display: inline-block; padding: 6px 18px; border-radius: 6px; font-weight: 700;
             font-size: 1.1rem; color: white; background: {badge_color}; margin-bottom: 24px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; margin-bottom: 24px; }}
   td {{ padding: 10px 0; border-bottom: 1px solid #e5e5e5; vertical-align: top; }}
   td:first-child {{ font-weight: 600; width: 200px; color: #444; }}
   .mono {{ font-family: monospace; font-size: 0.85rem; word-break: break-all; }}
+  .summary-box {{ background: #f0f9ff; border-left: 3px solid #3b82f6; padding: 12px 16px; margin-bottom: 20px; border-radius: 0 6px 6px 0; font-size: 0.95rem; }}
+  .summary-box p {{ margin: 6px 0 0; color: #444; }}
+  .checks {{ margin-bottom: 20px; font-size: 0.95rem; }}
+  .checks ol {{ margin: 8px 0 0 0; padding-left: 20px; color: #444; }}
+  .checks li {{ padding: 2px 0; }}
+  .json-block {{ margin-top: 24px; border: 1px solid #e5e5e5; border-radius: 6px; overflow: hidden; }}
+  .json-block summary {{ padding: 10px 16px; background: #f8f8f8; cursor: pointer; font-weight: 600; font-size: 0.9rem; }}
+  .json-block pre {{ margin: 0; padding: 16px; background: #1a1a1a; color: #e8e8e8; font-size: 0.82rem; overflow-x: auto; }}
   .footer {{ margin-top: 32px; font-size: 0.8rem; color: #999; }}
-  @media print {{ .footer {{ display: none; }} }}
+  .back-link {{ margin-bottom: 24px; font-size: 0.9rem; }}
+  .back-link a {{ color: #3b82f6; text-decoration: none; }}
+  @media print {{ .footer, .back-link, .json-block {{ display: none; }} }}
 </style>
 </head>
 <body>
+{back_link}
 <h1>Zemtik Cryptographic Receipt</h1>
-<p class="subtitle">Independent ZK proof verification — no raw data was transmitted to the LLM</p>
+<p class="subtitle">Audit evidence — no raw records were transmitted to the LLM</p>
 
 <div class="badge">{status_label}</div>
 
+{human_summary_html}
+
 <table>
-  <tr><td>Bundle ID</td><td class="mono">{id}</td></tr>
-  <tr><td>Verified Aggregate</td><td><strong>{aggregate}</strong></td></tr>
-  <tr><td>Category</td><td>{category}</td></tr>
+  <tr><td>Receipt ID</td><td class="mono">{id}</td></tr>
+  <tr><td>Verified Aggregate</td><td><strong>{aggregate_display}</strong></td></tr>
+  <tr><td>Table</td><td>{table_display}</td></tr>
+  <tr><td>Engine</td><td>{engine_label}</td></tr>
   <tr><td>Proof Status</td><td>{proof_status}</td></tr>
-  <tr><td>Circuit Hash</td><td class="mono">{circuit_hash}</td></tr>
-  <tr><td>bb Version</td><td class="mono">{bb_version}</td></tr>
+  {attestation_row}
+  {proof_row}
   <tr><td>Generated At</td><td>{created_at}</td></tr>
-  <tr><td>Raw Rows to LLM</td><td>0</td></tr>
+  <tr><td>Raw Rows to LLM</td><td><strong>0</strong></td></tr>
 </table>
 
+{checks_html}
+
+{evidence_json_pretty}
+
 <p class="footer">
-  Verify this receipt independently: <code>zemtik verify &lt;bundle.zip&gt;</code><br>
+  Verify this receipt independently: <code>zemtik verify &lt;bundle.zip&gt;</code> (ZK SlowLane only)<br>
   Requires only the <code>bb</code> binary (Barretenberg ≥ v4).
 </p>
 </body>
 </html>"#,
+        back_link = back_link,
         id = html_escape(&r.id),
         badge_color = badge_color,
         status_label = status_label,
-        aggregate = html_escape(&aggregate),
-        category = html_escape(&category),
+        human_summary_html = human_summary_html,
+        aggregate_display = html_escape(&aggregate_display),
+        table_display = html_escape(&table_display),
+        engine_label = html_escape(engine_label),
         proof_status = html_escape(&r.proof_status),
-        circuit_hash = html_escape(&r.circuit_hash),
-        bb_version = html_escape(&r.bb_version),
+        attestation_row = attestation_row,
+        proof_row = proof_row,
         created_at = html_escape(&r.created_at),
+        checks_html = checks_html,
+        evidence_json_pretty = evidence_json_pretty,
+    )
+}
+
+/// Serve the /receipts page — browseable HTML list of all receipts.
+async fn handle_receipts_list(
+    State(state): State<Arc<ProxyState>>,
+) -> Result<Response, ProxyError> {
+    const PAGE_SIZE: usize = 100;
+    let (list, total) = {
+        let db_guard = state.receipts_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let list = receipts::list_receipts(&db_guard, PAGE_SIZE).map_err(ProxyError::Internal)?;
+        let total = receipts::count_receipts(&db_guard).map_err(ProxyError::Internal)?;
+        (list, total)
+    };
+    Ok(Html(render_receipts_list(&list, total, PAGE_SIZE)).into_response())
+}
+
+fn render_receipts_list(list: &[receipts::Receipt], total: usize, page_size: usize) -> String {
+    let rows: String = if list.is_empty() {
+        r#"<tr><td colspan="5" style="text-align:center;color:#999;padding:32px 0">No receipts yet. Send a query through the proxy to generate one.</td></tr>"#.to_owned()
+    } else {
+        list.iter().map(|r| {
+            let ev: Option<serde_json::Value> = r.evidence_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+
+            let aggregate_cell = ev
+                .as_ref()
+                .and_then(|v| v.get("aggregate"))
+                .and_then(|v| v.as_i64())
+                .map(|n| {
+                    let s = n.abs().to_string();
+                    let formatted: String = s.chars().rev().enumerate()
+                        .flat_map(|(i, c)| if i > 0 && i % 3 == 0 { vec![',', c] } else { vec![c] })
+                        .collect::<String>().chars().rev().collect();
+                    if n < 0 { format!("-${}", formatted) } else { format!("${}", formatted) }
+                })
+                .unwrap_or_else(|| "—".to_owned());
+
+            let table_cell = ev
+                .as_ref()
+                .and_then(|v| v.get("human_summary"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let re = s.find("from '")?;
+                    let rest = &s[re + 6..];
+                    let end = rest.find('\'')?;
+                    Some(rest[..end].to_owned())
+                })
+                .unwrap_or_else(|| "—".to_owned());
+
+            let (badge_color, badge_label) = match r.proof_status.as_str() {
+                s if s.starts_with("VALID") => ("#22c55e", "ZK VALID"),
+                "FAST_LANE_ATTESTED" => ("#3b82f6", "FastLane"),
+                s if s.contains("general") => ("#6b7280", "General"),
+                _ => ("#ef4444", "—"),
+            };
+
+            // Truncate timestamp to date + time without nanoseconds
+            let ts_short = r.created_at.get(..19).unwrap_or(&r.created_at);
+
+            format!(
+                r#"<tr>
+  <td class="mono small"><a href="/verify/{id}">{id_short}…</a></td>
+  <td><span class="badge" style="background:{badge_color}">{badge_label}</span></td>
+  <td>{table_cell}</td>
+  <td><strong>{aggregate_cell}</strong></td>
+  <td class="small">{ts_short}</td>
+</tr>"#,
+                id = html_escape(&r.id),
+                id_short = html_escape(r.id.get(..8).unwrap_or(&r.id)),
+                badge_color = html_escape(badge_color),
+                badge_label = html_escape(badge_label),
+                table_cell = html_escape(&table_cell),
+                aggregate_cell = html_escape(&aggregate_cell),
+                ts_short = html_escape(ts_short),
+            )
+        }).collect()
+    };
+
+    let showing = list.len();
+    let truncated = total > page_size;
+    let count_line = if truncated {
+        format!(
+            r#"Showing {showing} most recent of {total} receipt(s) total <a class="refresh" href="/receipts">↻ Refresh</a>"#,
+            showing = showing,
+            total = total,
+        )
+    } else {
+        format!(
+            r#"{total} receipt(s) total <a class="refresh" href="/receipts">↻ Refresh</a>"#,
+            total = total,
+        )
+    };
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zemtik — Receipts</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 48px auto; padding: 0 24px; color: #1a1a1a; }}
+  h1 {{ font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }}
+  .subtitle {{ color: #666; font-size: 0.9rem; margin-bottom: 28px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.92rem; }}
+  th {{ text-align: left; padding: 8px 0; border-bottom: 2px solid #e5e5e5; color: #444; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; }}
+  td {{ padding: 10px 8px 10px 0; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }}
+  tr:hover td {{ background: #fafafa; }}
+  a {{ color: #3b82f6; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  .badge {{ display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 0.78rem; font-weight: 700; color: white; }}
+  .mono {{ font-family: monospace; }}
+  .small {{ font-size: 0.85rem; color: #666; }}
+  .count {{ color: #666; font-size: 0.85rem; margin-bottom: 16px; }}
+  .refresh {{ float: right; font-size: 0.85rem; color: #3b82f6; }}
+</style>
+</head>
+<body>
+<h1>Zemtik — Audit Trail</h1>
+<p class="subtitle">Every query intercepted by this proxy. Click a receipt to see the full evidence pack.</p>
+<p class="count">{count_line}</p>
+<table>
+<thead>
+  <tr>
+    <th>Receipt ID</th>
+    <th>Engine</th>
+    <th>Table</th>
+    <th>Aggregate</th>
+    <th>Timestamp</th>
+  </tr>
+</thead>
+<tbody>
+{rows}
+</tbody>
+</table>
+</body>
+</html>"#,
+        count_line = count_line,
+        rows = rows,
     )
 }
 

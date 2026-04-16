@@ -28,8 +28,8 @@ Certifies that zero individual client records were transmitted to the LLM provid
 
 **Values: `"fast_lane"` or `"zk_slow_lane"`**
 
-- `fast_lane` — aggregate computed in-process using BabyJubJub EdDSA attestation. Response time: <500ms.
-- `zk_slow_lane` — aggregate computed inside a zero-knowledge circuit (UltraHonk proof via Barretenberg). Response time: 30–120s. The proof is mathematically verifiable by any third party holding the verification key.
+- `fast_lane` — aggregate computed in-process using BabyJubJub EdDSA attestation. Response time: < 50ms.
+- `zk_slow_lane` — aggregate computed inside a zero-knowledge circuit (UltraHonk proof via Barretenberg). Response time: ~17–20s on CPU (first query per table may include circuit compile time). The proof is independently verifiable by any third party using `bb verify` and the public verification key.
 
 ### `attestation_hash`
 

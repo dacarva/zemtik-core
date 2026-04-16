@@ -4,7 +4,7 @@
 **Audience:** Bank CISOs, enterprise security architects, and technical evaluators  
 **Goal:** Understand how Zemtik guarantees zero raw data exfiltration to external AI systems  
 
-**Scope note:** This document is aligned with **v0.13.0** (see `CHANGELOG.md`). The ZK slow-lane cryptography is unchanged in spirit from earlier releases.
+**Scope note:** This document is aligned with **v0.13.4** (see `CHANGELOG.md`). The ZK slow-lane cryptography is unchanged in spirit from earlier releases.
 
 - **v0.3.0–v0.4.0:** Intent extraction, routing, and FastLane middleware
 - **v0.5.x:** Timing instrumentation, Poseidon caching, outgoing prompt hash tracking, sidecar manifests, configurable `bb verify` timeout
@@ -17,7 +17,8 @@
 - **v0.10.0:** Hybrid query rewriter (`ZEMTIK_QUERY_REWRITER`): deterministic multi-turn resolution + LLM fallback; per-table `query_rewriting` flag; receipts DB v6 migration (`rewrite_method`, `rewritten_query` columns)
 - **v0.11.0:** General Passthrough lane (`ZEMTIK_GENERAL_PASSTHROUGH`): non-data queries forwarded to OpenAI with receipt and `zemtik_meta` block; `ZEMTIK_GENERAL_MAX_RPM` rate limiter; `X-Zemtik-Engine` response header on all lanes
 - **v0.13.0:** MCP Attestation Proxy (`src/mcp_proxy.rs`, `src/mcp_auth.rs`, `src/mcp_tools.rs`): wraps every MCP tool call with ZK-backed attestation; stdio transport (`zemtik mcp`, Claude Desktop) and Streamable HTTP transport (`zemtik mcp-serve`, `:4001`); `McpAuditRecord` persistence in `mcp_audit.db`; `ZEMTIK_MCP_MODE=tunnel|governed`; built-in tools (`zemtik_fetch`, `zemtik_read_file`) with path/domain allowlists; dynamic tool registration via `mcp_tools.json`
-- **v0.13.2:** `evidence_version: 3`; `human_summary` and `checks_performed` fields on `EvidencePack`; `evidence_summary()` helper with shared const check names; AVG composite path gets distinct human_summary (two ZK circuits + attestation) and 9-item checks list
+- **v0.13.2:** `evidence_version: 3`; `human_summary` and `checks_performed` fields on `EvidencePack`; `evidence_summary()` helper with shared const check names; AVG composite path gets distinct human_summary (two ZK circuits + attestation) and 11-item checks list (SUM circuit: intent + schema + sign + commit + prove + verify; COUNT circuit: sign + commit + prove + verify; division attestation)
+- **v0.13.4:** `evidence_json TEXT` column in receipts DB (migration v9) — full serialized `EvidencePack` stored per receipt; `/receipts` list page (100 most recent, "Showing N of M total" banner, engine badges, thousands-separated aggregates, links to detail); `/verify/{id}` rewritten to render from `evidence_json` (aggregate with thousands separator, table from `human_summary`, `human_summary` narrative, `checks_performed` ordered list, `attestation_hash`, collapsible JSON accordion, back-link to `/receipts`); falls back to ZK bundle for pre-v9 receipts; `count_receipts()` and `update_evidence_json()` added to `receipts.rs`
 
 ---
 
@@ -159,7 +160,7 @@ flowchart TD
 | `verify.rs` / `bundle.rs` | Bundle ZIP + offline verification |
 | `openai.rs` | Chat Completions client |
 | `config.rs` | Layered config + schema load |
-| `receipts.rs` | SQLite receipts (v5: adds `actual_row_count`; v3: `outgoing_prompt_hash`; v2: `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`) |
+| `receipts.rs` | SQLite receipts ledger (CRUD + migrations: v9 adds `evidence_json TEXT`; v8 `manifest_key_id`; v7 idx; v6 rewrite fields; v5 `actual_row_count`; v3 `outgoing_prompt_hash`; v2 `engine_used`, `proof_hash`, `data_exfiltrated`, `intent_confidence`); `count_receipts()` and `update_evidence_json()` added in v0.13.4 |
 | `keys.rs` | BabyJubJub key at `~/.zemtik/keys/bank_sk` (0600) |
 | `types.rs` | `IntentResult`, `Route`, `EngineResult`, `EvidencePack`, `ZemtikErrorCode`, `TunnelMatchStatus`, … |
 | `audit.rs` | JSON audit records under `audit/` |

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.4] - 2026-04-16
+
+### Added
+- **`/receipts` list page** — browse all proxy receipts at `http://localhost:4000/receipts`. Shows receipt ID (linked to `/verify`), engine badge, table name, aggregate, and timestamp. Displays the 100 most recent with a "Showing N of M total" banner when truncated.
+- **`evidence_json` stored in receipts DB** (migration v9) — the full serialized `EvidencePack` is now persisted alongside each receipt at query time. FastLane receipts store it on insert; ZK SlowLane receipts update it after the proof is built.
+- **Richer `/verify/{id}` page** — the receipt verification page now reads `evidence_json` to display `human_summary`, `checks_performed`, `attestation_hash`, aggregate with thousands separator, and engine label. Renders the raw Evidence Pack JSON in a collapsible accordion. Falls back to ZK bundle data for pre-v9 receipts.
+
+### Fixed
+- **`list_receipts` unbounded page size** — previously fetched all receipts with no `LIMIT`, producing 44,000+ px pages on busy proxies. Now capped at 100 for the web UI and 50 for the CLI. Total count is fetched separately and shown in the header.
+- **Badge rendering defense-in-depth** — `html_escape()` applied to all fields in the receipts list page rows.
+
 ## [0.13.3] - 2026-04-16
 
 ### Added

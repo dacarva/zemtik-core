@@ -55,6 +55,10 @@ pub struct Receipt {
     /// Cross-receipt consistency check: all receipts from the same deployment must share the
     /// same manifest_key_id. Added in v8.
     pub manifest_key_id: Option<String>,
+    /// Serialized JSON of the full EvidencePack returned to the caller. Added in v9.
+    /// Used by /verify/{id} to render aggregate, table, attestation_hash, human_summary,
+    /// checks_performed, and the raw JSON block without requiring a ZK bundle.
+    pub evidence_json: Option<String>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -191,6 +195,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v8")?;
     }
 
+    if version < 9 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN evidence_json TEXT DEFAULT NULL;
+             PRAGMA user_version = 9;
+             COMMIT;",
+        )
+        .context("apply migration v9")?;
+    }
+
     Ok(())
 }
 
@@ -201,8 +215,9 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             (receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
              data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
-             actual_row_count, rewrite_method, rewritten_query, manifest_key_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             actual_row_count, rewrite_method, rewritten_query, manifest_key_id,
+             evidence_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -222,9 +237,21 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.rewrite_method,
             r.rewritten_query,
             r.manifest_key_id,
+            r.evidence_json,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
+    Ok(())
+}
+
+/// Update the evidence_json field on an existing receipt (used when the evidence pack
+/// is built after the initial receipt insert, e.g. ZK SlowLane path).
+pub fn update_evidence_json(conn: &Connection, receipt_id: &str, json: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE receipts SET evidence_json = ?1 WHERE receipt_id = ?2",
+        rusqlite::params![json, receipt_id],
+    )
+    .with_context(|| format!("update evidence_json for receipt {}", receipt_id))?;
     Ok(())
 }
 
@@ -272,8 +299,16 @@ pub fn count_intent_failures_today(conn: &Connection) -> rusqlite::Result<u64> {
     .map(|n| n as u64)
 }
 
-/// List all receipts ordered by created_at DESC (for `zemtik list`).
-pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
+/// Returns the total number of receipts in the database.
+pub fn count_receipts(conn: &Connection) -> anyhow::Result<usize> {
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+        .context("count receipts")?;
+    Ok(n as usize)
+}
+
+/// List up to `limit` receipts ordered by created_at DESC. Used by `zemtik list` and the `/receipts` web UI.
+pub fn list_receipts(conn: &Connection, limit: usize) -> anyhow::Result<Vec<Receipt>> {
     let mut stmt = conn
         .prepare(
             "SELECT receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
@@ -287,13 +322,14 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     actual_row_count,
                     rewrite_method,
                     rewritten_query,
-                    manifest_key_id
-             FROM receipts ORDER BY created_at DESC",
+                    manifest_key_id,
+                    evidence_json
+             FROM receipts ORDER BY created_at DESC LIMIT ?1",
         )
         .context("prepare list_receipts")?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([limit as i64], |row| {
             let sv: Option<i64> = row.get(13)?;
             let arc: Option<i64> = row.get(14)?;
             Ok(Receipt {
@@ -315,6 +351,7 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                 rewrite_method: row.get(15)?,
                 rewritten_query: row.get(16)?,
                 manifest_key_id: row.get(17)?,
+                evidence_json: row.get(18)?,
             })
         })
         .context("query receipts")?;
@@ -338,7 +375,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     actual_row_count,
                     rewrite_method,
                     rewritten_query,
-                    manifest_key_id
+                    manifest_key_id,
+                    evidence_json
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -366,6 +404,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 rewrite_method: row.get(15)?,
                 rewritten_query: row.get(16)?,
                 manifest_key_id: row.get(17)?,
+                evidence_json: row.get(18)?,
             })
         })
         .context("query receipt")?;

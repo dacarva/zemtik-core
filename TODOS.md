@@ -388,12 +388,8 @@ Added from `/plan-devex-review` of fix/general-queries.
 - **Context:** v1 single-table is a conscious shortcut. The router.rs OR rule is implemented correctly but only exercised in unit tests with simulated multi-table intent. Real user queries will need this in v2.
 - **Depends on:** feat/routing-engine merged (provides the single-table v1 foundation).
 
-### /verify page: show aggregate and category for FastLane receipts (P3, before v1)
-- **What:** `/verify/:id` renders aggregate and category from `public_inputs_readable.json` inside the bundle ZIP. FastLane receipts have no bundle ZIP — `bundle_path` is empty, so aggregate and category show "—" on the verify page.
-- **Why:** Found by Codex outside voice during fix/critical-bugs-v040 eng review (2026-04-02). FastLane attestation is the primary path for low-sensitivity tables. Auditors hitting `/verify/:id` for a FastLane receipt see no meaningful data beyond the badge and receipt ID.
-- **How to apply:** Option A: store `aggregate` and `category_name` directly in the receipts table (schema migration). Option B: derive them from the `EvidencePack` JSON stored in the response (no schema change but requires storing the payload). Option A is cleaner — add `aggregate i64` and `category_name TEXT` columns to the receipts table with a v3 migration, populate on insert in `handle_fast_lane`.
-- **Effort:** S (human: ~2h / CC: ~15min)
-- **Depends on:** fix/critical-bugs-v040 merged.
+### ~~`/verify` page: show aggregate and category for FastLane receipts~~ ✓ DONE (feat/audit-trail-improvements, v0.13.4)
+- Implemented via Option B: `evidence_json` column (migration v9) stores the full `EvidencePack` JSON on each receipt. `/verify/{id}` now reads it to display aggregate, table, engine, `human_summary`, and `checks_performed` for both FastLane and ZK receipts. No additional schema columns needed.
 
 ---
 
