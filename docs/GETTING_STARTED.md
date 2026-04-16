@@ -241,7 +241,9 @@ The response is a standard OpenAI Chat Completions JSON with one addition: a top
     "data_exfiltrated": 0,
     "zemtik_confidence": 0.91,
     "receipt_id": "rec_...",
-    "evidence_version": 2
+    "evidence_version": 3,
+    "human_summary": "Aggregated 47 rows from 'aws_spend' into a single SUM attested by Zemtik (BabyJubJub EdDSA). No individual records left the institution's infrastructure.",
+    "checks_performed": ["intent_classification", "schema_sensitivity_check", "aggregate_only_enforcement", "babyjubjub_attestation"]
   }
 }
 ```
@@ -393,11 +395,13 @@ Response `evidence` field:
 
 ```json
 "evidence": {
-  "evidence_version": 2,
+  "evidence_version": 3,
   "engine": "ZkSlowLane",
   "proof_hash": "9a1b...",
   "actual_row_count": 47,
-  "data_exfiltrated": 0
+  "data_exfiltrated": 0,
+  "human_summary": "Computed COUNT over 47 rows from 'employee_records' inside a zero-knowledge circuit (UltraHonk proof). Raw records never left the institution's infrastructure. Proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
+  "checks_performed": ["intent_classification", "schema_sensitivity_check", "babyjubjub_signing", "poseidon_commitment", "ultrahonk_proof", "bb_verify_local"]
 }
 ```
 
@@ -417,7 +421,7 @@ Response `evidence` field:
 
 ```json
 "evidence": {
-  "evidence_version": 2,
+  "evidence_version": 3,
   "engine": "ZkSlowLane",
   "sum_proof_hash": "7b2c...",
   "count_proof_hash": "a3f9...",
@@ -426,7 +430,9 @@ Response `evidence` field:
   "count": 50,
   "actual_row_count": 50,
   "avg_evidence_model": "zk_composite+attestation",
-  "data_exfiltrated": 0
+  "data_exfiltrated": 0,
+  "human_summary": "Computed AVG over 50 rows from 'deals' inside a zero-knowledge circuit (UltraHonk proof). Raw records never left the institution's infrastructure. Proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
+  "checks_performed": ["intent_classification", "schema_sensitivity_check", "babyjubjub_signing", "poseidon_commitment", "ultrahonk_proof", "bb_verify_local"]
 }
 ```
 

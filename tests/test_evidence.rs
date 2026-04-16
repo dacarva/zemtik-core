@@ -3,7 +3,7 @@ use zemtik::types::EvidencePack;
 
 fn make_ev(hash: Option<String>) -> EvidencePack {
     let (human_summary, checks_performed) =
-        evidence_summary("fast_lane", "portfolio_holdings", "SUM", 100);
+        evidence_summary("fast_lane", "portfolio_holdings", "SUM", 10);
     build_evidence_pack(
         "test-receipt-id",
         "fast_lane",
@@ -40,19 +40,28 @@ fn test_build_evidence_pack_no_hash() {
 fn test_fast_lane_human_summary_non_empty() {
     let ev = make_ev(None);
     assert!(
-        ev.human_summary.len() >= 20,
-        "human_summary too short: {:?}",
-        ev.human_summary
-    );
-    assert!(
         ev.human_summary.contains("portfolio_holdings"),
         "human_summary should contain table name, got: {:?}",
         ev.human_summary
     );
     assert!(
-        ev.checks_performed.len() >= 4,
-        "expected >= 4 checks, got {}",
-        ev.checks_performed.len()
+        ev.human_summary.contains("10 rows"),
+        "human_summary should contain row count, got: {:?}",
+        ev.human_summary
+    );
+    assert_eq!(
+        ev.row_count, 10,
+        "row_count in pack should match evidence_summary row_count"
+    );
+    assert_eq!(
+        ev.checks_performed,
+        vec![
+            "intent_classification",
+            "schema_sensitivity_check",
+            "aggregate_only_enforcement",
+            "babyjubjub_attestation",
+        ],
+        "checks_performed mismatch for fast_lane"
     );
 }
 
@@ -61,13 +70,25 @@ fn test_zk_slow_lane_human_summary_non_empty() {
     let (human_summary, checks_performed) =
         evidence_summary("zk_slow_lane", "transactions", "COUNT", 250);
     assert!(
-        human_summary.len() >= 20,
-        "human_summary too short: {:?}",
+        human_summary.contains("transactions"),
+        "human_summary should contain table name, got: {:?}",
         human_summary
     );
     assert!(
-        checks_performed.len() >= 6,
-        "expected >= 6 checks for ZK path, got {}",
-        checks_performed.len()
+        human_summary.contains("250 rows"),
+        "human_summary should contain row count, got: {:?}",
+        human_summary
+    );
+    assert_eq!(
+        checks_performed,
+        vec![
+            "intent_classification",
+            "schema_sensitivity_check",
+            "babyjubjub_signing",
+            "poseidon_commitment",
+            "ultrahonk_proof",
+            "bb_verify_local",
+        ],
+        "checks_performed mismatch for zk_slow_lane"
     );
 }

@@ -42,10 +42,10 @@ pub fn evidence_summary(
         ),
         "zk_slow_lane" => (
             format!(
-                "Computed {} over {} rows inside a zero-knowledge circuit (UltraHonk proof). \
-                 Raw transactions never left the signing boundary. \
+                "Computed {} over {} rows from '{}' inside a zero-knowledge circuit (UltraHonk proof). \
+                 Raw records never left the institution's infrastructure. \
                  Proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
-                agg_fn, row_count
+                agg_fn, row_count, table
             ),
             vec![
                 CHECK_INTENT.into(),
