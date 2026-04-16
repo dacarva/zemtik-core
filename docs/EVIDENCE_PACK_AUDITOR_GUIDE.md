@@ -172,7 +172,11 @@ Unique UUIDv4 for this computation. Allows cross-reference with:
 - The proof bundle (for ZK SlowLane)
 - Any downstream audit log the institution maintains
 
-For a quick visual check while the proxy is running, open `http://<proxy-host>:4000/verify/<receipt_id>` in a browser — the page shows proof status, verified aggregate, and category. See [Getting Started, Step 7](GETTING_STARTED.md#step-7--view-your-audit-trail).
+For a full list of all receipts, open `http://<proxy-host>:4000/receipts` — the page shows up to 100 most recent receipts with engine badges, table names, aggregates (thousands-separated), and timestamps. Each row links to its detail page.
+
+For a detailed view of a specific receipt, open `http://<proxy-host>:4000/verify/<receipt_id>` — the page shows proof status badge, verified aggregate, table, `human_summary` narrative, ordered `checks_performed` list, attestation hash, and a collapsible raw Evidence Pack JSON accordion. For receipts from proxy v0.13.4 or later, all fields are read directly from the `evidence_json` column stored in `~/.zemtik/receipts.db` (migration v9). Earlier receipts fall back to the ZK bundle file.
+
+See [Getting Started, Step 7](GETTING_STARTED.md#step-7--view-your-audit-trail) for full instructions including the `zemtik list` CLI command and Docker equivalents.
 
 ---
 

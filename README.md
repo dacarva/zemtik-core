@@ -58,7 +58,7 @@ docker build --build-arg BUILD_FEATURES=embed \
 
 The ubuntu:24.04 base is required for embed because the ONNX Runtime C++ layer needs glibc 2.38+ (Debian Bookworm ships 2.36).
 
-> **POC status (v0.13.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.13.4):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -482,7 +482,7 @@ zemtik-core/
 │   ├── prover.rs         # nargo / bb subprocess pipeline
 │   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
 │   ├── audit.rs          # Audit record writer
-│   ├── receipts.rs       # Receipts ledger (CRUD + v5 migration: actual_row_count; v3: outgoing_prompt_hash; v2: engine_used, intent_confidence)
+│   ├── receipts.rs       # Receipts ledger (CRUD + migrations: v9 evidence_json; v8 manifest_key_id; v5 actual_row_count; v3 outgoing_prompt_hash; v2 engine_used, intent_confidence); count_receipts(), update_evidence_json()
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── startup.rs        # Startup validation: Postgres checks, ZK tools detection, JSONL event log
@@ -546,19 +546,41 @@ echo "<vk_hex>"   | xxd -r -p > vk
 bb verify -p proof -k vk
 ```
 
-For proxy mode (Steps 5-6 in Getting Started), every query produces a receipt in the local SQLite database. View them with:
+For proxy mode (Steps 5-6 in Getting Started), every query produces a receipt in the local SQLite database (`~/.zemtik/receipts.db`). The full `EvidencePack` JSON is stored in the `evidence_json` column (added in v0.13.4, migration v9).
+
+**CLI:**
 
 ```bash
 zemtik list
+# Docker equivalent:
+docker compose exec zemtik zemtik list
 ```
 
-Or open the receipt page in a browser using the `receipt_id` from the evidence block:
+**Browser — audit list (`/receipts`):**
+
+```
+http://localhost:4000/receipts
+```
+
+Shows up to 100 most recent receipts with a "Showing N of M total" banner. Columns: Receipt ID (linked), engine badge, table, aggregate (thousands-separated), timestamp.
+
+**Browser — receipt detail (`/verify/{receipt_id}`):**
+
+Copy the `receipt_id` from the `evidence` block of any proxy response, then open:
 
 ```
 http://localhost:4000/verify/<receipt_id>
 ```
 
-Docker users can stream proxy logs with `docker compose logs -f`.
+For v0.13.4+ receipts the page renders from `evidence_json`: proof status badge, verified aggregate with thousands separators, table name, `human_summary` plain-language narrative, ordered `checks_performed` list, attestation hash, and a collapsible raw Evidence Pack JSON accordion. Pre-v0.13.4 receipts fall back to the ZK bundle file.
+
+**Proxy logs:**
+
+```bash
+# Source build — logs stream in the terminal running `cargo run -- proxy`
+# Docker:
+docker compose logs -f
+```
 
 ---
 
