@@ -99,6 +99,22 @@ fn test_zk_slow_lane_human_summary_non_empty() {
 }
 
 #[test]
+fn test_zk_slow_lane_avg_human_summary_uppercase() {
+    // Regression: ISSUE-001 — AggFn::as_str() returns "AVG" (uppercase) but the original
+    // match guard used agg_fn == "avg" (lowercase), causing the AVG arm to never trigger
+    // in production. Found by /qa on 2026-04-16.
+    // Report: .gstack/qa-reports/qa-report-zemtik-core-2026-04-16.md
+    let (summary, checks) = evidence_summary("zk_slow_lane", "deals", "AVG", 50);
+    assert!(
+        summary.contains("two sequential zero-knowledge circuits"),
+        "uppercase AVG should still hit the AVG composite arm, got: {:?}",
+        summary
+    );
+    assert_eq!(checks.len(), 9, "uppercase AVG should produce 9 checks, got: {:?}", checks);
+    assert_eq!(checks[8], "babyjubjub_attestation", "last check should be division attestation");
+}
+
+#[test]
 fn test_zk_slow_lane_avg_human_summary() {
     let (summary, checks) = evidence_summary("zk_slow_lane", "deals", "avg", 50);
     assert!(

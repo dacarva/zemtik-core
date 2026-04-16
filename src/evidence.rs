@@ -43,7 +43,7 @@ pub fn evidence_summary(
                 CHECK_BJJ_ATTEST.into(),
             ],
         ),
-        "zk_slow_lane" if agg_fn == "avg" => (
+        "zk_slow_lane" if agg_fn.eq_ignore_ascii_case("avg") => (
             format!(
                 "Computed AVG over {} rows from '{}' using two sequential zero-knowledge circuits \
                  (SUM + COUNT, each UltraHonk proof), then attested the division result with \
