@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.2] - 2026-04-15
+
+### Added
+- **Evidence Pack v3** — `EvidencePack` gains two new fields: `human_summary` (plain-language compliance narrative) and `checks_performed` (ordered list of cryptographic and policy checks). FastLane produces 4 checks; ZK SlowLane produces 6. Designed for compliance officers and audit leave-behinds without a presenter.
+- **`evidence_summary()` helper** (`src/evidence.rs`) — pure function returning per-engine `(human_summary, checks_performed)` from `(engine, table, agg_fn, row_count)`. Uses shared const check-name strings to guarantee consistent spelling across call sites.
+
+### Changed
+- **`evidence_version` bumped 2 → 3** — `zemtik_evidence_envelope()` now emits `"evidence_version": 3`. Old consumers that parse by key (not strict version) are unaffected; new fields are additive.
+
 ## [0.13.1] - 2026-04-14
 
 ### Added

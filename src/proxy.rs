@@ -944,6 +944,12 @@ async fn handle_fast_lane(
             .as_bytes(),
     ));
 
+    let (human_summary, checks_performed) = evidence::evidence_summary(
+        "fast_lane",
+        &intent_result.table,
+        table_config.agg_fn.as_str(),
+        fl.row_count,
+    );
     let ev = evidence::build_evidence_pack(
         &receipt_id,
         "fast_lane",
@@ -957,6 +963,8 @@ async fn handle_fast_lane(
         Some(intent_result.confidence),
         Some(outgoing_hash.clone()),
         None,
+        human_summary,
+        checks_performed,
     );
 
     // Insert receipt — lock synchronously, never hold std::sync::MutexGuard across .await
@@ -1300,13 +1308,14 @@ async fn handle_general_lane(
 }
 
 /// Merge `EvidencePack` + intent summary for API clients (jq-friendly `engine` / `intent`).
-/// Adds `evidence_version: 2` to enable downstream parsers to distinguish v1 (row_count,
-/// single-proof) from v2 (actual_row_count, AVG dual-proof) response shapes.
+/// Adds `evidence_version: 3` to enable downstream parsers to distinguish v1 (row_count,
+/// single-proof), v2 (actual_row_count, AVG dual-proof), and v3 (human_summary,
+/// checks_performed) response shapes.
 /// When intent was rewritten, injects `rewrite_method` field into the envelope.
 fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<Value, serde_json::Error> {
     let mut v = serde_json::to_value(ev)?;
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("evidence_version".to_string(), serde_json::json!(2));
+        obj.insert("evidence_version".to_string(), serde_json::json!(3));
         obj.insert("engine".to_string(), Value::String(ev.engine_used.clone()));
         obj.insert(
             "intent".to_string(),
@@ -1602,6 +1611,12 @@ async fn handle_zk_slow_lane(
     let timestamp_ev = Utc::now().to_rfc3339();
     let key_material = format!("{}{}", zk.first_sig.pub_key_x, zk.first_sig.pub_key_y);
     let key_id_zk = hex::encode(Sha256::digest(key_material.as_bytes()));
+    let (human_summary_zk, checks_performed_zk) = evidence::evidence_summary(
+        "zk_slow_lane",
+        &intent.table,
+        agg_fn.as_str(),
+        zk.actual_row_count,
+    );
     let ev_zk = evidence::build_evidence_pack(
         &receipt_id_ev,
         "zk_slow_lane",
@@ -1615,6 +1630,8 @@ async fn handle_zk_slow_lane(
         Some(intent.confidence),
         zk.outgoing_prompt_hash.clone(),
         Some(zk.actual_row_count),
+        human_summary_zk,
+        checks_performed_zk,
     );
     let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {

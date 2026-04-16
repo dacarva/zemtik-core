@@ -1,7 +1,9 @@
-use zemtik::evidence::build_evidence_pack;
+use zemtik::evidence::{build_evidence_pack, evidence_summary};
 use zemtik::types::EvidencePack;
 
 fn make_ev(hash: Option<String>) -> EvidencePack {
+    let (human_summary, checks_performed) =
+        evidence_summary("fast_lane", "portfolio_holdings", "SUM", 10);
     build_evidence_pack(
         "test-receipt-id",
         "fast_lane",
@@ -15,6 +17,8 @@ fn make_ev(hash: Option<String>) -> EvidencePack {
         Some(0.95),
         hash,
         None,
+        human_summary,
+        checks_performed,
     )
 }
 
@@ -30,4 +34,61 @@ fn test_build_evidence_pack_has_outgoing_hash() {
 fn test_build_evidence_pack_no_hash() {
     let ev = make_ev(None);
     assert_eq!(ev.outgoing_prompt_hash, None);
+}
+
+#[test]
+fn test_fast_lane_human_summary_non_empty() {
+    let ev = make_ev(None);
+    assert!(
+        ev.human_summary.contains("portfolio_holdings"),
+        "human_summary should contain table name, got: {:?}",
+        ev.human_summary
+    );
+    assert!(
+        ev.human_summary.contains("10 rows"),
+        "human_summary should contain row count, got: {:?}",
+        ev.human_summary
+    );
+    assert_eq!(
+        ev.row_count, 10,
+        "row_count in pack should match evidence_summary row_count"
+    );
+    assert_eq!(
+        ev.checks_performed,
+        vec![
+            "intent_classification",
+            "schema_sensitivity_check",
+            "aggregate_only_enforcement",
+            "babyjubjub_attestation",
+        ],
+        "checks_performed mismatch for fast_lane"
+    );
+}
+
+#[test]
+fn test_zk_slow_lane_human_summary_non_empty() {
+    let (human_summary, checks_performed) =
+        evidence_summary("zk_slow_lane", "transactions", "COUNT", 250);
+    assert!(
+        human_summary.contains("transactions"),
+        "human_summary should contain table name, got: {:?}",
+        human_summary
+    );
+    assert!(
+        human_summary.contains("250 rows"),
+        "human_summary should contain row count, got: {:?}",
+        human_summary
+    );
+    assert_eq!(
+        checks_performed,
+        vec![
+            "intent_classification",
+            "schema_sensitivity_check",
+            "babyjubjub_signing",
+            "poseidon_commitment",
+            "ultrahonk_proof",
+            "bb_verify_local",
+        ],
+        "checks_performed mismatch for zk_slow_lane"
+    );
 }
