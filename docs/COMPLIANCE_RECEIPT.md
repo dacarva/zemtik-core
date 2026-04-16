@@ -124,7 +124,7 @@ This field is designed to be copy-pasted into an audit leave-behind or complianc
 | `ultrahonk_proof` | (ZK SlowLane) The UltraHonk zero-knowledge proof was generated. This proof cryptographically certifies the aggregate is correct without revealing any underlying rows. |
 | `bb_verify_local` | (ZK SlowLane) The proof was verified locally on the institution's host using `bb verify` before the result was forwarded to the LLM. The result was only sent after local verification passed. |
 
-For FastLane queries, four checks are always present. For ZK SlowLane SUM/COUNT queries, six checks are present. For AVG composite queries, nine checks are present (both ZK circuits plus the division attestation step).
+For FastLane queries, four checks are always present. For ZK SlowLane SUM/COUNT queries, six checks are present. For AVG composite queries, eleven checks are present: two complete ZK circuits (SUM: sign→commit→prove→verify, COUNT: sign→commit→prove→verify) plus the division attestation step.
 
 ### `zemtik_confidence`
 

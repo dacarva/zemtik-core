@@ -110,8 +110,8 @@ fn test_zk_slow_lane_avg_human_summary_uppercase() {
         "uppercase AVG should still hit the AVG composite arm, got: {:?}",
         summary
     );
-    assert_eq!(checks.len(), 9, "uppercase AVG should produce 9 checks, got: {:?}", checks);
-    assert_eq!(checks[8], "babyjubjub_attestation", "last check should be division attestation");
+    assert_eq!(checks.len(), 11, "uppercase AVG should produce 11 checks, got: {:?}", checks);
+    assert_eq!(checks[10], "babyjubjub_attestation", "last check should be division attestation");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn test_zk_slow_lane_avg_human_summary() {
         "AVG summary should describe composite nature, got: {:?}",
         summary
     );
-    assert_eq!(checks.len(), 9, "AVG checks_performed should have 9 entries, got: {:?}", checks);
+    assert_eq!(checks.len(), 11, "AVG checks_performed should have 11 entries, got: {:?}", checks);
     assert_eq!(checks[0], "intent_classification");
-    assert_eq!(checks[8], "babyjubjub_attestation", "last check should be division attestation");
+    assert_eq!(checks[10], "babyjubjub_attestation", "last check should be division attestation");
 }

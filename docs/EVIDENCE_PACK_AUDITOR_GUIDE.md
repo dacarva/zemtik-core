@@ -112,7 +112,7 @@ An ordered list of every cryptographic and policy check Zemtik ran before forwar
 
 **FastLane queries** always produce 4 checks.  
 **ZK SlowLane SUM/COUNT queries** always produce 6 checks.  
-**ZK SlowLane AVG queries** produce 9 checks (SUM circuit + COUNT circuit + division attestation).
+**ZK SlowLane AVG queries** produce 11 checks: SUM circuit (4: sign→commit→prove→verify) + COUNT circuit (4: sign→commit→prove→verify) + intent + schema + division attestation.
 
 ---
 
@@ -257,7 +257,7 @@ The following is a preliminary mapping of Evidence Pack fields to SOC 2 Trust Se
 |-----------------------|-------------|
 | v1 | Initial release: `engine_used`, `attestation_hash`, `proof_hash`, `data_exfiltrated`, `row_count`, `receipt_id` |
 | v2 | Added `actual_row_count` (real rows vs padding in ZK proofs), AVG dual-proof support |
-| v3 | Added `human_summary` (plain-language narrative) and `checks_performed` (ordered check list) |
+| v3 | Added `human_summary` (plain-language narrative) and `checks_performed` (ordered check list). AVG produces 11 checks (corrected from initial 9-check claim that omitted COUNT circuit signing/commitment steps). |
 
 ---
 

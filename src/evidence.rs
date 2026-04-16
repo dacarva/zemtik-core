@@ -15,9 +15,9 @@ const CHECK_BB_VERIFY: &str = "bb_verify_local";
 /// FastLane: 4 checks (intent → schema → agg-only → BabyJubJub attestation).
 /// ZK SlowLane (SUM/COUNT): 6 checks (intent → schema → BabyJubJub sign →
 ///   Poseidon → UltraHonk proof → bb local verify).
-/// ZK SlowLane (AVG composite): 9 checks — two full ZK circuits (SUM + COUNT),
-///   each with signing/Poseidon/proof/verify, plus BabyJubJub attestation for
-///   the final avg = sum ÷ count division.
+/// ZK SlowLane (AVG composite): 11 checks — two full ZK circuits (SUM + COUNT),
+///   each with signing/Poseidon/proof/verify (4 checks each), plus BabyJubJub
+///   attestation for the final avg = sum ÷ count division.
 ///
 /// # Panics
 /// Panics via `unreachable!` if `engine` is not `"fast_lane"` or `"zk_slow_lane"`.
@@ -54,12 +54,14 @@ pub fn evidence_summary(
             vec![
                 CHECK_INTENT.into(),
                 CHECK_SCHEMA_SENS.into(),
-                // SUM circuit
+                // SUM circuit (full: sign → commit → prove → verify)
                 CHECK_BJJ_SIGN.into(),
                 CHECK_POSEIDON.into(),
                 CHECK_ULTRAHONK.into(),
                 CHECK_BB_VERIFY.into(),
-                // COUNT circuit
+                // COUNT circuit (full: sign → commit → prove → verify)
+                CHECK_BJJ_SIGN.into(),
+                CHECK_POSEIDON.into(),
                 CHECK_ULTRAHONK.into(),
                 CHECK_BB_VERIFY.into(),
                 // Division attestation
