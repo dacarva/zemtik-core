@@ -256,7 +256,7 @@ fn test_list_receipts() {
     let conn = open_in_memory().unwrap();
     insert_receipt(&conn, &sample_receipt("id-1")).unwrap();
     insert_receipt(&conn, &sample_receipt("id-2")).unwrap();
-    let list = list_receipts(&conn).unwrap();
+    let list = list_receipts(&conn, 50).unwrap();
     assert_eq!(list.len(), 2);
 }
 
@@ -295,7 +295,7 @@ fn test_list_receipts_includes_outgoing_hash() {
     r.outgoing_prompt_hash = Some("sha256:listtest123".to_owned());
     insert_receipt(&conn, &r).unwrap();
 
-    let list = list_receipts(&conn).unwrap();
+    let list = list_receipts(&conn, 50).unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(
         list[0].outgoing_prompt_hash,
@@ -344,7 +344,7 @@ fn receipts_v6_rewrite_fields_written_and_retrieved() {
     assert_eq!(direct.rewritten_query, None, "direct receipt rewritten_query must be None");
 
     // list_receipts must return the rewrite fields.
-    let list = list_receipts(&conn).unwrap();
+    let list = list_receipts(&conn, 50).unwrap();
     let llm_row = list.iter().find(|r| r.id == "v6-llm-uuid").unwrap();
     assert_eq!(llm_row.rewrite_method, Some("llm".to_owned()));
 }

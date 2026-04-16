@@ -300,7 +300,14 @@ pub fn count_intent_failures_today(conn: &Connection) -> rusqlite::Result<u64> {
 }
 
 /// List all receipts ordered by created_at DESC (for `zemtik list`).
-pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
+pub fn count_receipts(conn: &Connection) -> anyhow::Result<usize> {
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+        .context("count receipts")?;
+    Ok(n as usize)
+}
+
+pub fn list_receipts(conn: &Connection, limit: usize) -> anyhow::Result<Vec<Receipt>> {
     let mut stmt = conn
         .prepare(
             "SELECT receipt_id, bundle_path, proof_status, circuit_hash, bb_version,
@@ -316,12 +323,12 @@ pub fn list_receipts(conn: &Connection) -> anyhow::Result<Vec<Receipt>> {
                     rewritten_query,
                     manifest_key_id,
                     evidence_json
-             FROM receipts ORDER BY created_at DESC",
+             FROM receipts ORDER BY created_at DESC LIMIT ?1",
         )
         .context("prepare list_receipts")?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([limit as i64], |row| {
             let sv: Option<i64> = row.get(13)?;
             let arc: Option<i64> = row.get(14)?;
             Ok(Receipt {

@@ -449,7 +449,7 @@ async fn main() -> anyhow::Result<()> {
 fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     let conn = receipts::open_receipts_db(&config.receipts_db_path)
         .context("open receipts DB")?;
-    let list = receipts::list_receipts(&conn).context("list receipts")?;
+    let list = receipts::list_receipts(&conn, 50).context("list receipts")?;
 
     if list.is_empty() {
         println!("No receipts found. Run zemtik (pipeline) or zemtik proxy to generate receipts.");

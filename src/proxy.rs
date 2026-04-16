@@ -1985,16 +1985,19 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
 async fn handle_receipts_list(
     State(state): State<Arc<ProxyState>>,
 ) -> Result<Response, ProxyError> {
-    let list = {
+    const PAGE_SIZE: usize = 100;
+    let (list, total) = {
         let db_guard = state.receipts_db
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        receipts::list_receipts(&db_guard).map_err(ProxyError::Internal)?
+        let list = receipts::list_receipts(&db_guard, PAGE_SIZE).map_err(ProxyError::Internal)?;
+        let total = receipts::count_receipts(&db_guard).map_err(ProxyError::Internal)?;
+        (list, total)
     };
-    Ok(Html(render_receipts_list(&list)).into_response())
+    Ok(Html(render_receipts_list(&list, total, PAGE_SIZE)).into_response())
 }
 
-fn render_receipts_list(list: &[receipts::Receipt]) -> String {
+fn render_receipts_list(list: &[receipts::Receipt], total: usize, page_size: usize) -> String {
     let rows: String = if list.is_empty() {
         r#"<tr><td colspan="5" style="text-align:center;color:#999;padding:32px 0">No receipts yet. Send a query through the proxy to generate one.</td></tr>"#.to_owned()
     } else {
@@ -2057,7 +2060,20 @@ fn render_receipts_list(list: &[receipts::Receipt]) -> String {
         }).collect()
     };
 
-    let total = list.len();
+    let showing = list.len();
+    let truncated = total > page_size;
+    let count_line = if truncated {
+        format!(
+            r#"Showing {showing} most recent of {total} receipt(s) total <a class="refresh" href="/receipts">↻ Refresh</a>"#,
+            showing = showing,
+            total = total,
+        )
+    } else {
+        format!(
+            r#"{total} receipt(s) total <a class="refresh" href="/receipts">↻ Refresh</a>"#,
+            total = total,
+        )
+    };
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -2085,7 +2101,7 @@ fn render_receipts_list(list: &[receipts::Receipt]) -> String {
 <body>
 <h1>Zemtik — Audit Trail</h1>
 <p class="subtitle">Every query intercepted by this proxy. Click a receipt to see the full evidence pack.</p>
-<p class="count">{total} receipt(s) total <a class="refresh" href="/receipts">↻ Refresh</a></p>
+<p class="count">{count_line}</p>
 <table>
 <thead>
   <tr>
@@ -2102,7 +2118,7 @@ fn render_receipts_list(list: &[receipts::Receipt]) -> String {
 </table>
 </body>
 </html>"#,
-        total = total,
+        count_line = count_line,
         rows = rows,
     )
 }
