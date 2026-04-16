@@ -18,6 +18,7 @@
 - **v0.11.0:** General Passthrough lane (`ZEMTIK_GENERAL_PASSTHROUGH`): non-data queries forwarded to OpenAI with receipt and `zemtik_meta` block; `ZEMTIK_GENERAL_MAX_RPM` rate limiter; `X-Zemtik-Engine` response header on all lanes
 - **v0.13.0:** MCP Attestation Proxy (`src/mcp_proxy.rs`, `src/mcp_auth.rs`, `src/mcp_tools.rs`): wraps every MCP tool call with ZK-backed attestation; stdio transport (`zemtik mcp`, Claude Desktop) and Streamable HTTP transport (`zemtik mcp-serve`, `:4001`); `McpAuditRecord` persistence in `mcp_audit.db`; `ZEMTIK_MCP_MODE=tunnel|governed`; built-in tools (`zemtik_fetch`, `zemtik_read_file`) with path/domain allowlists; dynamic tool registration via `mcp_tools.json`
 - **v0.13.2:** `evidence_version: 3`; `human_summary` and `checks_performed` fields on `EvidencePack`; `evidence_summary()` helper with shared const check names; AVG composite path gets distinct human_summary (two ZK circuits + attestation) and 11-item checks list (SUM circuit: intent + schema + sign + commit + prove + verify; COUNT circuit: sign + commit + prove + verify; division attestation)
+- **v0.13.4:** `evidence_json TEXT` column in receipts DB (migration v9) — full serialized `EvidencePack` stored per receipt; `/receipts` list page (100 most recent, paginated); `/verify/{id}` rewritten to render from `evidence_json` (aggregate, table, `human_summary`, `checks_performed`, attestation hash, raw JSON accordion); `count_receipts()` and `update_evidence_json()` added to `receipts.rs`
 
 ---
 
