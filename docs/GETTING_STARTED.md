@@ -400,7 +400,7 @@ Response `evidence` field:
   "proof_hash": "9a1b...",
   "actual_row_count": 47,
   "data_exfiltrated": 0,
-  "human_summary": "Computed COUNT over 47 rows from 'employee_records' inside a zero-knowledge circuit (UltraHonk proof). Raw records never left the institution's infrastructure. Proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
+  "human_summary": "Computed COUNT over 47 rows from 'headcount_low' inside a zero-knowledge circuit (UltraHonk proof). Raw records never left the institution's infrastructure. Proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
   "checks_performed": ["intent_classification", "schema_sensitivity_check", "babyjubjub_signing", "poseidon_commitment", "ultrahonk_proof", "bb_verify_local"]
 }
 ```
@@ -434,6 +434,65 @@ Response `evidence` field:
 **Understanding the AVG evidence model:** AVG runs two independent ZK proofs — one for the SUM of all matching rows, one for the COUNT. Both proofs are verifiable with `zemtik verify <bundle.zip>`. The final division (`avg = sum / count`) is attested with a BabyJubJub EdDSA signature over the result. This is the same trust model as FastLane for the division step, with full UltraHonk guarantees on both operands.
 
 > **Latency note:** The first AVG or COUNT query on a new table compiles the ZK circuit (~30-120s). The proxy logs `[PROXY] Compiling circuit...` while this happens. Subsequent requests reuse the compiled artifact. Set `ZEMTIK_INTENT_BACKEND=regex` if you want to skip the embedding model download on first proxy start.
+
+---
+
+## Step 7 — View your audit trail
+
+Every query sent through the proxy (Steps 5 and 6) produces a receipt in the local SQLite database at `~/.zemtik/receipts.db`. Three ways to inspect it:
+
+### `zemtik list`
+
+```bash
+zemtik list
+```
+
+Expected output after at least one proxy query:
+
+```
+Receipt ID                              Engine                Status                  Conf      Created At
+------------------------------------------------------------------------------------------------------------------------
+3f7a1c2e-...                            fast_lane             FAST_LANE_ATTESTED      0.91      2026-04-16T10:23:44Z
+
+1 receipt(s) total.
+```
+
+Docker users:
+
+```bash
+docker compose exec zemtik zemtik list
+```
+
+> No receipts appear until at least one proxy query has been sent (Steps 5 or 6).
+
+### `/verify/{receipt_id}` — browser receipt page
+
+Copy the `receipt_id` from the `evidence` block in any Step 5 or Step 6 response, then open it in a browser:
+
+```
+http://localhost:4000/verify/<receipt_id>
+```
+
+The page shows:
+- **Proof status badge** — `VALID` (ZK SlowLane) or `FAST LANE ATTESTED` (FastLane)
+- **Verified aggregate** — the number Zemtik computed and attested
+- **Category** — the table and aggregation function used
+
+Works in both source and Docker modes. The host and port match wherever the proxy is bound (`ZEMTIK_BIND_ADDR`).
+
+### Proxy logs
+
+**Source build:** Logs are already streaming in the terminal running `cargo run -- proxy`. Look for `[PROXY]`-prefixed lines — the same output shown in Step 5.
+
+**Docker:** Stream proxy stdout with:
+
+```bash
+docker compose logs -f
+```
+
+### CLI pipeline audit files
+
+Step 3 (`cargo run`) writes a complete JSON audit record to `audit/<timestamp>.json`. See the "What just happened" bullets in Step 3 for a breakdown of every field in that file.
 
 ---
 

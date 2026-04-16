@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                         rewrite_method: None,      // CLI pipeline has no query rewriting
                         rewritten_query: None,
                         manifest_key_id: None,     // CLI pipeline: no ed25519 key fingerprint
+                        evidence_json: None,       // CLI pipeline: evidence in audit/ JSON file
                     },
                 )?;
                 Some(br)

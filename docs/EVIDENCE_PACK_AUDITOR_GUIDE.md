@@ -172,6 +172,8 @@ Unique UUIDv4 for this computation. Allows cross-reference with:
 - The proof bundle (for ZK SlowLane)
 - Any downstream audit log the institution maintains
 
+For a quick visual check while the proxy is running, open `http://<proxy-host>:4000/verify/<receipt_id>` in a browser — the page shows proof status, verified aggregate, and category. See [Getting Started, Step 7](GETTING_STARTED.md#step-7--view-your-audit-trail).
+
 ---
 
 ### `key_id`

@@ -410,7 +410,7 @@ The payload sent to OpenAI contains exactly three data fields:
 }
 ```
 
-The HTTP response to the caller includes an `evidence` object at the top level (`evidence_version: 2`, introduced in v0.8.0). It contains the `actual_row_count` of matching rows (replacing the old `row_count` field), the `proof_hash` or `attestation_hash`, engine name, intent confidence, and `data_exfiltrated: 0`.
+The HTTP response to the caller includes an `evidence` object at the top level (`evidence_version: 3`, introduced in v0.13.2). It contains `human_summary` (plain-language audit narrative), `checks_performed` (ordered list of cryptographic checks), `actual_row_count`, `proof_hash` or `attestation_hash`, engine name, intent confidence, and `data_exfiltrated: 0`.
 
 ### Trust Model
 
@@ -459,7 +459,7 @@ The `attestation_hash` acts as a receipt: it cryptographically binds the aggrega
 
 **Step 3 — OpenAI payload.** The aggregate and `attestation_hash` are included in the substituted user message sent to OpenAI. The raw rows, individual transaction amounts, and any PII columns are never present.
 
-The HTTP response to the caller includes an `evidence` object with `engine: "FastLane"`, `attestation_hash`, `actual_row_count`, `data_exfiltrated: 0`, and `evidence_version: 2`.
+The HTTP response to the caller includes an `evidence` object with `engine: "FastLane"`, `attestation_hash`, `actual_row_count`, `data_exfiltrated: 0`, and `evidence_version: 3`.
 
 > **No offline verification.** Unlike ZK SlowLane bundles, FastLane attestations cannot be independently verified with `bb verify`. An auditor can recompute the descriptor, verify the signature material behind `attestation_hash` with the institution's public key, and confirm the attestation format was followed — but cannot prove the aggregate was computed from real database rows.
 
@@ -545,6 +545,20 @@ echo "<proof_hex>" | xxd -r -p > proof
 echo "<vk_hex>"   | xxd -r -p > vk
 bb verify -p proof -k vk
 ```
+
+For proxy mode (Steps 5-6 in Getting Started), every query produces a receipt in the local SQLite database. View them with:
+
+```bash
+zemtik list
+```
+
+Or open the receipt page in a browser using the `receipt_id` from the evidence block:
+
+```
+http://localhost:4000/verify/<receipt_id>
+```
+
+Docker users can stream proxy logs with `docker compose logs -f`.
 
 ---
 
