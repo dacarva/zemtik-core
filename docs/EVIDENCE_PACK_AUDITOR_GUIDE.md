@@ -36,7 +36,7 @@ Zemtik routes queries to one of two engines based on the data sensitivity classi
 
 - Computes the aggregate in-process (no ZK proof).
 - Signs the result with a BabyJubJub EdDSA private key that never leaves the host machine.
-- Response time: < 500 ms.
+- Response time: < 50 ms.
 - Evidence: `attestation_hash` (SHA-256 of the signature components). Verifiable by an institution-provided public key.
 
 ### ZK SlowLane (high-sensitivity tables)
@@ -44,7 +44,7 @@ Zemtik routes queries to one of two engines based on the data sensitivity classi
 - Computes the aggregate inside a zero-knowledge circuit (UltraHonk proof via Barretenberg).
 - The proof mathematically certifies the aggregate without exposing any underlying row.
 - The proof is verified locally before the result is sent to the LLM.
-- Response time: 30–120 seconds (first query per table also compiles the circuit).
+- Response time: ~17–20 seconds on CPU (first query per table may include circuit compile time).
 - Evidence: `proof_hash` (SHA-256 of the UltraHonk proof). The proof bundle is independently verifiable by any third party.
 
 ---
