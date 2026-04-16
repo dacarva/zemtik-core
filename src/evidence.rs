@@ -13,8 +13,11 @@ const CHECK_BB_VERIFY: &str = "bb_verify_local";
 /// a given engine path. Called by each call site before `build_evidence_pack`.
 ///
 /// FastLane: 4 checks (intent → schema → agg-only → BabyJubJub attestation).
-/// ZK SlowLane: 6 checks (intent → schema → BabyJubJub sign → Poseidon →
-///   UltraHonk proof → bb local verify).
+/// ZK SlowLane (SUM/COUNT): 6 checks (intent → schema → BabyJubJub sign →
+///   Poseidon → UltraHonk proof → bb local verify).
+/// ZK SlowLane (AVG composite): 9 checks — two full ZK circuits (SUM + COUNT),
+///   each with signing/Poseidon/proof/verify, plus BabyJubJub attestation for
+///   the final avg = sum ÷ count division.
 ///
 /// # Panics
 /// Panics via `unreachable!` if `engine` is not `"fast_lane"` or `"zk_slow_lane"`.
@@ -37,6 +40,29 @@ pub fn evidence_summary(
                 CHECK_INTENT.into(),
                 CHECK_SCHEMA_SENS.into(),
                 CHECK_AGG_ONLY.into(),
+                CHECK_BJJ_ATTEST.into(),
+            ],
+        ),
+        "zk_slow_lane" if agg_fn == "avg" => (
+            format!(
+                "Computed AVG over {} rows from '{}' using two sequential zero-knowledge circuits \
+                 (SUM + COUNT, each UltraHonk proof), then attested the division result with \
+                 BabyJubJub EdDSA. Raw records never left the institution's infrastructure. \
+                 SUM proof is independently verifiable offline via `zemtik verify <bundle.zip>`.",
+                row_count, table
+            ),
+            vec![
+                CHECK_INTENT.into(),
+                CHECK_SCHEMA_SENS.into(),
+                // SUM circuit
+                CHECK_BJJ_SIGN.into(),
+                CHECK_POSEIDON.into(),
+                CHECK_ULTRAHONK.into(),
+                CHECK_BB_VERIFY.into(),
+                // COUNT circuit
+                CHECK_ULTRAHONK.into(),
+                CHECK_BB_VERIFY.into(),
+                // Division attestation
                 CHECK_BJJ_ATTEST.into(),
             ],
         ),
