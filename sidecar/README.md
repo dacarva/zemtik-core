@@ -51,9 +51,12 @@ This is critical for correctness with accented Spanish/Portuguese names (e.g., "
 
 ## Docker
 
+Build from the **repo root** (required — the Dockerfile copies both `sidecar/` and `proto/`):
+
 ```bash
-docker build -t zemtik-anonymizer .
-docker run -p 50051:50051 zemtik-anonymizer
+# From repo root:
+docker build -f sidecar/Dockerfile -t zemtik-sidecar .
+docker run -p 50051:50051 zemtik-sidecar
 ```
 
 The Docker image bakes the GLiNER model at build time (~500 MB image). First build takes 5-10 minutes on a cold cache.
