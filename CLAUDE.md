@@ -130,7 +130,7 @@ POST /v1/chat/completions (user prompt)
 | `keys.rs` | BabyJubJub key generation + persistence (`~/.zemtik/keys/bank_sk`, mode 0600) |
 | `types.rs` | Shared types: `Transaction`, `AuditRecord`, `IntentResult`, `Route`, `EngineResult`, … |
 | `audit.rs` | JSON audit record writer → `audit/` directory |
-| `mcp_proxy.rs` | MCP attestation proxy: `run_mcp_stdio`, `run_mcp_serve`, `run_dry_run`; wraps every MCP tool call with ZK-backed attestation; persists `McpAuditRecord` to `mcp_audit.db`; `list_mcp_audit_records` |
+| `mcp_proxy.rs` | MCP attestation proxy: `run_mcp_stdio`, `run_mcp_serve`, `run_dry_run`; wraps every MCP tool call with ZK-backed attestation; persists `McpAuditRecord` to `mcp_audit.db`; `list_mcp_audit_records`; SSRF guard: `pub fn ssrf_block_reason(url)` + `pub fn is_private_or_loopback(addr)` — blocks private IPs, loopback, IPv6 private ranges, and redirect bypass |
 | `mcp_auth.rs` | MCP authentication: bearer key validation for `/mcp/audit` and `/mcp/summary`; startup error if `ZEMTIK_MCP_API_KEY` unset in `mcp-serve` mode |
 | `mcp_tools.rs` | MCP built-in tool definitions (`zemtik_fetch`, `zemtik_read_file`); dynamic tool registration from `mcp_tools.json` (`ZEMTIK_MCP_TOOLS_PATH`); path and domain allowlist enforcement |
 
