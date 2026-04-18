@@ -24,6 +24,7 @@ Wait for the `anonymizer` service to report `healthy` (~30s — GLiNER model loa
 
 ```bash
 curl -X POST http://localhost:4000/v1/anonymize/preview \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [{
@@ -33,19 +34,27 @@ curl -X POST http://localhost:4000/v1/anonymize/preview \
   }'
 ```
 
-Expected response:
+Expected response (with default `ZEMTIK_ANONYMIZER_ENTITY_TYPES=PERSON,ORG,LOCATION`):
 
 ```json
 {
   "anonymized_messages": [
-    {"role": "user", "content": "El contrato de la empresa [[Z:0e67:1]] fue firmado por [[Z:e47f:1]], titular de la cédula [[Z:5b46:1]]"}
+    {"role": "user", "content": "El contrato de la empresa [[Z:0e67:1]] fue firmado por [[Z:e47f:2]], titular de la cédula 79.123.456"}
   ],
-  "tokens": ["[[Z:0e67:1]]", "[[Z:e47f:1]]", "[[Z:5b46:1]]"],
-  "entities_found": 3,
-  "entity_types": ["ORG", "PERSON", "CO_CEDULA"],
+  "tokens": ["[[Z:0e67:1]]", "[[Z:e47f:2]]"],
+  "entities_found": 2,
+  "entity_types": ["ORG", "PERSON"],
+  "sidecar_used": true,
   "sidecar_ms": 42
 }
 ```
+
+> **Note:** With the default entity types, `79.123.456` (Colombian cédula) is not anonymized.
+> To include LATAM structured IDs, add them to `ZEMTIK_ANONYMIZER_ENTITY_TYPES`:
+> ```bash
+> export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_CEDULA"
+> ```
+> This would produce `entities_found: 3` with `[[Z:5b46:1]]` for the cédula.
 
 ### 3. Full E2E (with LLM)
 
