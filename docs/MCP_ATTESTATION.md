@@ -170,8 +170,26 @@ The signing key is **hardcoded-denied** in `zemtik_read_file` — Claude cannot 
 |--------|-----------|
 | Claude reads signing key via `zemtik_read_file` | Hardcoded deny for all paths under `~/.zemtik/`. Cannot be overridden by config. |
 | Symlink pointing into `~/.zemtik/` | `canonicalize()` resolves symlinks before the deny check. |
-| SSRF via `zemtik_fetch` | SSE mode: domains not in `ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS` are blocked. |
+| SSRF via `zemtik_fetch` | Two-stage guard: (1) `ssrf_block_reason` (sync) — rejects non-HTTPS, literal private IPs, `file://`, malformed URLs; (2) `ssrf_dns_guard` (async) — resolves hostname via `tokio::net::lookup_host`, rejects if any returned IP is private/loopback (RFC 1918, loopback, 0.0.0.0/8, 169.254/16 IMDS, 100.64/10 CGNAT, broadcast, IPv4-mapped IPv6). Vetted IPs pinned via `resolve_to_addrs` to prevent TOCTOU rebinding. Domain allowlist (`ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`) applied as an additional layer in `mcp-serve` mode. |
 | Path traversal via `zemtik_read_file` | SSE mode: requires explicit `ZEMTIK_MCP_ALLOWED_PATHS`. Empty list = deny all. |
 | Bearer token timing attack | `constant_time_eq` comparison on `/mcp/audit` and `/mcp/summary`. |
 | Unauthenticated tool calls from LAN | Default bind is `127.0.0.1:4001`. Startup warning if non-loopback. |
 | Audit record tampering | Each record is independently signed with BabyJubJub EdDSA. Verify with the `public_key_hex` field. |
+
+### SSRF block error contract
+
+When `zemtik_fetch` is blocked by the SSRF guard, it returns an MCP error (not a tool result):
+
+```json
+{ "code": -32002, "message": "ssrf_blocked: <reason>" }
+```
+
+Common `<reason>` values:
+
+- `non-HTTPS scheme blocked` — only `https://` is allowed
+- `private/loopback IP blocked: 192.168.1.1` — literal private IP in URL
+- `private/loopback IP blocked: 127.0.0.1` — DNS resolved to loopback
+- `DNS resolution failed for evil.example.com: ...` — hostname did not resolve
+- `invalid URL: ...` — malformed input
+
+**No audit record is written for SSRF blocks.** The `outcome` field in the audit DB is only populated for calls that reach the HTTP client. Blocks by the domain allowlist (`ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`) do write an audit record with `outcome: zemtik_fetch_bypass`; SSRF blocks do not.

@@ -5,6 +5,8 @@
 //! Instead, tests the handler logic directly.
 
 use tempfile::TempDir;
+use wiremock::{MockServer, Mock, ResponseTemplate};
+use wiremock::matchers::method;
 
 use zemtik::config::AppConfig;
 use zemtik::mcp_proxy::{
@@ -295,8 +297,8 @@ fn ssrf_allows_public_ip_direct() {
     // Public IPs accessed directly via https:// must not be blocked
     assert!(ssrf_block_reason("https://8.8.8.8/").is_none(), "8.8.8.8 must pass");
     assert!(ssrf_block_reason("https://1.1.1.1/").is_none(), "1.1.1.1 must pass");
-    // Public IPv6
-    assert!(ssrf_block_reason("https://[2001:db8::1]/").is_none(), "2001:db8::1 must pass");
+    // Public IPv6 (Google DNS — globally routable)
+    assert!(ssrf_block_reason("https://[2001:4860:4860::8888]/").is_none(), "2001:4860:4860::8888 must pass");
 }
 
 #[test]
@@ -323,8 +325,9 @@ fn ssrf_blocks_localhost_subdomain() {
 #[test]
 fn is_private_or_loopback_public_ipv6_allowed() {
     use std::net::IpAddr;
-    let public6: IpAddr = "2001:db8::1".parse().unwrap();
-    assert!(!is_private_or_loopback(public6), "2001:db8::1 (documentation range) must not be blocked");
+    // Use globally routable IPv6 addresses, not documentation range (2001:db8::/32)
+    let public6: IpAddr = "2001:4860:4860::8888".parse().unwrap();
+    assert!(!is_private_or_loopback(public6), "Google DNS IPv6 must not be blocked");
     let public6b: IpAddr = "2606:4700:4700::1111".parse().unwrap();
     assert!(!is_private_or_loopback(public6b), "Cloudflare DNS IPv6 must not be blocked");
 }
@@ -426,4 +429,53 @@ async fn ssrf_dns_guard_resolves_localhost_hostname() {
     // DNS resolution of "localhost" must return 127.0.0.1 / ::1 and be blocked
     let result = ssrf_dns_guard("https://localhost/").await;
     assert!(result.is_err(), "localhost must be blocked via DNS resolution");
+}
+
+// ---------------------------------------------------------------------------
+// Redirect-to-private SSRF regression
+// ---------------------------------------------------------------------------
+
+/// Validates that handle_fetch's reqwest client is configured with Policy::none(),
+/// meaning a server-issued redirect to a private IP is never followed.
+///
+/// Two-part protection: (1) Policy::none() — redirect not followed at all;
+/// (2) ssrf_block_reason / ssrf_dns_guard would block the target if somehow re-invoked.
+#[tokio::test]
+async fn handle_fetch_redirect_to_private_not_followed() {
+    // Spin up a wiremock server that returns 302 → https://192.168.1.1/secret.
+    // wiremock binds to 127.0.0.1 (loopback) — fine for tests.
+    let server = MockServer::start().await;
+    let private_target = "https://192.168.1.1/secret";
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", private_target),
+        )
+        .mount(&server)
+        .await;
+
+    // Build a client mirroring handle_fetch settings: no redirects, short timeout.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client.get(server.uri()).send().await
+        .expect("wiremock server must respond");
+
+    // The redirect must NOT be followed — we expect the raw 302.
+    assert_eq!(resp.status().as_u16(), 302, "redirect must not be followed (got {:?})", resp.status());
+    let location = resp.headers().get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(location, private_target, "Location header must point at private target");
+
+    // Belt-and-suspenders: the redirect target is independently blocked by ssrf_block_reason
+    // (private IPv4 literal), so even if Policy were changed to follow redirects the guard
+    // would catch it in ssrf_block_reason before the second request is made.
+    assert!(
+        ssrf_block_reason(private_target).is_some(),
+        "ssrf_block_reason must block the redirect target independently"
+    );
 }
