@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     chmod +x /usr/local/bin/grpc-health-probe && \
     apt-get remove -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Build context must be the repo root:
+#   docker build -f sidecar/Dockerfile -t zemtik-sidecar .
+COPY sidecar/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Bake the GLiNER model into the image at build time.
@@ -18,10 +20,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Docker healthcheck transition from NOT_SERVING to SERVING predictable.
 RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi_pii-v1')"
 
-COPY . .
+COPY sidecar/ .
+COPY proto/ /app/proto/
 
 # Generate gRPC stubs from proto files
-COPY ../proto /app/proto
 RUN python -m grpc_tools.protoc \
     -I/app/proto \
     --python_out=/app \

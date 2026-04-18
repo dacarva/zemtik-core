@@ -164,14 +164,18 @@ def load_models():
         gliner_model = GLiNER.from_pretrained("urchade/gliner_multi_pii-v1")
         logger.info("GLiNER loaded in %.1fs", time.time() - t0)
     except Exception as exc:
-        logger.error("Failed to load GLiNER: %s — continuing without NER", exc)
+        raise RuntimeError(
+            f"GLiNER failed to load — cannot start sidecar in a safe state: {exc}"
+        ) from exc
 
     try:
         from presidio_analyzer import AnalyzerEngine
         presidio_analyzer = AnalyzerEngine()
         logger.info("Presidio AnalyzerEngine ready")
     except Exception as exc:
-        logger.warning("Failed to load Presidio: %s — structured IDs will not be detected", exc)
+        raise RuntimeError(
+            f"Presidio failed to load — cannot start sidecar in a safe state: {exc}"
+        ) from exc
 
     return gliner_model, presidio_analyzer
 
