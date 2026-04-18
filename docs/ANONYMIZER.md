@@ -1,0 +1,358 @@
+# Anonymizer v1
+
+**Document type:** Guide + Reference
+**Audience:** Developers integrating Zemtik's PII anonymization into LLM pipelines
+**Goal:** Enable zero-PII LLM calls without changing client code
+
+---
+
+## Quick Start
+
+### 1. Start the sidecar and proxy
+
+```bash
+export OPENAI_API_KEY=sk-...
+export ZEMTIK_ANONYMIZER_ENABLED=true
+
+# Start the full stack (sidecar + proxy)
+docker compose --profile anonymizer up --build
+```
+
+Wait for the `anonymizer` service to report `healthy` (~30s — GLiNER model load).
+
+### 2. Preview anonymization (no LLM call)
+
+```bash
+curl -X POST http://localhost:4000/v1/anonymize/preview \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{
+      "role": "user",
+      "content": "El contrato de la empresa ACME fue firmado por Carlos García, titular de la cédula 79.123.456"
+    }]
+  }'
+```
+
+Expected response:
+
+```json
+{
+  "anonymized_messages": [
+    {"role": "user", "content": "El contrato de la empresa [[Z:0e67:1]] fue firmado por [[Z:e47f:1]], titular de la cédula [[Z:5b46:1]]"}
+  ],
+  "tokens": ["[[Z:0e67:1]]", "[[Z:e47f:1]]", "[[Z:5b46:1]]"],
+  "entities_found": 3,
+  "entity_types": ["ORG", "PERSON", "CO_CEDULA"],
+  "sidecar_ms": 42
+}
+```
+
+### 3. Full E2E (with LLM)
+
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "Analiza el riesgo del contrato entre Carlos García y ACME S.A.S."}]
+  }'
+```
+
+The response will contain the original names (`Carlos García`, `ACME S.A.S.`) restored from the vault — the LLM only ever saw the tokens.
+
+Check `zemtik_meta.anonymizer` in the response body:
+
+```json
+{
+  "zemtik_meta": {
+    "anonymizer": {
+      "entities_found": 2,
+      "entity_types": ["PERSON", "ORG"],
+      "sidecar_used": true,
+      "sidecar_ms": 38,
+      "dropped_tokens": 0
+    }
+  }
+}
+```
+
+### 4. Regex-only mode (no sidecar)
+
+For LATAM structured IDs without the sidecar:
+
+```bash
+export ZEMTIK_ANONYMIZER_ENABLED=true
+export ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true
+# Do NOT start the sidecar
+cargo run -- proxy
+```
+
+PERSON/ORG/LOCATION detection requires the sidecar. Regex mode only covers structured IDs (CO_CEDULA, BR_CPF, etc.).
+
+---
+
+## Entity Types
+
+Zemtik v1 supports 16 entity types across two detection backends.
+
+### Sidecar-detected (GLiNER + Presidio)
+
+These require the Python sidecar to be running.
+
+| Entity Type | Description | Example |
+|-------------|-------------|---------|
+| `PERSON` | Personal names | `Carlos García`, `María Pérez` |
+| `ORG` | Organizations and companies | `ACME S.A.S.`, `Banco de Bogotá` |
+| `LOCATION` | Locations, addresses, places | `Bogotá D.C.`, `Calle 72 # 10-34` |
+
+### Regex fast-path (no sidecar required)
+
+These are detected by the Rust process itself via regex patterns. Available even when the sidecar is down and `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true`.
+
+| Entity Type | Description | Pattern examples |
+|-------------|-------------|-----------------|
+| `CO_CEDULA` | Colombian national ID | `79.123.456`, `1023456789` |
+| `CO_NIT` | Colombian tax ID (NIT) | `900.123.456-7` |
+| `CL_RUT` | Chilean tax ID (RUT) | `12.345.678-9`, `12345678-K` |
+| `MX_CURP` | Mexican unique population registry code | `BADD110313HCMLNS09` |
+| `MX_RFC` | Mexican tax ID (RFC) | `XAXX010101000` |
+| `BR_CPF` | Brazilian individual tax ID | `000.000.000-00` |
+| `BR_CNPJ` | Brazilian company tax ID | `00.000.000/0000-00` |
+| `AR_DNI` | Argentine national ID | `12.345.678`, `12345678` |
+| `ES_NIF` | Spanish national ID / NIE | `12345678A`, `X1234567A` |
+| `PHONE_NUMBER` | Phone numbers (international or formatted) | `+57 300 123 4567`, `(601) 234-5678` |
+| `EMAIL_ADDRESS` | Email addresses | `user@example.com` |
+| `IBAN_CODE` | IBAN bank account numbers | `ES9121000418450200051332` |
+| `DATE_TIME` | Dates and times (regex-based; GLiNER may also detect) | `2024-01-15`, `15/01/2024` |
+
+### Configuring entity types
+
+```bash
+# Default: PERSON, ORG, LOCATION (sidecar entities only)
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION"
+
+# Include all 16 types:
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_CEDULA,CO_NIT,CL_RUT,MX_CURP,MX_RFC,BR_CPF,BR_CNPJ,AR_DNI,ES_NIF,PHONE_NUMBER,EMAIL_ADDRESS,IBAN_CODE,DATE_TIME"
+```
+
+### Token format
+
+Each detected entity is replaced with an opaque token:
+
+```
+[[Z:{type_hash}:{counter}]]
+```
+
+- `[[Z:` / `]]` — double brackets survive LLM summarization verbatim
+- `type_hash` — 4-hex canonical hash: `hex(SHA256(entity_type.as_bytes())[0..2])`
+- `counter` — session-scoped integer; same entity always maps to the same counter
+
+| Entity Type | Token hash | Example token |
+|-------------|-----------|---------------|
+| `PERSON` | `e47f` | `[[Z:e47f:1]]` |
+| `ORG` | `0e67` | `[[Z:0e67:1]]` |
+| `LOCATION` | `ec4e` | `[[Z:ec4e:1]]` |
+| `CO_CEDULA` | `5b46` | `[[Z:5b46:1]]` |
+| `CO_NIT` | `bba1` | `[[Z:bba1:1]]` |
+| `CL_RUT` | `fe8c` | `[[Z:fe8c:1]]` |
+| `MX_CURP` | `87fb` | `[[Z:87fb:1]]` |
+| `MX_RFC` | `95d9` | `[[Z:95d9:1]]` |
+| `BR_CPF` | `d8f7` | `[[Z:d8f7:1]]` |
+| `BR_CNPJ` | `3834` | `[[Z:3834:1]]` |
+| `AR_DNI` | `f76d` | `[[Z:f76d:1]]` |
+| `ES_NIF` | `fc3d` | `[[Z:fc3d:1]]` |
+| `PHONE_NUMBER` | `ca71` | `[[Z:ca71:1]]` |
+| `EMAIL_ADDRESS` | `a8d8` | `[[Z:a8d8:1]]` |
+| `IBAN_CODE` | `3f21` | `[[Z:3f21:1]]` |
+| `DATE_TIME` | `322b` | `[[Z:322b:1]]` |
+
+Verify cross-layer hash parity (Rust ↔ Python):
+
+```bash
+# Rust
+cargo run --bin zemtik -- anonymizer hashes
+
+# Python
+cd sidecar && python -c "from entity_hashes import print_canonical_hashes; print_canonical_hashes()"
+
+# Diff must be zero bytes
+```
+
+---
+
+## Privacy Guarantees v1
+
+### What never leaves the Zemtik process in plaintext
+
+- Original entity text (names, IDs, addresses)
+- Session vault mapping tokens back to originals
+- Outgoing prompt content (only sanitized tokens are forwarded to OpenAI)
+
+### What is logged
+
+- `zemtik_meta.anonymizer` in the response body and `X-Zemtik-Meta` header: entity counts, types, sidecar usage, dropped token count, and optionally a 200-character preview of the outgoing (sanitized) prompt if `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true`
+- Audit spans in the `audit/` directory: byte offsets of each detected entity per message (no original text, only offsets and type)
+
+### Vault lifecycle
+
+1. A fresh vault is created at the start of each request (remove-after-turn)
+2. The vault is stored in process memory under `std::sync::Mutex` — never written to disk in v1
+3. `scopeguard::defer!` ensures the vault is removed even if the LLM call panics
+4. Background TTL eviction runs every 60 seconds; vaults older than `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` (default 300s) are purged
+
+### What "fail-closed" means
+
+When `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false` and the sidecar is unreachable:
+
+- Zemtik returns HTTP 503 immediately
+- The request is **not** forwarded to OpenAI
+- No PII passes through in plaintext
+
+### Limitations
+
+See the [Compatibility matrix](#compatibility-matrix) below.
+
+---
+
+## `zemtik_meta.anonymizer` Block
+
+Every response from the proxy includes a `zemtik_meta` object when anonymizer is enabled. The `anonymizer` sub-block has the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `entities_found` | integer | Total number of entity spans detected and tokenized across all user messages |
+| `entity_types` | string[] | Deduplicated list of entity types detected (e.g. `["PERSON", "ORG"]`) |
+| `sidecar_used` | boolean | `true` if the gRPC sidecar ran; `false` if regex-only fallback was used |
+| `sidecar_ms` | integer | Wall-clock milliseconds for the gRPC anonymization call. `0` if sidecar was not used. |
+| `dropped_tokens` | integer | Count of tokens in the vault that do NOT appear in the LLM response. Non-zero means the LLM paraphrased or omitted some anonymized entities instead of preserving the token verbatim. |
+| `outgoing_preview` | string \| null | First 200 characters of the sanitized outgoing prompt (tokens only, no originals). Present only when `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true` and `sidecar_used=true`. **Disable in production.** |
+
+### Example
+
+```json
+{
+  "id": "chatcmpl-...",
+  "choices": [...],
+  "zemtik_meta": {
+    "engine_used": "general_lane",
+    "receipt_id": "...",
+    "anonymizer": {
+      "entities_found": 3,
+      "entity_types": ["PERSON", "ORG", "CO_CEDULA"],
+      "sidecar_used": true,
+      "sidecar_ms": 41,
+      "dropped_tokens": 0,
+      "outgoing_preview": "El contrato de la empresa [[Z:0e67:1]] fue firmado por [[Z:e47f:1]], titular de la cédula [[Z:5b46:1]]"
+    }
+  }
+}
+```
+
+### Monitoring `dropped_tokens`
+
+A `dropped_tokens` value greater than 0 means the LLM did not preserve one or more opaque tokens in its response. This can happen when:
+
+- The LLM paraphrases or summarizes instead of preserving the token
+- Long context truncation removes the token before the generation step
+- The model is not instruction-following enough for token preservation
+
+Mitigation: the system prompt injected by Zemtik instructs the model to treat tokens as opaque identifiers. If `dropped_tokens` is consistently high, consider using a stronger model via `ZEMTIK_OPENAI_MODEL`.
+
+---
+
+## Compatibility Matrix (Known Limitations)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `stream: false` | ✅ Supported | Full anonymize → LLM → deanonymize pipeline |
+| `stream: true` | ❌ Not supported | Returns HTTP 415. Buffer + re-stream deferred to Phase 3. |
+| JSON mode (`response_format: json_object`) | ⚠️ Partial | Anonymization works; deanonymization runs on the raw JSON string — tokens preserved in string values are restored, but schema structure is not interpreted. |
+| Tool use / function calling | ⚠️ Partial | Anonymization runs on message content before routing. Tool call arguments and tool results are not anonymized. |
+| Structured outputs (`response_format: json_schema`) | ⚠️ Partial | Same as JSON mode — token restoration runs on raw output string. |
+| Multi-turn conversations | ✅ Supported | All user-role messages are anonymized in a single gRPC batch per request. Each turn creates a fresh vault. |
+| Tunnel mode | ✅ Skip (by design) | Anonymizer is disabled in tunnel mode — FORK 2 verification requires the original text to match. |
+| FastLane (low sensitivity tables) | ✅ Supported | Deanonymization runs on the FastLane response body before envelope. |
+| ZK SlowLane (critical sensitivity tables) | ✅ Supported | Deanonymization runs on the ZK SlowLane response body before envelope. |
+| General Passthrough lane | ✅ Supported | Deanonymization and `zemtik_meta.anonymizer` block present on general lane responses. |
+| MCP tool-result anonymization | 🚧 Phase 2 | `handle_fetch` and `handle_read_file` hooks deferred. |
+| Vault persistence (cross-restart) | 🚧 Phase 2 | Vault is in-memory only in v1. Planned: `receipts.db` + AES-256-GCM. |
+
+---
+
+## Troubleshooting
+
+### Sidecar won't start
+
+**Symptom:** `docker compose ps` shows `anonymizer` as `starting` or `unhealthy` for more than 60s.
+
+```bash
+# View sidecar logs
+docker compose logs anonymizer --tail=50
+
+# Check health directly
+docker compose exec anonymizer grpc-health-probe -addr=localhost:50051
+```
+
+GLiNER model download occurs at build time (`docker compose --build`). If the image was built without internet access, the model will not be present.
+
+### HTTP 503 — `SidecarUnreachable`
+
+The proxy cannot connect to the sidecar. Check:
+
+1. Is the sidecar running? `docker compose ps anonymizer`
+2. Is `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` correct? Default: `http://sidecar:50051` in Docker Compose, `http://127.0.0.1:50051` for local dev.
+3. Is the sidecar port exposed? Check `docker-compose.yml` — port `50051` must not be firewalled between containers.
+
+**Workaround:** Set `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true` to allow regex-only mode when the sidecar is unavailable. Note: PERSON/ORG/LOCATION will not be detected.
+
+### HTTP 503 — `SidecarStarting`
+
+The sidecar is running but GLiNER has not finished loading. This typically happens within the first 30s of startup.
+
+```bash
+# Wait for healthy status
+docker compose ps anonymizer
+# STATUS column should show "healthy" before sending requests
+```
+
+### HTTP 415 — `anonymizer_streaming_unsupported`
+
+Streaming requests (`stream: true`) are not supported when the anonymizer is enabled. Set `stream: false` in your request body, or disable the anonymizer for streaming use cases.
+
+### `dropped_tokens` > 0
+
+The LLM did not return one or more tokens verbatim. Check:
+
+1. Is the model following the system prompt? Try `gpt-5.4-nano` (default) or a stronger instruction-following model.
+2. Is the response long enough for the LLM to include all tokens? Very short responses may truncate context.
+3. Is `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true` set? Enable it to see the sanitized outgoing prompt and verify tokens were included correctly.
+
+### Hash parity mismatch (Rust ↔ Python)
+
+```bash
+cargo run --bin zemtik -- anonymizer hashes
+cd sidecar && python -c "from entity_hashes import print_canonical_hashes; print_canonical_hashes()"
+```
+
+If hashes differ, check that `src/entity_hashes.rs` and `sidecar/entity_hashes.py` were generated from the same source (`SHA256(entity_type.encode('utf-8'))[:2].hex()`). Do not manually edit either file — regenerate from the canonical test.
+
+### Byte offset errors (accented characters)
+
+If entity spans are off for names like `José`, `García`, or `Peña`, the sidecar may be using char offsets instead of byte offsets. Run the offset test:
+
+```bash
+cd sidecar && python -m pytest tests/test_byte_offsets.py -v
+```
+
+The test verifies that `"José García"` produces correct UTF-8 byte offsets. All entity spans in the gRPC response must use byte offsets (not Unicode char offsets) because Rust string slicing operates on bytes.
+
+### Sidecar timeout
+
+If requests are failing with `SidecarTimeout`, increase the timeout:
+
+```bash
+export ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS=3000  # default 1500ms
+```
+
+For long documents (>2000 tokens), the sidecar may need more time. Monitor `sidecar_ms` in `zemtik_meta.anonymizer` to determine the baseline.
