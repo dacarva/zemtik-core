@@ -266,6 +266,31 @@ fn ssrf_allows_public_https() {
 }
 
 #[test]
+fn ssrf_blocks_unspecified_addresses() {
+    // Regression: 0.0.0.0 routes to loopback on Linux — must be blocked (SEC-1)
+    assert!(ssrf_block_reason("https://0.0.0.0/").is_some(), "0.0.0.0 must be blocked");
+    // Regression: :: (IPv6 unspecified) was not blocked (SEC-1)
+    assert!(ssrf_block_reason("https://[::]/").is_some(), ":: must be blocked");
+    // Regression: IPv6 bracket notation bypassed IpAddr::parse (SEC-1)
+    assert!(ssrf_block_reason("https://[::1]/").is_some(), "[::1] must be blocked");
+    assert!(ssrf_block_reason("https://[fc00::1]/").is_some(), "[fc00::1] ULA must be blocked");
+    assert!(ssrf_block_reason("https://[fe80::1]/").is_some(), "[fe80::1] link-local must be blocked");
+}
+
+#[test]
+fn is_private_or_loopback_covers_ipv6_unspecified() {
+    use std::net::IpAddr;
+    let unspec: IpAddr = "::".parse().unwrap();
+    assert!(is_private_or_loopback(unspec), ":: must be blocked");
+    let loopback6: IpAddr = "::1".parse().unwrap();
+    assert!(is_private_or_loopback(loopback6), "::1 must be blocked");
+    let ula: IpAddr = "fc00::1".parse().unwrap();
+    assert!(is_private_or_loopback(ula), "fc00::1 (ULA) must be blocked");
+    let link_local6: IpAddr = "fe80::1".parse().unwrap();
+    assert!(is_private_or_loopback(link_local6), "fe80::1 (link-local) must be blocked");
+}
+
+#[test]
 fn is_private_or_loopback_covers_rfc1918() {
     use std::net::IpAddr;
     let cases: &[(&str, bool)] = &[
@@ -275,6 +300,9 @@ fn is_private_or_loopback_covers_rfc1918() {
         ("172.16.5.5", true),
         ("172.31.255.255", true),
         ("169.254.1.1", true),
+        // SEC-1 regression: 0.0.0.0/8 routes to loopback on Linux
+        ("0.0.0.0", true),
+        ("0.1.2.3", true),
         ("8.8.8.8", false),
         ("1.1.1.1", false),
         ("172.15.0.1", false),

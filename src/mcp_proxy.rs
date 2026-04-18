@@ -85,7 +85,8 @@ pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
     match addr {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
-            o[0] == 127
+            o[0] == 0 // 0.0.0.0/8 — unspecified; routes to loopback on Linux
+                || o[0] == 127
                 || o[0] == 10
                 || (o[0] == 172 && (16..=31).contains(&o[1]))
                 || (o[0] == 192 && o[1] == 168)
@@ -93,6 +94,7 @@ pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
         }
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
+                || v6.is_unspecified() // :: — IPv6 unspecified address
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
@@ -107,7 +109,13 @@ pub fn ssrf_block_reason(url_str: &str) -> Option<String> {
         return Some(format!("scheme '{}' is not https", url.scheme()));
     }
     let host = url.host_str()?;
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+    // The url crate returns IPv6 hosts with brackets (e.g. "[::1]"); strip them
+    // before parsing so IpAddr::from_str can handle them.
+    let host_stripped = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = host_stripped.parse::<std::net::IpAddr>() {
         if is_private_or_loopback(ip) {
             return Some(format!("private/loopback IP blocked: {ip}"));
         }
