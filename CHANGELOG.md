@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.5] - 2026-04-17
+
+### Fixed
+- **SSRF guard for `zemtik_fetch`** — blocks `0.0.0.0/8` (routes to loopback on Linux), IPv6 unspecified `::`, and all IPv6 addresses expressed with bracket notation (`[::1]`, `[fc00::1]`, `[fe80::1]`). Previously, all IPv6 URLs bypassed the guard because `url.host_str()` returns brackets that `IpAddr::parse` rejects silently. Added 9 regression tests.
+- **Redirect-follow bypass closed** — `zemtik_fetch` HTTP client now sets `redirect::Policy::none()`. Without this, a server could redirect to a private IP and bypass the SSRF guard on the original URL.
+- **Malformed URL now blocked** — `ssrf_block_reason` previously returned `None` (allow) on URL parse failure. Now returns an explicit error so unparseable inputs are rejected.
+- **GitHub Actions SHA-pinned** — all `uses:` references in `ci.yml` and `release.yml` replaced with full commit SHAs + version comments, eliminating mutable-tag supply chain risk.
+- **General lane rate limit** — `ZEMTIK_GENERAL_MAX_RPM=60` added to `docker-compose.yml`, capping the general passthrough lane to 60 requests/minute per instance.
+
 ## [0.13.4] - 2026-04-16
 
 ### Added
