@@ -95,8 +95,8 @@ pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified() // :: — IPv6 unspecified address
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // RFC 4193 ULA: fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // RFC 4291 link-local: fe80::/10
         }
     }
 }
@@ -104,7 +104,10 @@ pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
 /// Returns `Some(reason)` if the URL should be blocked to prevent SSRF.
 /// Blocks: non-https schemes, private/loopback IPs, well-known local hostnames.
 pub fn ssrf_block_reason(url_str: &str) -> Option<String> {
-    let url = reqwest::Url::parse(url_str).ok()?;
+    let url = match reqwest::Url::parse(url_str) {
+        Ok(u) => u,
+        Err(e) => return Some(format!("invalid URL: {e}")),
+    };
     if url.scheme() != "https" {
         return Some(format!("scheme '{}' is not https", url.scheme()));
     }
@@ -212,6 +215,7 @@ impl McpHandlerState {
             audit_db_path: Arc::new(config.mcp_audit_db_path.clone()),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(config.mcp_fetch_timeout_secs))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .context("build reqwest client")?,
             fetch_timeout: Duration::from_secs(config.mcp_fetch_timeout_secs),

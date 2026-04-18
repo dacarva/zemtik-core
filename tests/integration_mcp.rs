@@ -291,6 +291,45 @@ fn is_private_or_loopback_covers_ipv6_unspecified() {
 }
 
 #[test]
+fn ssrf_allows_public_ip_direct() {
+    // Public IPs accessed directly via https:// must not be blocked
+    assert!(ssrf_block_reason("https://8.8.8.8/").is_none(), "8.8.8.8 must pass");
+    assert!(ssrf_block_reason("https://1.1.1.1/").is_none(), "1.1.1.1 must pass");
+    // Public IPv6
+    assert!(ssrf_block_reason("https://[2001:db8::1]/").is_none(), "2001:db8::1 must pass");
+}
+
+#[test]
+fn ssrf_blocks_malformed_url() {
+    // Malformed URLs must be blocked (not silently allowed)
+    assert!(ssrf_block_reason("not-a-url").is_some(), "malformed URL must be blocked");
+    assert!(ssrf_block_reason("").is_some(), "empty string must be blocked");
+    assert!(ssrf_block_reason("//no-scheme.com/").is_some(), "schemeless URL must be blocked");
+}
+
+#[test]
+fn ssrf_blocks_non_https_schemes() {
+    assert!(ssrf_block_reason("ftp://example.com/file").is_some(), "ftp:// must be blocked");
+    assert!(ssrf_block_reason("file:///etc/passwd").is_some(), "file:// must be blocked");
+}
+
+#[test]
+fn ssrf_blocks_localhost_subdomain() {
+    // .localhost TLD is reserved and routes to loopback
+    assert!(ssrf_block_reason("https://app.localhost/").is_some(), "app.localhost must be blocked");
+    assert!(ssrf_block_reason("https://evil.localhost/").is_some(), "evil.localhost must be blocked");
+}
+
+#[test]
+fn is_private_or_loopback_public_ipv6_allowed() {
+    use std::net::IpAddr;
+    let public6: IpAddr = "2001:db8::1".parse().unwrap();
+    assert!(!is_private_or_loopback(public6), "2001:db8::1 (documentation range) must not be blocked");
+    let public6b: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+    assert!(!is_private_or_loopback(public6b), "Cloudflare DNS IPv6 must not be blocked");
+}
+
+#[test]
 fn is_private_or_loopback_covers_rfc1918() {
     use std::net::IpAddr;
     let cases: &[(&str, bool)] = &[
