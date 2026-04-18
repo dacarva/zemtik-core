@@ -246,7 +246,7 @@ docker run -p 50051:50051 zemtik-sidecar
 
 ```bash
 export ZEMTIK_ANONYMIZER_ENABLED=true
-export ZEMTIK_ANONYMIZER_SIDECAR_URL=http://localhost:50051
+export ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://localhost:50051
 cargo run -- proxy
 ```
 
@@ -277,10 +277,14 @@ Pass `x-session-id: <id>` in requests to keep the vault across a multi-turn conv
 | Variable | Default | Description |
 |---|---|---|
 | `ZEMTIK_ANONYMIZER_ENABLED` | `false` | Master switch. Anonymizer is a no-op when disabled. |
-| `ZEMTIK_ANONYMIZER_SIDECAR_URL` | `http://localhost:50051` | gRPC address of the Python sidecar. |
+| `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` | `http://localhost:50051` | gRPC address of the Python sidecar. (Deprecated alias: `ZEMTIK_ANONYMIZER_SIDECAR_URL`.) |
+| `ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS` | `1500` | gRPC call timeout in milliseconds. Increase if the sidecar is slow to respond. |
 | `ZEMTIK_ANONYMIZER_FALLBACK_REGEX` | `true` | Use regex patterns when sidecar is unreachable. |
 | `ZEMTIK_ANONYMIZER_ENTITY_TYPES` | `PERSON,ORG,LOCATION` | Comma-separated entity types forwarded to the sidecar. |
 | `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW` | `false` | Emit `outgoing_preview` in `zemtik_meta.anonymizer`. Disable in production. |
+| `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` | `300` | Seconds before a session vault is evicted from memory. |
+
+**Note on intent extraction:** When the anonymizer replaces PII (e.g. `"Jose Garcia"` → `[[Z:a1b2:0]]`), intent extraction runs on the **original** prompt, not the tokenized one, to preserve embedding quality. Non-data queries that reference entities (e.g. `"who is Jose Garcia?"`) still return `NoTableIdentified` — enable `ZEMTIK_GENERAL_PASSTHROUGH=1` to route these through the general lane.
 
 **Preview endpoint (debug only):**
 

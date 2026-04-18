@@ -240,11 +240,13 @@ Add these three environment variables before starting the proxy:
 
 ```bash
 export ZEMTIK_ANONYMIZER_ENABLED=true
-export ZEMTIK_ANONYMIZER_SIDECAR_URL=http://127.0.0.1:50051
+export ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://127.0.0.1:50051
 export ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true   # recommended: tokenizes structured PII if sidecar is unreachable
 
 cargo run -- proxy
 ```
+
+**Note on intent extraction:** When the anonymizer replaces PII (e.g. `"Jose Garcia"` → `[[Z:a1b2:0]]`), intent extraction runs on the **original** prompt to preserve embedding quality. Non-data queries that reference people (e.g. `"who is Jose Garcia?"`) will return `NoTableIdentified` — enable `ZEMTIK_GENERAL_PASSTHROUGH=1` to route those through the general lane instead.
 
 ### Verify it works
 

@@ -197,6 +197,14 @@ def serve(port: int = DEFAULT_PORT) -> None:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
+    # Register anonymizer service with None models before start() to avoid UNIMPLEMENTED
+    # errors on early requests. The servicer guards both model references with `is not None`
+    # checks, so requests arriving before models are ready return unmodified text.
+    # Health stays NOT_SERVING until load_models() completes, so the proxy won't call
+    # Anonymize until SERVING — but registering early eliminates the race.
+    servicer = AnonymizerServicer(None, None)
+    anon_pb2_grpc.add_AnonymizerServiceServicer_to_server(servicer, server)
+
     logger.info("Starting anonymizer sidecar on :%d (NOT_SERVING — model loading)", port)
     server.add_insecure_port(f"[::]:{port}")
     server.start()
@@ -204,9 +212,9 @@ def serve(port: int = DEFAULT_PORT) -> None:
     # Load models after server starts so health probe can already see NOT_SERVING
     gliner_model, presidio_analyzer = load_models()
 
-    # Register anonymizer service and flip health to SERVING
-    servicer = AnonymizerServicer(gliner_model, presidio_analyzer)
-    anon_pb2_grpc.add_AnonymizerServiceServicer_to_server(servicer, server)
+    # Update servicer in-place and flip health to SERVING
+    servicer._gliner = gliner_model
+    servicer._presidio = presidio_analyzer
     health_servicer.set(
         "zemtik.anonymizer.v1.AnonymizerService",
         health_pb2.HealthCheckResponse.SERVING,

@@ -1197,7 +1197,7 @@ async fn anonymizer_preview_endpoint_disabled_returns_400() {
 /// debug_preview=true but sidecar not used (regex fallback): outgoing_preview must NOT be emitted
 /// to avoid exposing PII not covered by the regex-only fallback (e.g. PERSON, ORG, LOCATION).
 #[tokio::test]
-async fn anonymizer_debug_preview_emitted_in_meta() {
+async fn anonymizer_debug_preview_not_emitted_on_regex_fallback() {
     let mock_openai = MockServer::start().await;
 
     let mut config = AppConfig::default();
@@ -1286,6 +1286,6 @@ async fn anonymizer_tunnel_mode_skip() {
         .send()
         .await
         .unwrap();
-    // Tunnel mode passes through; anonymizer skip means no 503
-    assert_ne!(resp.status(), 503, "tunnel mode must skip anonymizer (got 503)");
+    // Tunnel mode passes through; anonymizer is skipped in tunnel mode.
+    assert_eq!(resp.status(), 200, "tunnel mode must pass through successfully, skipping anonymizer");
 }

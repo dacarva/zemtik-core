@@ -15,7 +15,7 @@ All notable changes to this project will be documented in this file.
 - **`ZEMTIK_ANONYMIZER_ENABLED`** — master switch (default `false`). Anonymizer is a no-op when disabled.
 - **`ZEMTIK_ANONYMIZER_FALLBACK_REGEX`** — enable regex-only fallback when sidecar is unreachable (default `true`).
 - **`ZEMTIK_ANONYMIZER_ENTITY_TYPES`** — comma-separated entity type list forwarded to the sidecar (default `PERSON,ORG,LOCATION`).
-- **`ZEMTIK_ANONYMIZER_SIDECAR_URL`** — gRPC address of the sidecar (default `http://127.0.0.1:50051`).
+- **`ZEMTIK_ANONYMIZER_SIDECAR_ADDR`** — gRPC address of the sidecar (default `http://127.0.0.1:50051`). _(Errata 2026-04-18: previously documented as `ZEMTIK_ANONYMIZER_SIDECAR_URL`; correct canonical name is `_ADDR`. The deprecated `_URL` alias is accepted and logs a warning.)_
 - **`ZEMTIK_ANONYMIZER_DEBUG_PREVIEW`** — emit `outgoing_preview` in `zemtik_meta.anonymizer` (default `false`; disable in production).
 
 ### Fixed

@@ -1,4 +1,4 @@
-gliner>=1.2,<2
+gliner>=0.2,<1
 presidio-analyzer>=2.2,<3
 grpcio>=1.62,<2
 grpcio-tools>=1.62,<2

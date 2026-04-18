@@ -36,7 +36,7 @@ print(hg.HealthStub(ch).Check(h.HealthCheckRequest()).status)
 
 ## Entity types
 
-See `entity_hashes.py` for the 16 supported types and their canonical SHA-256[:4hex] hashes. The hashes must match `src/entity_hashes.rs` in the Rust proxy — never edit them manually.
+See `entity_hashes.py` for the 16 supported types and their canonical **CRC-based 4-hex** codes. The codes are computed with `crc32fast` in the Rust proxy (`src/entity_hashes.rs`) and must match `entity_hashes.py` — never edit them manually.
 
 ## Byte offset invariant
 
@@ -54,9 +54,39 @@ This is critical for correctness with accented Spanish/Portuguese names (e.g., "
 Build from the **repo root** (required — the Dockerfile copies both `sidecar/` and `proto/`):
 
 ```bash
-# From repo root:
+# Unauthenticated build (slower HF CDN, same cache behavior):
 docker build -f sidecar/Dockerfile -t zemtik-sidecar .
-docker run -p 50051:50051 zemtik-sidecar
+
+# Authenticated build (faster download, cache-stable across HF_TOKEN rotation):
+# The --secret flag passes HF_TOKEN into the build layer without storing it in the image.
+export HF_TOKEN=hf_your_token
+DOCKER_BUILDKIT=1 docker build \
+  --secret id=hf_token,env=HF_TOKEN \
+  -f sidecar/Dockerfile -t zemtik-sidecar .
+
+docker run --rm -p 50051:50051 zemtik-sidecar
 ```
 
-The Docker image bakes the GLiNER model at build time (~500 MB image). First build takes 5-10 minutes on a cold cache.
+The image bakes GLiNER (`urchade/gliner_multi_pii-v1`) **and** spaCy `en_core_web_lg` at build time (~900 MB image, ~400 MB GLiNER + ~400 MB spaCy). First build takes 5–15 minutes on a cold cache. Subsequent builds are fast because model layers are cached.
+
+## Troubleshooting
+
+**`ImportError: attempted relative import with no known parent package`**
+
+Sidecar crashes on every gRPC call with `Exception calling application`. Cause: `zemtik_entity_hashes.py` is run as a top-level script, not as part of a package. Fix is already applied — `zemtik_entity_hashes.py` uses a `try/except ImportError` fallback. If you see this, ensure you're running `python server.py` from `/app`, not via `python -m sidecar.server`.
+
+**First request returns `sidecar_used: false` (tonic lazy connect)**
+
+The Rust proxy builds a gRPC channel with `connect_lazy()` — TCP is deferred until the first call. With `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true`, if the first call races with the connection setup it may silently fall back to regex. The startup health ping (`[ANON] Sidecar OK at …`) warms the connection. If you skip `docker compose up` and start the proxy before the sidecar is `SERVING`, wait for `grpc-health-probe -addr=localhost:50051` to return `SERVING` before sending requests.
+
+**Verify sidecar is receiving requests:**
+
+```bash
+# Manual gRPC call (requires grpcurl):
+grpcurl -plaintext -d '{"text": "Hello Jose Garcia", "entity_types": ["PERSON"]}' \
+  localhost:50051 zemtik.anonymizer.v1.AnonymizerService/Anonymize
+```
+
+**`HF_TOKEN` not set warning at runtime**
+
+`Warning: unauthenticated requests to HF Hub` — this is cosmetic. Model files are baked into the image so no download occurs. Pass `HUGGING_FACE_HUB_TOKEN` at `docker run` time to silence it if HF Hub rate limits become an issue.

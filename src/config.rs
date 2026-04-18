@@ -536,6 +536,10 @@ pub struct AppConfig {
     /// Env: ZEMTIK_MCP_ANONYMIZER_ENABLED=1|true
     #[serde(skip)]
     pub mcp_anonymizer_enabled: bool,
+    /// Dedicated bearer key for /v1/anonymize/preview. When set, takes precedence over
+    /// openai_api_key for that endpoint. If unset, falls back to openai_api_key (legacy).
+    /// Env: ZEMTIK_ANONYMIZER_PREVIEW_KEY
+    pub anonymizer_preview_key: Option<String>,
 }
 
 impl AppConfig {
@@ -610,6 +614,7 @@ impl Default for AppConfig {
             anonymizer_debug_preview: false,
             anonymizer_vault_ttl_secs: 300,
             mcp_anonymizer_enabled: false,
+            anonymizer_preview_key: None,
         }
     }
 }
@@ -996,6 +1001,15 @@ pub fn load_from_sources(
             ),
         };
     }
+    // Deprecated alias — accepted for backwards compatibility with integrators using the old name.
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_SIDECAR_URL") {
+        eprintln!("[WARN] ZEMTIK_ANONYMIZER_SIDECAR_URL is deprecated; use ZEMTIK_ANONYMIZER_SIDECAR_ADDR");
+        let trimmed = v.trim().to_owned();
+        if !trimmed.is_empty() {
+            config.anonymizer_sidecar_addr = trimmed;
+        }
+    }
+    // Canonical key overrides the alias if both are set.
     if let Some(v) = env.get("ZEMTIK_ANONYMIZER_SIDECAR_ADDR") {
         let trimmed = v.trim().to_owned();
         if !trimmed.is_empty() {
@@ -1039,6 +1053,12 @@ pub fn load_from_sources(
         let n = v.trim().parse::<u64>().context("parse ZEMTIK_ANONYMIZER_VAULT_TTL_SECS")?;
         anyhow::ensure!(n >= 1, "ZEMTIK_ANONYMIZER_VAULT_TTL_SECS must be >= 1 (got {})", n);
         config.anonymizer_vault_ttl_secs = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_PREVIEW_KEY") {
+        let trimmed = v.trim().to_owned();
+        if !trimmed.is_empty() {
+            config.anonymizer_preview_key = Some(trimmed);
+        }
     }
     if let Some(v) = env.get("ZEMTIK_MCP_ANONYMIZER_ENABLED") {
         let s = v.trim();

@@ -48,7 +48,7 @@ pub enum AnonymizerError {
     #[error("PII sidecar is starting. GLiNER model load takes 10-30s. Check container health (docker compose ps) and retry, or wait for the 'anonymizer' service to report 'healthy'.")]
     SidecarStarting,
 
-    #[error("PII sidecar call timed out after {ms}ms")]
+    #[error("PII sidecar call timed out after {ms}ms. Increase ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS (default 1500) or check sidecar container load. Set ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true to soft-degrade.")]
     SidecarTimeout { ms: u64 },
 
     #[error("PII sidecar returned malformed response: {detail}")]
@@ -190,10 +190,16 @@ pub fn regex_anonymize(
 pub type AnonymizerGrpcClient = AnonymizerServiceClient<Channel>;
 
 /// Build a lazy gRPC channel. `connect_lazy()` defers TCP until the first call.
-pub fn build_channel(addr: &str) -> Channel {
-    Channel::from_shared(addr.to_owned())
-        .expect("valid sidecar addr URI")
-        .connect_lazy()
+/// Returns an error if `addr` is not a valid URI (e.g. missing scheme).
+pub fn build_channel(addr: &str) -> anyhow::Result<Channel> {
+    let channel = Channel::from_shared(addr.to_owned())
+        .map_err(|e| anyhow::anyhow!(
+            "ZEMTIK_ANONYMIZER_SIDECAR_ADDR {:?} is not a valid URI: {}. \
+             Expected format: http://host:port",
+            addr, e
+        ))?
+        .connect_lazy();
+    Ok(channel)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,14 +1,38 @@
 # Zemtik Proxy — Demo Deployment
 # Pin this tag during pilot. Update manually for upgrades.
 #
-# Quick start:
+# Quick start (no anonymizer):
 #   export OPENAI_API_KEY=sk-...
 #   docker compose up --build
+#
+# With Anonymizer v1 (PII tokenization via GLiNER sidecar):
+#   export OPENAI_API_KEY=sk-...
+#   export HF_TOKEN=hf_...   # optional: authenticated HF CDN (faster + cache-stable)
+#   DOCKER_BUILDKIT=1 docker compose --profile anonymizer build --secret id=hf_token,env=HF_TOKEN
+#   ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up
 #
 # The proxy listens on http://localhost:4000 and intercepts POST /v1/chat/completions.
 # Point your existing OpenAI client at localhost:4000 — no code changes needed.
 
 services:
+  # Anonymizer sidecar (GLiNER + Presidio gRPC server on port 50051).
+  # Only started when --profile anonymizer is passed. The zemtik proxy starts
+  # without it when ZEMTIK_ANONYMIZER_ENABLED=false (the default).
+  sidecar:
+    profiles: ["anonymizer"]
+    build:
+      context: .
+      dockerfile: sidecar/Dockerfile
+    ports:
+      - "50051:50051"
+    healthcheck:
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    restart: unless-stopped
+
   zemtik:
     build:
       context: .
@@ -47,6 +71,10 @@ services:
       - ZEMTIK_SKIP_CIRCUIT_VALIDATION=1
       # Required: your OpenAI API key.
       - OPENAI_API_KEY=${OPENAI_API_KEY:?Set OPENAI_API_KEY before running docker compose up}
+      # Anonymizer v1: enabled only when running with --profile anonymizer.
+      # The sidecar address uses the Docker Compose service name as the hostname.
+      - ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://sidecar:50051
+      - ZEMTIK_ANONYMIZER_ENABLED=${ZEMTIK_ANONYMIZER_ENABLED:-false}
       # OpenAI model forwarded to api.openai.com. gpt-5.4-nano is the current default.
       - ZEMTIK_OPENAI_MODEL=${ZEMTIK_OPENAI_MODEL:-gpt-5.4-nano}
       # Client ID used for DB filtering (default demo dataset uses 123).
@@ -86,6 +114,10 @@ services:
       start_period: 120s
       retries: 3
     restart: unless-stopped
+
+secrets:
+  hf_token:
+    environment: HF_TOKEN   # pulled from host env; omit or leave unset to build unauthenticated
 
 volumes:
   zemtik_keys:

@@ -49,7 +49,7 @@ def test_ascii_name_offsets_unchanged():
 
 
 def test_jose_garcia_byte_offsets():
-    """'José García' has 2-byte chars (é, í, á) — byte offsets differ from char offsets."""
+    """'José García' has 2-byte chars (é, á) — byte offsets differ from char offsets."""
     text = "El contrato de José García fue firmado."
     target = "José García"
     char_start = text.index(target)

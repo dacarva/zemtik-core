@@ -171,7 +171,7 @@ flowchart TD
 | `mcp_auth.rs` | MCP bearer key validation for `/mcp/audit` and `/mcp/summary`; hard startup error if `ZEMTIK_MCP_API_KEY` unset in `mcp-serve` mode |
 | `mcp_tools.rs` | Built-in MCP tool definitions (`zemtik_fetch`, `zemtik_read_file`); dynamic tool registration via `mcp_tools.json` (`ZEMTIK_MCP_TOOLS_PATH`); path and domain allowlist enforcement |
 | `anonymizer.rs` | PII tokenization pipeline: `anonymize_conversation()` (gRPC sidecar + regex fallback), `VaultStore` (`HashMap<session_id, (Vault, Instant)>` + TTL eviction), `count_dropped_tokens()`, `SYSTEM_PROMPT_INJECT` constant, `AuditMeta` for `zemtik_meta.anonymizer` block |
-| `entity_hashes.rs` | `ENTITY_HASHES` const table mapping entity-type strings to 4-char hex codes; `type_hash()` — canonical hash used in `[[Z:xxxx:n]]` token format; must stay in sync with `sidecar/entity_hashes.py` |
+| `entity_hashes.rs` | `ENTITY_HASHES` const table mapping entity-type strings to 4-char hex codes; `type_hash()` — canonical hash used in `[[Z:xxxx:n]]` token format; must stay in sync with `sidecar/entity_hashes.py`. **Drift risk:** these two files are manually kept in sync. TODO: add a CI test (`test_entity_hashes_match_python`) that invokes the Python sidecar to compare its mapping against `ENTITY_HASHES` and fails CI on any mismatch. |
 
 Layered config order: defaults → `~/.zemtik/config.yaml` → env (`ZEMTIK_*`, `OPENAI_API_KEY`, `DB_BACKEND`, …) → CLI flags (`--port`, `--circuit-dir`).
 

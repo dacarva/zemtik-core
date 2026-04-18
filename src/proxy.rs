@@ -23,7 +23,7 @@ use crate::types::{
     SignatureData, TokenUsage, ZemtikErrorCode,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, rewriter, router};
-use crate::anonymizer::{AnonymizerGrpcClient, VaultStore, Vault, new_vault_store, build_channel};
+use crate::anonymizer::{AnonymizerGrpcClient, VaultStore, Vault, new_vault_store, build_channel, check_sidecar_health, SidecarHealth};
 
 pub(crate) struct ProxyState {
     pub(crate) http_client: reqwest::Client,
@@ -294,7 +294,10 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         public_url: config.public_url.clone(),
         vault_store: new_vault_store(),
         anonymizer_client: if config.anonymizer_enabled {
-            Some(AnonymizerGrpcClient::new(build_channel(&config.anonymizer_sidecar_addr)))
+            Some(AnonymizerGrpcClient::new(
+                build_channel(&config.anonymizer_sidecar_addr)
+                    .context("build anonymizer gRPC channel")?
+            ))
         } else {
             None
         },
@@ -312,6 +315,31 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
                 store.retain(|_, (_, ts)| ts.elapsed() < ttl);
             }
         });
+
+        // Startup sidecar health ping — surfaces misconfigurations before the first request
+        // and warms the tonic lazy connection so the first real request doesn't fall back to regex.
+        let addr = config.anonymizer_sidecar_addr.clone();
+        let channel = build_channel(&addr).context("build anonymizer gRPC channel for startup ping")?;
+        let ping_start = std::time::Instant::now();
+        let health = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            check_sidecar_health(channel),
+        )
+        .await
+        .unwrap_or(SidecarHealth::Unreachable);
+        match health {
+            SidecarHealth::Serving => println!(
+                "[ANON] Sidecar OK at {} ({}ms)",
+                addr,
+                ping_start.elapsed().as_millis()
+            ),
+            _ => eprintln!(
+                "[ANON] WARNING: Sidecar unreachable at {} — first request will fall back to regex \
+                 (or 503 if ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false). \
+                 Start the sidecar with: docker run --rm -p 50051:50051 zemtik-sidecar",
+                addr
+            ),
+        }
     }
 
     // If any configured origin is "*", use the wildcard policy.
@@ -474,6 +502,11 @@ async fn handle_chat_completions(
                 .unwrap_or_default()
         })
         .unwrap_or_default();
+
+    // Preserve original prompt for intent extraction — the anonymizer will
+    // overwrite `prompt` with the tokenized version, but intent matching must
+    // run against the real text so entity names don't break embedding scores.
+    let original_prompt_for_intent = prompt.clone();
 
     // ---------------------------------------------------------------------------
     // Anonymizer pre-router hook
@@ -652,7 +685,7 @@ async fn handle_chat_completions(
     // Running this on the Tokio worker thread would starve other async tasks under load.
     let intent_result_raw = {
         let backend = Arc::clone(&state.intent_backend);
-        let prompt_clone = prompt.clone();
+        let prompt_clone = original_prompt_for_intent.clone();
         let schema_clone = schema.clone();
         let threshold = state.config.intent_confidence_threshold;
         tokio::task::spawn_blocking(move || {
@@ -700,6 +733,8 @@ async fn handle_chat_completions(
             // Hybrid query rewriter — only fires when ZEMTIK_QUERY_REWRITER=1.
             if let Some(rw_config) = state.rewriter_config.as_ref().map(Arc::clone) {
                 // ── STEP 1: deterministic_resolve ────────────────────────────────
+                // KNOWN ISSUE: `messages` here is the anonymized array (PII replaced with [[Z:…]] tokens).
+                // Rewriter context quality degrades when entity names are absent. Fix tracked for Phase 2.
                 let det_result = {
                     let backend = Arc::clone(&state.intent_backend);
                     let messages_clone = messages.clone();
@@ -756,6 +791,7 @@ async fn handle_chat_completions(
                 }
 
                 // ── STEP 2: LLM rewriter (async — do NOT put inside spawn_blocking) ──
+                // KNOWN ISSUE: `messages` passed here is the anonymized array. Tracked for Phase 2.
                 match rewriter::rewrite_query(&messages, &prompt, schema, &rw_config, &state.http_client).await {
                     Ok(rewriter::RewriteResult::Rewritten(q)) => {
                         println!("[REWRITER] LLM: '{}' → '{}'", prompt, q);
@@ -2992,7 +3028,10 @@ async fn handle_anonymize_preview(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let expected_key = state.config.openai_api_key.clone()
+    // Prefer the dedicated preview key (ZEMTIK_ANONYMIZER_PREVIEW_KEY) when set.
+    // Falls back to OPENAI_API_KEY for backwards compatibility with existing deployments.
+    let expected_key = state.config.anonymizer_preview_key.clone()
+        .or_else(|| state.config.openai_api_key.clone())
         .or_else(|| std::env::var("OPENAI_API_KEY").ok());
     let authorized = match (provided_key, expected_key.as_deref()) {
         (Some(provided), Some(expected)) => provided == expected,
