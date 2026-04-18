@@ -101,7 +101,7 @@ pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // RFC 4291 link-local: fe80::/10
                 // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) — unwrap and re-check as IPv4
                 || v6.to_ipv4_mapped()
-                    .map_or(false, |v4| is_private_or_loopback(std::net::IpAddr::V4(v4)))
+                    .is_some_and(|v4| is_private_or_loopback(std::net::IpAddr::V4(v4)))
         }
     }
 }
