@@ -55,6 +55,8 @@ services:
       - ZEMTIK_CORS_ORIGINS=*
       # General Passthrough: forward non-data queries to OpenAI instead of returning 400.
       - ZEMTIK_GENERAL_PASSTHROUGH=1
+      # Rate-limit the general passthrough lane to prevent runaway usage.
+      - ZEMTIK_GENERAL_MAX_RPM=60
       # --- Tunnel Mode (pilot evaluation) ---
       # Uncomment these three lines to run Zemtik in transparent verification mode.
       # Tunnel mode forwards all traffic to OpenAI untouched while running ZK

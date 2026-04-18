@@ -78,6 +78,53 @@ const PREVIEW_LEN: usize = 500;
 const FORK2_TIMEOUT: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
+// SSRF guard helpers (SEC-1)
+// ---------------------------------------------------------------------------
+
+pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 127
+                || o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Returns `Some(reason)` if the URL should be blocked to prevent SSRF.
+/// Blocks: non-https schemes, private/loopback IPs, well-known local hostnames.
+pub fn ssrf_block_reason(url_str: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url_str).ok()?;
+    if url.scheme() != "https" {
+        return Some(format!("scheme '{}' is not https", url.scheme()));
+    }
+    let host = url.host_str()?;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_or_loopback(ip) {
+            return Some(format!("private/loopback IP blocked: {ip}"));
+        }
+    } else {
+        let h = host.to_lowercase();
+        if h == "localhost"
+            || h.ends_with(".local")
+            || h.ends_with(".internal")
+            || h.ends_with(".localhost")
+        {
+            return Some(format!("private hostname blocked: {host}"));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Shared handler state
 // ---------------------------------------------------------------------------
 
@@ -353,6 +400,15 @@ impl ZemtikMcpHandler {
                     None,
                 ));
             }
+        }
+
+        // SSRF guard: block private IPs, loopback, and non-https before any network I/O.
+        if let Some(reason) = ssrf_block_reason(&url_str) {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                format!("ssrf_blocked: {reason}"),
+                None,
+            ));
         }
 
         // Execute HTTP fetch

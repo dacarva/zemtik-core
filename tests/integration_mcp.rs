@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use zemtik::config::AppConfig;
 use zemtik::mcp_proxy::{
     list_mcp_audit_records, write_audit_record, sha256_hex, McpHandlerState,
+    ssrf_block_reason, is_private_or_loopback,
 };
 use zemtik::types::McpAuditRecord;
 
@@ -223,4 +224,67 @@ fn test_sse_empty_allowlist_denies_all() {
         "error must mention ZEMTIK_MCP_ALLOWED_PATHS, got: {}",
         err.message
     );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-1 SSRF guard tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ssrf_blocks_http_scheme() {
+    let reason = ssrf_block_reason("http://example.com/api");
+    assert!(reason.is_some(), "http:// must be blocked");
+    assert!(reason.unwrap().contains("not https"));
+}
+
+#[test]
+fn ssrf_blocks_loopback_ip() {
+    assert!(ssrf_block_reason("https://127.0.0.1:50051/").is_some(), "127.0.0.1 must be blocked");
+    assert!(ssrf_block_reason("https://127.255.0.1/").is_some(), "127.255.0.1 must be blocked");
+}
+
+#[test]
+fn ssrf_blocks_private_ipv4() {
+    assert!(ssrf_block_reason("https://10.0.0.1/").is_some(), "10.0.0.1 must be blocked");
+    assert!(ssrf_block_reason("https://192.168.1.1/").is_some(), "192.168.1.1 must be blocked");
+    assert!(ssrf_block_reason("https://172.16.0.1/").is_some(), "172.16.0.1 must be blocked");
+    assert!(ssrf_block_reason("https://169.254.169.254/metadata").is_some(), "IMDS must be blocked");
+}
+
+#[test]
+fn ssrf_blocks_localhost_hostname() {
+    assert!(ssrf_block_reason("https://localhost/").is_some(), "localhost must be blocked");
+    assert!(ssrf_block_reason("https://something.local/").is_some(), ".local must be blocked");
+    assert!(ssrf_block_reason("https://internal.internal/").is_some(), ".internal must be blocked");
+}
+
+#[test]
+fn ssrf_allows_public_https() {
+    assert!(ssrf_block_reason("https://api.openai.com/v1/chat/completions").is_none(),
+        "public https must pass");
+    assert!(ssrf_block_reason("https://example.com/").is_none(), "example.com must pass");
+}
+
+#[test]
+fn is_private_or_loopback_covers_rfc1918() {
+    use std::net::IpAddr;
+    let cases: &[(&str, bool)] = &[
+        ("127.0.0.1", true),
+        ("10.1.2.3", true),
+        ("192.168.0.1", true),
+        ("172.16.5.5", true),
+        ("172.31.255.255", true),
+        ("169.254.1.1", true),
+        ("8.8.8.8", false),
+        ("1.1.1.1", false),
+        ("172.15.0.1", false),
+        ("172.32.0.1", false),
+    ];
+    for (ip_str, expected) in cases {
+        let ip: IpAddr = ip_str.parse().unwrap();
+        assert_eq!(
+            is_private_or_loopback(ip), *expected,
+            "{ip_str} expected private={expected}"
+        );
+    }
 }
