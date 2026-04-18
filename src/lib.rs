@@ -21,3 +21,5 @@ pub mod startup;
 pub mod time_parser;
 pub mod types;
 pub mod verify;
+pub mod anonymizer;
+pub mod entity_hashes;

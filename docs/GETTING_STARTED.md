@@ -212,6 +212,96 @@ You will see:
 
 ---
 
+## Step 4.5 — Anonymizer (PII tokenization)
+
+This step is optional. Skip to Step 5 if you do not need PII masking.
+
+The anonymizer replaces sensitive entities (names, organizations, locations) with opaque tokens of the form `[[Z:xxxx:n]]` before the prompt leaves the proxy. The LLM sees only tokens. The proxy deanonymizes the response before returning it to the caller, so your application receives plain text as normal.
+
+Scope: single-turn only. The vault that maps tokens back to real values is cleared after each request. Multi-turn vault persistence is planned for Phase 2-3.
+
+### Prerequisites — start the sidecar
+
+The anonymizer runs a Python gRPC sidecar (GLiNER + Presidio) for entity recognition. The sidecar is not included in `docker-compose.yml` and must be started separately.
+
+```bash
+# Build the sidecar image (one-time)
+docker build -f sidecar/Dockerfile -t zemtik-sidecar .
+
+# Run the sidecar (gRPC on port 50051)
+docker run -p 50051:50051 zemtik-sidecar
+```
+
+The sidecar loads the GLiNER model on startup. Allow ~30 seconds before sending requests.
+
+### Enable in the proxy
+
+Add these three environment variables before starting the proxy:
+
+```bash
+export ZEMTIK_ANONYMIZER_ENABLED=true
+export ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://127.0.0.1:50051
+export ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true   # recommended: tokenizes structured PII if sidecar is unreachable
+
+cargo run -- proxy
+```
+
+**Note on intent extraction:** When the anonymizer replaces PII (e.g. `"Jose Garcia"` → `[[Z:a1b2:0]]`), intent extraction runs on the **original** prompt to preserve embedding quality. Non-data queries that reference people (e.g. `"who is Jose Garcia?"`) will return `NoTableIdentified` — enable `ZEMTIK_GENERAL_PASSTHROUGH=1` to route those through the general lane instead.
+
+### Verify it works
+
+Send a query that contains a person name:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "What was Alice Johnson Q1 2024 AWS spend?"}]
+  }'
+```
+
+The response includes a `zemtik_meta.anonymizer` block confirming what was found and tokenized:
+
+```json
+"zemtik_meta": {
+  "anonymizer": {
+    "entities_found": 1,
+    "entity_types": ["PERSON"],
+    "sidecar_used": true,
+    "sidecar_ms": 48,
+    "dropped_tokens": 0
+  }
+}
+```
+
+`dropped_tokens` counts tokens the deanonymizer could not resolve. A value of `0` means the response was fully deanonymized.
+
+### Preview anonymization without calling OpenAI
+
+Use `POST /v1/anonymize/preview` to inspect what the anonymizer would produce for a given prompt, without running the ZK pipeline or calling OpenAI:
+
+```bash
+curl -X POST http://localhost:4000/v1/anonymize/preview \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Contact Bob Smith at bob@acme.com"}]}'
+```
+
+The response shows the tokenized messages alongside the anonymizer audit metadata.
+
+### Regex fallback
+
+When `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true` and the sidecar is unreachable, the proxy falls back to a regex engine that tokenizes structured PII (emails, IDs, phone numbers). PERSON, ORG, and LOCATION entities require the sidecar and are skipped in fallback mode. The `sidecar_used` field in `zemtik_meta.anonymizer` will be `false` when the fallback runs.
+
+> **Phase 1 limitations**
+>
+> - Single-turn only: the vault is cleared after each request. Tokens assigned in turn 1 are not reused in turn 2.
+> - Multi-turn vault persistence and shared-session deanonymization are Phase 2-3 features.
+> - The sidecar is not in `docker-compose.yml`. You must start it manually as shown above.
+
+---
+
 ## Step 5 — Send your first proxy request
 
 > **What you're about to see — FastLane.** The example `schema_config.example.json` sets `aws_spend` to `"sensitivity": "low"`, so this query routes through **FastLane** — the sub-50ms path that runs a direct database aggregate and attests the result with BabyJubJub EdDSA. No ZK proof is generated. The response `evidence` object will show `"engine": "FastLane"` and an `attestation_hash` (a cryptographic receipt binding the aggregate to your signing key and the exact query parameters). To see the ZK SlowLane in action, proceed to Step 6.

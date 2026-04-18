@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-04-17
+
+### Added
+- **Anonymizer v1 — PII tokenization pipeline** (`src/anonymizer.rs`, `sidecar/`) — end-to-end PII detection and tokenization before any prompt leaves the host. Uses a Python gRPC sidecar (GLiNER `urchade/gliner_multi_pii-v1` + Presidio) for NER; falls back to regex for common patterns when the sidecar is unavailable.
+- **`[[Z:xxxx:n]]` token format** — each detected entity is replaced with a typed token (`xxxx` = 4-char CRC-based entity-type hash, `n` = per-session counter). Counter assignment happens in the Rust proxy; the sidecar always emits `0` as a placeholder.
+- **Vault + deanonymization** (`VaultStore`) — in-memory `HashMap<session_id, (Vault, Instant)>` with configurable TTL eviction. Accumulated across a session so multi-turn conversations deanonymize correctly. Vault entries keyed by `x-session-id` request header.
+- **`/v1/anonymize/preview` endpoint** — debug endpoint (disabled by default, requires `ZEMTIK_ANONYMIZER_ENABLED=true`) that accepts a raw messages array and returns the tokenized version with audit spans. Protected by `Authorization: Bearer <ZEMTIK_OPENAI_API_KEY>`.
+- **`zemtik_meta.anonymizer` block** — every proxy response now includes an `anonymizer` object in `zemtik_meta`: `entities_found`, `entity_types`, `sidecar_used`, `sidecar_ms`, `dropped_tokens`. `outgoing_preview` (first 200 chars of anonymized prompt) emitted only when `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=1` and the sidecar was used.
+- **Multimodal message support** — content-parts arrays (OpenAI `[{"type":"text","text":"..."},{"type":"image_url",...}]` format) handled correctly: text parts are anonymized in-place, non-text parts (images, audio) are preserved unchanged.
+- **Sidecar Docker image** (`sidecar/Dockerfile`) — GLiNER model baked in at build time to avoid 10–30s cold-start download. Requires repo-root build context (`docker build -f sidecar/Dockerfile -t zemtik-sidecar .`).
+- **`ZEMTIK_ANONYMIZER_ENABLED`** — master switch (default `false`). Anonymizer is a no-op when disabled.
+- **`ZEMTIK_ANONYMIZER_FALLBACK_REGEX`** — enable regex-only fallback when sidecar is unreachable (default `true`).
+- **`ZEMTIK_ANONYMIZER_ENTITY_TYPES`** — comma-separated entity type list forwarded to the sidecar (default `PERSON,ORG,LOCATION`).
+- **`ZEMTIK_ANONYMIZER_SIDECAR_ADDR`** — gRPC address of the sidecar (default `http://127.0.0.1:50051`). _(Errata 2026-04-18: previously documented as `ZEMTIK_ANONYMIZER_SIDECAR_URL`; correct canonical name is `_ADDR`. The deprecated `_URL` alias is accepted and logs a warning.)_
+- **`ZEMTIK_ANONYMIZER_DEBUG_PREVIEW`** — emit `outgoing_preview` in `zemtik_meta.anonymizer` (default `false`; disable in production).
+
+### Fixed
+- **Sidecar fail-closed on model load** — `server.py` now raises `RuntimeError` if GLiNER or Presidio fail to load, rather than silently continuing with `None` analyzers (which would forward PII unfiltered). Container exits with non-zero code and Docker healthcheck keeps it `NOT_SERVING`.
+- **`x-session-id` validation** — header value validated to ≤128 chars, ASCII alphanumeric plus `-` and `_` only. Values failing validation are rejected with 400 to prevent log injection and vault pollution.
+
 ## [0.13.5] - 2026-04-17
 
 ### Fixed

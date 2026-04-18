@@ -58,7 +58,7 @@ docker build --build-arg BUILD_FEATURES=embed \
 
 The ubuntu:24.04 base is required for embed because the ONNX Runtime C++ layer needs glibc 2.38+ (Debian Bookworm ships 2.36).
 
-> **POC status (v0.13.4):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.14.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; FastLane supports `DB_BACKEND=sqlite` (default, in-memory) and `DB_BACKEND=supabase` (Supabase integration enabled only when explicitly set — raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -219,6 +219,86 @@ Response headers added in tunnel mode:
 - `x-zemtik-receipt-id: <uuid>` — correlates with audit database entry
 
 See [docs/TUNNEL_MODE.md](docs/TUNNEL_MODE.md) for the full configuration reference, audit record schema, and dashboard endpoint documentation.
+
+---
+
+## Anonymizer (v0.14.0+)
+
+Zemtik can tokenize PII in prompts before they leave the host. Names, organizations, and locations are replaced with typed tokens so the model never sees raw PII.
+
+```
+"Can José García help with our payroll?"
+→ "Can [[Z:a1b2:0]] help with our payroll?"
+```
+
+The `[[Z:xxxx:n]]` format encodes the entity type (`xxxx` = 4-char hash of `PERSON`, `ORG`, etc.) and a per-session counter (`n`). Zemtik maintains a per-session vault mapping each token to its original value (tokenization and per-session token mapping only — multi-turn deanonymization is Phase 2–3).
+
+**Start the sidecar first** (GLiNER NER model, ~500 MB image):
+
+```bash
+# From repo root:
+docker build -f sidecar/Dockerfile -t zemtik-sidecar .
+docker run -p 50051:50051 zemtik-sidecar
+# Wait for: status: SERVING (model loads in ~30s first run, instant after)
+```
+
+**Enable anonymizer in the proxy:**
+
+```bash
+export ZEMTIK_ANONYMIZER_ENABLED=true
+export ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://localhost:50051
+cargo run -- proxy
+```
+
+Every response includes a `zemtik_meta.anonymizer` block:
+
+```json
+{
+  "zemtik_meta": {
+    "anonymizer": {
+      "entities_found": 1,
+      "entity_types": ["PERSON"],
+      "sidecar_used": true,
+      "sidecar_ms": 42,
+      "dropped_tokens": 0
+    }
+  }
+}
+```
+
+`dropped_tokens` counts how many vault tokens from this session are absent from the LLM's response — i.e., entities the model paraphrased or omitted rather than preserving as opaque `[[Z:xxxx:n]]` tokens. A non-zero value means the model did not fully respect the token-preservation system prompt; the vault still holds the mapping for deanonymization when that lands in Phase 2.
+
+When `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true` is set, the block also includes `outgoing_preview` — the first 200 characters of the anonymized prompt — to help verify tokenization in non-production environments. Disable in production.
+
+Pass `x-session-id: <id>` in requests to keep the vault across a multi-turn conversation. The sidecar falls back to regex matching if it's unreachable (`ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true` by default).
+
+**All anonymizer env vars:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZEMTIK_ANONYMIZER_ENABLED` | `false` | Master switch. Anonymizer is a no-op when disabled. |
+| `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` | `http://localhost:50051` | gRPC address of the Python sidecar. (Deprecated alias: `ZEMTIK_ANONYMIZER_SIDECAR_URL`.) |
+| `ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS` | `1500` | gRPC call timeout in milliseconds. Increase if the sidecar is slow to respond. |
+| `ZEMTIK_ANONYMIZER_FALLBACK_REGEX` | `true` | Use regex patterns when sidecar is unreachable. |
+| `ZEMTIK_ANONYMIZER_ENTITY_TYPES` | `PERSON,ORG,LOCATION` | Comma-separated entity types forwarded to the sidecar. |
+| `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW` | `false` | Emit `outgoing_preview` in `zemtik_meta.anonymizer`. Disable in production. |
+| `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` | `300` | Seconds before a session vault is evicted from memory. |
+
+**Note on intent extraction:** When the anonymizer replaces PII (e.g. `"Jose Garcia"` → `[[Z:a1b2:0]]`), intent extraction runs on the **original** prompt, not the tokenized one, to preserve embedding quality. Non-data queries that reference entities (e.g. `"who is Jose Garcia?"`) still return `NoTableIdentified` — enable `ZEMTIK_GENERAL_PASSTHROUGH=1` to route these through the general lane.
+
+**Preview endpoint (debug only):**
+
+```bash
+# Tokenize messages without sending to OpenAI — useful for verifying entity detection
+curl -X POST http://localhost:4000/v1/anonymize/preview \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"messages": [{"role": "user", "content": "José García needs access."}]}'
+```
+
+Requires `ZEMTIK_ANONYMIZER_ENABLED=true`. Returns the tokenized messages array and audit spans without forwarding to OpenAI.
+
+**Phase 1 scope:** tokenization only. Deanonymization of LLM responses and vault persistence are planned for Phase 2-3. See `TODOS.md` for the roadmap.
 
 ---
 
@@ -489,6 +569,8 @@ zemtik-core/
 │   ├── mcp_proxy.rs      # MCP attestation proxy: stdio + HTTP server; McpAuditRecord persistence; list_mcp_audit_records
 │   ├── mcp_auth.rs       # MCP bearer key validation; startup error enforcement for mcp-serve mode
 │   ├── mcp_tools.rs      # Built-in MCP tools (zemtik_fetch, zemtik_read_file); dynamic tool registration; path/domain allowlists
+│   ├── anonymizer.rs     # PII tokenization pipeline; VaultStore (session vault + TTL eviction); anonymize_conversation(); AuditMeta; gRPC + regex fallback paths
+│   ├── entity_hashes.rs  # Entity-type hash table (CRC-based 4-char codes); type_hash(); ENTITY_HASHES const; matches sidecar/entity_hashes.py
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
 │   └── types.rs          # Shared types; ZemtikErrorCode; TunnelMatchStatus
 ├── tests/
@@ -515,6 +597,13 @@ zemtik-core/
 │   ├── SCALING.md            # Recursive proofs, production path, why remote proving breaks ZK
 │   ├── SUPPORTED_QUERIES.md  # v1 query contract: supported patterns, error reference
 │   └── ZK_CIRCUITS.md  # Deep explanation on the zk circuits
+├── sidecar/
+│   ├── server.py         # GLiNER + Presidio gRPC server (AnonymizerService); fail-closed on model load
+│   ├── entity_hashes.py  # Canonical entity-type hashes (must match src/entity_hashes.rs)
+│   ├── offsets.py        # char_to_byte_offset() — GLiNER char offsets → UTF-8 byte offsets
+│   ├── requirements.txt
+│   ├── Dockerfile        # Bakes GLiNER model at build time; build context = repo root
+│   └── tests/            # Python sidecar tests (byte offsets, gRPC server)
 ├── Dockerfile            # Multi-stage build; non-root user; BUILD_FEATURES=regex-only (default, ~150MB) or embed (ONNX semantic intent, ~450MB); INSTALL_ZK_TOOLS=true adds nargo+bb (~+300MB)
 ├── docker-compose.yml    # Compose file for local Docker runs
 └── .env.example
@@ -641,6 +730,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [ZK Circuits](docs/ZK_CIRCUITS.md) — Circuit internals: Poseidon Merkle tree, mini-circuit architecture, public input layout, developer constraints (500-tx cap, sentinel padding, category hash rules), bundle format, offline verification, threat model
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
 - [MCP Attestation](docs/MCP_ATTESTATION.md) — MCP attestation proxy: Claude Desktop integration, `zemtik mcp` / `zemtik mcp-serve`, audit record schema, governed mode
+- [Anonymizer Sidecar](sidecar/README.md) — GLiNER + Presidio gRPC sidecar: quick start, byte-offset invariant, Docker build, entity types
 
 ---
 

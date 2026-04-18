@@ -117,7 +117,10 @@ pub fn ssrf_block_reason(url_str: &str) -> Option<String> {
     if url.scheme() != "https" {
         return Some(format!("scheme '{}' is not https", url.scheme()));
     }
-    let host = url.host_str()?;
+    let host = match url.host_str() {
+        Some(h) => h,
+        None => return Some("URL has no host".to_string()),
+    };
     // The url crate returns IPv6 hosts with brackets (e.g. "[::1]"); strip them
     // before parsing so IpAddr::from_str can handle them.
     let host_stripped = host
@@ -503,7 +506,11 @@ impl ZemtikMcpHandler {
             .redirect(reqwest::redirect::Policy::none())
             .resolve_to_addrs(&vetted_host, &vetted_addrs)
             .build()
-            .unwrap_or_else(|_| self.state.http_client.clone());
+            .map_err(|e| rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                format!("ssrf_client_build_failed: {e}"),
+                None,
+            ))?;
 
         let fetch_result = tokio::time::timeout(
             self.state.fetch_timeout,

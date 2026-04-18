@@ -530,3 +530,54 @@ fn general_max_rpm_non_numeric_returns_error() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("ZEMTIK_GENERAL_MAX_RPM"), "error should mention the env var");
 }
+
+// ─── AnonymizerConfig env var parsing ────────────────────────────────────────
+
+#[test]
+fn anonymizer_disabled_by_default() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert!(!config.anonymizer_enabled, "anonymizer must be disabled by default");
+}
+
+#[test]
+fn anonymizer_enabled_via_env() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_ANONYMIZER_ENABLED", "true")]), &default_cli()).unwrap();
+    assert!(config.anonymizer_enabled);
+}
+
+#[test]
+fn anonymizer_fallback_regex_default_true() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert!(config.anonymizer_fallback_regex, "fallback_regex must default to true");
+}
+
+#[test]
+fn anonymizer_fallback_regex_disabled_via_env() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_ANONYMIZER_FALLBACK_REGEX", "false")]), &default_cli()).unwrap();
+    assert!(!config.anonymizer_fallback_regex);
+}
+
+#[test]
+fn anonymizer_entity_types_parsed_from_env() {
+    let config = load_from_sources(
+        None,
+        &env(&[("ZEMTIK_ANONYMIZER_ENTITY_TYPES", "PERSON,EMAIL_ADDRESS")]),
+        &default_cli(),
+    ).unwrap();
+    assert_eq!(config.anonymizer_entity_types, "PERSON,EMAIL_ADDRESS");
+    let types: Vec<&str> = config.anonymizer_entity_types.split(',').map(str::trim).collect();
+    assert!(types.contains(&"PERSON"));
+    assert!(types.contains(&"EMAIL_ADDRESS"));
+}
+
+#[test]
+fn anonymizer_debug_preview_default_false() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert!(!config.anonymizer_debug_preview, "debug_preview must default to false");
+}
+
+#[test]
+fn anonymizer_debug_preview_enabled_via_env() {
+    let config = load_from_sources(None, &env(&[("ZEMTIK_ANONYMIZER_DEBUG_PREVIEW", "1")]), &default_cli()).unwrap();
+    assert!(config.anonymizer_debug_preview);
+}

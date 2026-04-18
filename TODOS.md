@@ -774,6 +774,30 @@ All items below shipped in `fix/integration-issues` → PR merged to main.
 
 ---
 
+## Anonymizer phase 2-3 items — added from /plan-ceo-review of feat/anonymizer-v1 (2026-04-17)
+
+### Anonymizer MCP tool-result hook (P2, after HTTP proxy pilot)
+- **What:** Hook `zemtik_fetch` and `zemtik_read_file` MCP tool RESULTS in `mcp_proxy.rs`. Document content returned to Claude is anonymized before Claude sees it. New flag: `ZEMTIK_MCP_ANONYMIZER_ENABLED=true`.
+- **Why:** Lawyers using Claude Desktop (Claude Max/Teams) cannot use the HTTP proxy — their messages go directly to Anthropic's API. MCP tool hooks are the only Zemtik intercept point. This covers document CONTENTS opened via tools, not the lawyer's conversation messages (those are out of reach architecturally).
+- **Correct framing:** "Anonymize what Zemtik serves, not what lawyers say." Document this boundary clearly in integration guide.
+- **Pros:** Meaningful protection for document contents (contracts, case files) fetched via MCP tools. Completes the Claude Desktop integration story partially.
+- **Cons:** ~150 LOC in mcp_proxy.rs. Does NOT protect conversation messages — risk of false impression of full coverage.
+- **Context:** Originally cherry-picked in CEO review but removed after Codex outside voice confirmed the architectural limitation. See CEO plan 2026-04-17-anonymizer-v1.md for full context.
+- **Effort:** M (human ~1 week) → M with CC+gstack (~3h)
+- **Priority:** P2 — after HTTP proxy pilot succeeds and MCP value is confirmed
+- **Depends on:** feat/anonymizer-v1 HTTP proxy implementation
+
+### Vault persistence + AES-256-GCM encryption at rest (P3, post-pilot hardening)
+- **What:** (a) Persist vault entries to `receipts.db` (migration v10+): one row per session with encrypted vault blob (AES-256-GCM, `ZEMTIK_VAULT_KEY` env var). (b) Add `ZEMTIK_ANONYMIZER_VALIDATE_ONLY=1` startup check — validates sidecar connectivity and model fingerprint, exits 0/1.
+- **Why:** (a) In-memory vault is lost on container restart or crash. Regulated deployments (HIPAA, GDPR) require at-rest encryption for vaults containing entity mappings. (b) Pre-demo config validation (`nginx -t` pattern) — mirrors existing `ZEMTIK_VALIDATE_ONLY`.
+- **Pros:** Enables regulated deployments. Vault survives crashes. Validate-only enables CI/CD config checks.
+- **Cons:** Migration v10+ means a new DB schema. AES-256-GCM adds crypto dependency. Do NOT reuse BabyJubJub key infrastructure — different key lifecycle and purpose (use ZEMTIK_VAULT_KEY).
+- **Effort:** M (human ~1 week) → M with CC+gstack (~2h)
+- **Priority:** P3 — post-pilot, when first regulated-industry customer asks
+- **Depends on:** feat/anonymizer-v1 shipped, pilot success confirmed
+
+---
+
 ## BN254 field encoding + HKDF safety (P2, before second Aztec demo)
 
 Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy-yawning-creek).

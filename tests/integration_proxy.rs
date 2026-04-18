@@ -998,3 +998,294 @@ async fn general_lane_rpm_budget_exceeded() {
     let body2: Value = resp2.json().await.unwrap();
     assert_eq!(body2["code"], "GeneralLaneBudgetExceeded");
 }
+
+// ---------------------------------------------------------------------------
+// Anonymizer integration tests
+// ---------------------------------------------------------------------------
+
+/// Spawn a proxy with anonymizer disabled (default). Helper for anonymizer tests.
+async fn spawn_test_proxy_anonymizer_disabled() -> (SocketAddr, MockServer) {
+    spawn_test_proxy().await
+}
+
+/// Spawn a proxy with anonymizer enabled but no sidecar + fallback_regex=true.
+/// Sidecar addr points to a non-existent port so gRPC will fail; regex picks up IDs.
+async fn spawn_test_proxy_anonymizer_regex_fallback() -> (SocketAddr, MockServer) {
+    let mock_openai = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+    // Anonymizer enabled with a dead sidecar + fallback
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = "http://127.0.0.1:1".to_owned(); // dead port
+    config.anonymizer_fallback_regex = true;
+    config.anonymizer_entity_types = "EMAIL_ADDRESS,CO_CEDULA".to_owned();
+
+    let app = build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, mock_openai)
+}
+
+/// Spawn a proxy with anonymizer enabled but fallback=false and dead sidecar → 503.
+async fn spawn_test_proxy_anonymizer_fail_closed() -> (SocketAddr, MockServer) {
+    let mock_openai = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = "http://127.0.0.1:1".to_owned(); // dead port
+    config.anonymizer_fallback_regex = false;
+
+    let app = build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, mock_openai)
+}
+
+/// When anonymizer is disabled, the proxy starts and responds to /health normally.
+#[tokio::test]
+async fn anonymizer_disabled_is_noop() {
+    let (addr, _mock_openai) = spawn_test_proxy_anonymizer_disabled().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "proxy with anonymizer disabled must be healthy");
+}
+
+/// Streaming + anonymizer enabled → 415.
+#[tokio::test]
+async fn anonymizer_streaming_returns_415() {
+    let (addr, _mock_openai) = spawn_test_proxy_anonymizer_regex_fallback().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hola"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 415);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "anonymizer_streaming_unsupported");
+}
+
+/// Sidecar down + fallback=false → 503 with SidecarUnreachable code.
+#[tokio::test]
+async fn anonymizer_sidecar_down_fail_closed_503() {
+    let (addr, _mock) = spawn_test_proxy_anonymizer_fail_closed().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Cédula 79.123.456"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "anonymizer_unavailable");
+    assert_eq!(body["error"]["code"], "SidecarUnreachable");
+}
+
+/// Sidecar down + fallback_regex=true: regex tokenizes email; request proceeds.
+#[tokio::test]
+async fn anonymizer_sidecar_down_fallback_regex_proceeds() {
+    let (addr, mock_openai) = spawn_test_proxy_anonymizer_regex_fallback().await;
+    // Mount mock that echoes back what it received so we can inspect outgoing body
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-anon-001",
+            "object": "chat.completion",
+            "model": "gpt-5.4-nano",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "Procesado."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}
+        })))
+        .mount(&mock_openai)
+        .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Contacto: usuario@empresa.com"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Regex fallback succeeded → 200
+    assert_eq!(resp.status(), 200);
+}
+
+/// /v1/anonymize/preview endpoint: returns anonymized messages + token list.
+#[tokio::test]
+async fn anonymizer_preview_endpoint_returns_tokens() {
+    let (addr, _mock) = spawn_test_proxy_anonymizer_regex_fallback().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/anonymize/preview", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "messages": [{"role": "user", "content": "email: test@example.com"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("anonymized_messages").is_some(), "must have anonymized_messages: {body}");
+    assert!(body.get("tokens").is_some(), "must have tokens list: {body}");
+}
+
+/// Anonymizer disabled: POST /v1/anonymize/preview must return 400.
+#[tokio::test]
+async fn anonymizer_preview_endpoint_disabled_returns_400() {
+    let (addr, _mock) = spawn_test_proxy_anonymizer_disabled().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/anonymize/preview", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&serde_json::json!({
+            "messages": [{"role": "user", "content": "test@example.com"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "preview endpoint must return 400 when anonymizer is disabled");
+}
+
+/// debug_preview=true but sidecar not used (regex fallback): outgoing_preview must NOT be emitted
+/// to avoid exposing PII not covered by the regex-only fallback (e.g. PERSON, ORG, LOCATION).
+#[tokio::test]
+async fn anonymizer_debug_preview_not_emitted_on_regex_fallback() {
+    let mock_openai = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = "http://127.0.0.1:1".to_owned(); // dead → regex fallback
+    config.anonymizer_fallback_regex = true;
+    config.anonymizer_entity_types = "EMAIL_ADDRESS".to_owned();
+    config.anonymizer_debug_preview = true;
+
+    mount_openai_chat_mock(&mock_openai).await;
+
+    let app = build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&serde_json::json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "email: alice@example.com"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let preview = body
+        .pointer("/zemtik_meta/anonymizer/outgoing_preview");
+    assert!(preview.is_none(), "outgoing_preview must NOT be emitted when sidecar was not used (regex fallback) \
+        — partial anonymization could expose PII not in entity_types: {body}");
+}
+
+/// Tunnel mode: anonymizer is a no-op even when enabled (FORK 2 must see original text).
+#[tokio::test]
+async fn anonymizer_tunnel_mode_skip() {
+    use zemtik::config::ZemtikMode;
+    let mock_openai = MockServer::start().await;
+    mount_openai_chat_mock(&mock_openai).await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    // Tunnel mode
+    config.mode = ZemtikMode::Tunnel;
+    config.tunnel_api_key = Some("tunnel-key".to_owned());
+    // Anonymizer is enabled but must be skipped in tunnel mode
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = "http://127.0.0.1:1".to_owned(); // would 503 if called
+    config.anonymizer_fallback_regex = false;
+
+    let app = build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer tunnel-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Texto con cédula 79.123.456"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Tunnel mode passes through; anonymizer is skipped in tunnel mode.
+    assert_eq!(resp.status(), 200, "tunnel mode must pass through successfully, skipping anonymizer");
+}
