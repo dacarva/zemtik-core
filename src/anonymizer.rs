@@ -360,7 +360,7 @@ pub async fn anonymize_conversation(
             }
             // Sort vault longest-first so compound names (e.g. "Jose Garcia") are replaced
             // before substrings (e.g. "Jose"), preventing partial token substitution.
-            vault.sort_by(|a, b| b.original.len().cmp(&a.original.len()));
+            vault.sort_by_key(|e| std::cmp::Reverse(e.original.len()));
             // Build anonymized content strings from vault (apply all replacements)
             user_msgs.iter().map(|(_, content)| {
                 let mut text = content.to_string();
