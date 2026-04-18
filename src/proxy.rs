@@ -481,6 +481,7 @@ async fn handle_chat_completions(
     // Invariant: skip in Tunnel mode (FORK 2 must see original text for diff).
     let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
     let anonymizer_vault: Option<Vault>;
+    let mut anonymizer_meta: Option<crate::anonymizer::AuditMeta> = None;
     let anonymizer_session_id = headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
@@ -550,7 +551,7 @@ async fn handle_chat_completions(
                 }
                 anonymizer_vault = Some(vault);
 
-                let _ = meta; // used for zemtik_meta below — stored in vault for now
+                anonymizer_meta = Some(meta);
             }
             Err(e) => {
                 let (code, error_type, error_code, msg) = match &e {
@@ -813,7 +814,7 @@ async fn handle_chat_completions(
                                 if state.general_passthrough_enabled
                                     && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
                                 {
-                                    return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone()).await;
+                                    return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await;
                                 }
                                 return Ok(rewriting_failed_400("unresolvable"));
                             }
@@ -827,7 +828,7 @@ async fn handle_chat_completions(
                         if state.general_passthrough_enabled
                             && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
                         {
-                            return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone()).await;
+                            return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await;
                         }
                         return Ok(rewriting_failed_400("unresolvable"));
                     }
@@ -865,7 +866,7 @@ async fn handle_chat_completions(
             if state.general_passthrough_enabled
                 && matches!(intent_err, crate::intent::IntentError::NoTableIdentified | crate::intent::IntentError::TimeRangeAmbiguous)
             {
-                return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone()).await;
+                return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await;
             }
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -919,7 +920,7 @@ async fn handle_chat_completions(
         Route::GeneralLane => {
             // GeneralLane variant is never produced by decide_route (it only returns
             // FastLane or ZkSlowLane for successfully resolved intents). Handled defensively.
-            handle_general_lane(state, body, api_key, prompt, prompt_hash, None, total_start, anonymizer_vault.clone()).await
+            handle_general_lane(state, body, api_key, prompt, prompt_hash, None, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await
         }
     }
 }
@@ -1267,6 +1268,7 @@ async fn handle_general_lane(
     intent_err: Option<IntentError>,
     _total_start: Instant,
     vault: Option<Vault>,
+    anon_meta: Option<crate::anonymizer::AuditMeta>,
 ) -> Result<Response, ProxyError> {
     use std::time::Duration;
     use axum::http::HeaderName;
@@ -1380,7 +1382,7 @@ async fn handle_general_lane(
 
     let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
 
-    let zemtik_meta = serde_json::json!({
+    let mut zemtik_meta = serde_json::json!({
         "engine_used": "general_lane",
         "zk_coverage": "none",
         "reason": reason,
@@ -1451,6 +1453,20 @@ async fn handle_general_lane(
                         }
                     }
                 }
+            }
+            // Augment zemtik_meta with anonymizer stats (entities, dropped tokens)
+            if let Some(ref meta) = anon_meta {
+                let dropped = vault.as_ref().map(|vlt| {
+                    let raw = String::from_utf8_lossy(&resp_bytes);
+                    crate::anonymizer::count_dropped_tokens(&raw, vlt)
+                }).unwrap_or(0);
+                zemtik_meta["anonymizer"] = serde_json::json!({
+                    "entities_found": meta.entities_found,
+                    "entity_types": meta.entity_types,
+                    "sidecar_used": meta.sidecar_used,
+                    "sidecar_ms": meta.sidecar_ms,
+                    "dropped_tokens": dropped,
+                });
             }
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("zemtik_meta".to_string(), zemtik_meta);
