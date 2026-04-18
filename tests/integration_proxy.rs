@@ -1176,6 +1176,74 @@ async fn anonymizer_preview_endpoint_returns_tokens() {
     assert!(body.get("tokens").is_some(), "must have tokens list: {body}");
 }
 
+/// Anonymizer disabled: POST /v1/anonymize/preview must return 400.
+#[tokio::test]
+async fn anonymizer_preview_endpoint_disabled_returns_400() {
+    let (addr, _mock) = spawn_test_proxy_anonymizer_disabled().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/anonymize/preview", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&serde_json::json!({
+            "messages": [{"role": "user", "content": "test@example.com"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "preview endpoint must return 400 when anonymizer is disabled");
+}
+
+/// debug_preview=true but sidecar not used (regex fallback): outgoing_preview must NOT be emitted
+/// to avoid exposing PII not covered by the regex-only fallback (e.g. PERSON, ORG, LOCATION).
+#[tokio::test]
+async fn anonymizer_debug_preview_emitted_in_meta() {
+    let mock_openai = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = "http://127.0.0.1:1".to_owned(); // dead → regex fallback
+    config.anonymizer_fallback_regex = true;
+    config.anonymizer_entity_types = "EMAIL_ADDRESS".to_owned();
+    config.anonymizer_debug_preview = true;
+
+    mount_openai_chat_mock(&mock_openai).await;
+
+    let app = build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&serde_json::json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "email: alice@example.com"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let preview = body
+        .pointer("/zemtik_meta/anonymizer/outgoing_preview");
+    assert!(preview.is_none(), "outgoing_preview must NOT be emitted when sidecar was not used (regex fallback) \
+        — partial anonymization could expose PII not in entity_types: {body}");
+}
+
 /// Tunnel mode: anonymizer is a no-op even when enabled (FORK 2 must see original text).
 #[tokio::test]
 async fn anonymizer_tunnel_mode_skip() {

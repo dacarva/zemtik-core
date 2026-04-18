@@ -1,6 +1,6 @@
 use zemtik::anonymizer::{
     deanonymize, make_token, regex_anonymize, count_dropped_tokens,
-    Vault, VaultEntry, AuditMeta,
+    Vault, VaultEntry, AuditMeta, SYSTEM_PROMPT_INJECT,
 };
 use zemtik::entity_hashes::type_hash;
 
@@ -157,6 +157,50 @@ fn regex_anonymize_same_entity_same_token() {
     let count = result.matches(tok.as_str()).count();
     assert_eq!(count, 2, "same entity must produce same token (counter not incremented twice)");
     assert_eq!(vault.len(), 1, "one vault entry for identical entity");
+}
+
+// ─── regex_anonymize: already-tokenized skip guard ───────────────────────────
+
+#[test]
+fn regex_anonymize_already_tokenized_skip() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    // Pre-tokenized text must not be double-tokenized
+    let pre = "[[Z:e47f:1]]";
+    let result = regex_anonymize(pre, &["PERSON"], &mut vault, &mut counter);
+    assert_eq!(result, pre, "already-tokenized text must pass through unchanged");
+    assert_eq!(vault.len(), 0, "no vault entry for already-tokenized text");
+}
+
+// ─── count_dropped_tokens: all dropped ───────────────────────────────────────
+
+#[test]
+fn count_dropped_tokens_all_dropped() {
+    let vault: Vault = vec![
+        VaultEntry { token: "[[Z:e47f:1]]".to_string(), original: "Alice".to_string(), entity_type: "PERSON".to_string() },
+        VaultEntry { token: "[[Z:e47f:2]]".to_string(), original: "Bob".to_string(), entity_type: "PERSON".to_string() },
+    ];
+    // LLM response contains neither token
+    let dropped = count_dropped_tokens("The parties agreed to the terms.", &vault);
+    assert_eq!(dropped, 2, "both tokens should be counted as dropped");
+}
+
+// ─── SYSTEM_PROMPT_INJECT constant ───────────────────────────────────────────
+
+#[test]
+fn system_prompt_inject_contains_token_format() {
+    assert!(
+        SYSTEM_PROMPT_INJECT.contains("[[Z:"),
+        "SYSTEM_PROMPT_INJECT must reference the [[Z: token format"
+    );
+    assert!(
+        SYSTEM_PROMPT_INJECT.contains("Preserve"),
+        "SYSTEM_PROMPT_INJECT must instruct LLM to preserve tokens"
+    );
+    assert!(
+        !SYSTEM_PROMPT_INJECT.is_empty(),
+        "SYSTEM_PROMPT_INJECT must not be empty"
+    );
 }
 
 // ─── AuditMeta default ────────────────────────────────────────────────────────
