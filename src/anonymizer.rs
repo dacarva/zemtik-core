@@ -109,8 +109,8 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("EMAIL_ADDRESS", Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap()),
         // IBAN — very specific structure
         ("IBAN_CODE", Regex::new(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b").unwrap()),
-        // Colombian cédula: 79.123.456 or 79123456 (7-10 digits, optional dots)
-        ("CO_CEDULA", Regex::new(r"\b\d{1,3}(?:\.\d{3}){1,2}\b|\b\d{7,10}\b").unwrap()),
+        // Colombian cédula: 79.123.456 (dotted) or 8-10 contiguous digits (minimum 8 to avoid false positives)
+        ("CO_CEDULA", Regex::new(r"\b\d{1,3}(?:\.\d{3}){1,2}\b|\b\d{8,10}\b").unwrap()),
         // Colombian NIT: 900.123.456-7
         ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),
         // Chilean RUT: 12.345.678-9 or 12345678-9
@@ -123,12 +123,13 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("BR_CPF", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b").unwrap()),
         // Brazilian CNPJ: 00.000.000/0000-00
         ("BR_CNPJ", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b").unwrap()),
-        // Argentine DNI: 12.345.678 or 12345678
-        ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b|\b\d{7,8}\b").unwrap()),
+        // Argentine DNI: 12.345.678 (dotted) or exactly 8 contiguous digits
+        ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b|\b\d{8}\b").unwrap()),
         // Spanish NIF: 12345678A or X1234567A (NIE)
         ("ES_NIF", Regex::new(r"\b\d{8}[A-Z]\b|\b[XYZ]\d{7}[A-Z]\b").unwrap()),
-        // Phone: +1 (555) 555-5555, +57 310 123 4567, etc.
-        ("PHONE_NUMBER", Regex::new(r"\+?[\d\s\-().]{10,20}").unwrap()),
+        // Phone: requires international prefix (+\d) OR separators (spaces/dashes/parens)
+        // AND at least 10 digit characters total, to avoid matching arbitrary digit runs.
+        ("PHONE_NUMBER", Regex::new(r"(?:\+\d[\d\s\-().]{8,18}|\(?\d{2,4}\)?[\s\-]\d{3,4}[\s\-]\d{3,4}(?:[\s\-]\d{2,4})?)").unwrap()),
     ]
 });
 
@@ -331,6 +332,15 @@ pub async fn anonymize_conversation(
 
     let anonymized_contents: Vec<String> = match sidecar_result {
         Ok(resp) => {
+            // Validate response before trusting it — fail-closed so PII is never left unhandled.
+            if resp.messages.len() != user_msgs.len() {
+                return Err(AnonymizerError::MalformedResponse {
+                    detail: format!(
+                        "sidecar returned {} messages for {} user messages",
+                        resp.messages.len(), user_msgs.len()
+                    ),
+                });
+            }
             meta.sidecar_used = true;
             // Build vault from spans
             for (msg_idx, anon_msg) in resp.messages.iter().enumerate() {
@@ -341,11 +351,18 @@ pub async fn anonymize_conversation(
                     let start = span.byte_start as usize;
                     let end = span.byte_end as usize;
                     if end > bytes.len() || start >= end {
-                        continue;
+                        return Err(AnonymizerError::MalformedResponse {
+                            detail: format!(
+                                "span [{start},{end}) out of bounds for message of {} bytes",
+                                bytes.len()
+                            ),
+                        });
                     }
                     let original_text = match std::str::from_utf8(&bytes[start..end]) {
                         Ok(s) => s.to_owned(),
-                        Err(_) => continue,
+                        Err(e) => return Err(AnonymizerError::MalformedResponse {
+                            detail: format!("span [{start},{end}) is not valid UTF-8: {e}"),
+                        }),
                     };
                     let hash = match type_hash(&span.entity_type) {
                         Some(h) => h,

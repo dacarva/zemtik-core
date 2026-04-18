@@ -3030,11 +3030,14 @@ async fn handle_anonymize_preview(
         .and_then(|v| v.strip_prefix("Bearer "));
     // Prefer the dedicated preview key (ZEMTIK_ANONYMIZER_PREVIEW_KEY) when set.
     // Falls back to OPENAI_API_KEY for backwards compatibility with existing deployments.
+    // Empty strings are rejected — a blank configured key must never grant access.
     let expected_key = state.config.anonymizer_preview_key.clone()
-        .or_else(|| state.config.openai_api_key.clone())
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        .filter(|k| !k.is_empty())
+        .or_else(|| state.config.openai_api_key.clone().filter(|k| !k.is_empty()))
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()));
     let authorized = match (provided_key, expected_key.as_deref()) {
-        (Some(provided), Some(expected)) => provided == expected,
+        // Constant-time comparison prevents timing-based key enumeration.
+        (Some(provided), Some(expected)) => constant_time_eq::constant_time_eq(provided.as_bytes(), expected.as_bytes()),
         (Some(_), None) => false, // no key configured — deny all (fail-closed)
         (None, _) => false,
     };

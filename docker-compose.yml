@@ -23,8 +23,8 @@ services:
     build:
       context: .
       dockerfile: sidecar/Dockerfile
-    ports:
-      - "50051:50051"
+    expose:
+      - "50051"
     healthcheck:
       test: ["CMD", "grpc-health-probe", "-addr=localhost:50051"]
       interval: 10s

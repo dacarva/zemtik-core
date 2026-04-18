@@ -86,6 +86,10 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
 
             # GLiNER entity detection (PERSON, ORG, LOCATION, custom)
             gliner_types = [t for t in entity_types if t in ("PERSON", "ORG", "LOCATION")]
+            if gliner_types and self._gliner is None:
+                logger.error("GLiNER model not ready — aborting request (fail-closed)")
+                context.abort(grpc.StatusCode.UNAVAILABLE, "GLiNER model not yet initialized")
+                return anon_pb2.AnonymizeResponse(messages=[])
             if gliner_types and self._gliner is not None:
                 try:
                     entities = self._gliner.predict_entities(text, gliner_types, threshold=0.5)
@@ -106,6 +110,10 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
 
             # Presidio for structured PII (IDs, phone, email, etc.)
             presidio_types = [t for t in entity_types if t not in ("PERSON", "ORG", "LOCATION")]
+            if presidio_types and self._presidio is None:
+                logger.error("Presidio model not ready — aborting request (fail-closed)")
+                context.abort(grpc.StatusCode.UNAVAILABLE, "Presidio analyzer not yet initialized")
+                return anon_pb2.AnonymizeResponse(messages=[])
             if presidio_types and self._presidio is not None:
                 try:
                     results = self._presidio.analyze(
