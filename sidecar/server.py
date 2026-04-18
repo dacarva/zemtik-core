@@ -101,7 +101,8 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                             score=float(ent.get("score", 1.0)),
                         ))
                 except Exception as exc:
-                    logger.warning("GLiNER prediction failed: %s", exc)
+                    logger.error("GLiNER prediction failed: %s", exc)
+                    context.abort(grpc.StatusCode.INTERNAL, f"GLiNER prediction error: {exc}")
 
             # Presidio for structured PII (IDs, phone, email, etc.)
             presidio_types = [t for t in entity_types if t not in ("PERSON", "ORG", "LOCATION")]
@@ -122,7 +123,8 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                             score=float(r.score),
                         ))
                 except Exception as exc:
-                    logger.warning("Presidio analysis failed: %s", exc)
+                    logger.error("Presidio analysis failed: %s", exc)
+                    context.abort(grpc.StatusCode.INTERNAL, f"Presidio analysis error: {exc}")
 
             # Build anonymized content by applying spans (sorted by byte position, reverse)
             text_bytes = text.encode("utf-8")

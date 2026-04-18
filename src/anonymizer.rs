@@ -334,7 +334,7 @@ pub async fn anonymize_conversation(
                     let bytes = original.as_bytes();
                     let start = span.byte_start as usize;
                     let end = span.byte_end as usize;
-                    if end > bytes.len() || start > end {
+                    if end > bytes.len() || start >= end {
                         continue;
                     }
                     let original_text = match std::str::from_utf8(&bytes[start..end]) {
@@ -357,11 +357,10 @@ pub async fn anonymize_conversation(
                         });
                     }
                 }
-                // Note: sidecar returns pre-anonymized content; use it directly
-                if !entity_types.is_empty() {
-                    meta.entity_types = entity_types.iter().map(|s| s.to_string()).collect();
-                }
             }
+            // Sort vault longest-first so compound names (e.g. "Jose Garcia") are replaced
+            // before substrings (e.g. "Jose"), preventing partial token substitution.
+            vault.sort_by(|a, b| b.original.len().cmp(&a.original.len()));
             // Build anonymized content strings from vault (apply all replacements)
             user_msgs.iter().map(|(_, content)| {
                 let mut text = content.to_string();

@@ -1264,6 +1264,7 @@ fn streaming_not_supported_for_data_lane() -> Response {
 /// Called when ZEMTIK_GENERAL_PASSTHROUGH=1 and intent extraction fails to match a table.
 /// `intent_err`: the original IntentError that triggered the GeneralLane route; None for
 /// the rare defensive GeneralLane arm from the happy-path route match (should not occur).
+#[allow(clippy::too_many_arguments)]
 async fn handle_general_lane(
     state: Arc<ProxyState>,
     body: Value,
@@ -1541,6 +1542,7 @@ fn zemtik_evidence_envelope(ev: &EvidencePack, intent: &IntentResult) -> Result<
 }
 
 /// Replace last user message with FastLane payload and forward to OpenAI.
+#[allow(clippy::too_many_arguments)]
 async fn build_fast_lane_response(
     body: &mut Value,
     payload: Value,
@@ -1587,6 +1589,12 @@ async fn build_fast_lane_response(
         .context("parse OpenAI response")
         .map_err(ProxyError::Internal)?;
 
+    // Count dropped tokens BEFORE deanonymize replaces them in resp_body.
+    let dropped_fast = vault.as_ref().map(|vlt| {
+        let raw = serde_json::to_string(&resp_body).unwrap_or_default();
+        crate::anonymizer::count_dropped_tokens(&raw, vlt)
+    }).unwrap_or(0);
+
     // Deanonymize FastLane response before returning to caller
     if let Some(ref vlt) = vault {
         if let Some(obj) = resp_body.as_object_mut() {
@@ -1603,10 +1611,6 @@ async fn build_fast_lane_response(
 
     // Inject zemtik_meta.anonymizer stats into FastLane response
     if let Some(ref meta) = anon_meta {
-        let dropped = vault.as_ref().map(|vlt| {
-            let raw = serde_json::to_string(&resp_body).unwrap_or_default();
-            crate::anonymizer::count_dropped_tokens(&raw, vlt)
-        }).unwrap_or(0);
         if let Some(obj) = resp_body.as_object_mut() {
             obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
@@ -1615,7 +1619,7 @@ async fn build_fast_lane_response(
                     "entity_types": meta.entity_types,
                     "sidecar_used": meta.sidecar_used,
                     "sidecar_ms": meta.sidecar_ms,
-                    "dropped_tokens": dropped,
+                    "dropped_tokens": dropped_fast,
                 })));
         }
     }
@@ -1849,6 +1853,12 @@ async fn handle_zk_slow_lane(
         .context("parse OpenAI response")
         .map_err(ProxyError::Internal)?;
 
+    // Count dropped tokens BEFORE deanonymize replaces them in resp_body.
+    let dropped_zk = vault.as_ref().map(|vlt| {
+        let raw = serde_json::to_string(&resp_body).unwrap_or_default();
+        crate::anonymizer::count_dropped_tokens(&raw, vlt)
+    }).unwrap_or(0);
+
     // Deanonymize ZK SlowLane response before returning to caller
     if let Some(ref vlt) = vault {
         if let Some(obj) = resp_body.as_object_mut() {
@@ -1865,10 +1875,6 @@ async fn handle_zk_slow_lane(
 
     // Inject zemtik_meta.anonymizer stats into ZK SlowLane response
     if let Some(ref meta) = anon_meta {
-        let dropped = vault.as_ref().map(|vlt| {
-            let raw = serde_json::to_string(&resp_body).unwrap_or_default();
-            crate::anonymizer::count_dropped_tokens(&raw, vlt)
-        }).unwrap_or(0);
         if let Some(obj) = resp_body.as_object_mut() {
             obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
@@ -1877,7 +1883,7 @@ async fn handle_zk_slow_lane(
                     "entity_types": meta.entity_types,
                     "sidecar_used": meta.sidecar_used,
                     "sidecar_ms": meta.sidecar_ms,
-                    "dropped_tokens": dropped,
+                    "dropped_tokens": dropped_zk,
                 })));
         }
     }
@@ -2986,13 +2992,11 @@ async fn handle_anonymize_preview(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let expected_key = state.config.openai_api_key.as_deref()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok().as_deref().map(|_| "").map(|_| "")).unwrap_or("");
-    let expected_key_owned = state.config.openai_api_key.clone()
+    let expected_key = state.config.openai_api_key.clone()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-    let authorized = match (provided_key, expected_key_owned.as_deref()) {
+    let authorized = match (provided_key, expected_key.as_deref()) {
         (Some(provided), Some(expected)) => provided == expected,
-        (Some(_), None) => true, // no key configured — allow any Bearer token
+        (Some(_), None) => false, // no key configured — deny all (fail-closed)
         (None, _) => false,
     };
     if !authorized {
@@ -3020,11 +3024,26 @@ async fn handle_anonymize_preview(
     }
 
     let messages = body.get("messages").and_then(|m| m.as_array()).cloned().unwrap_or_default();
-    let session_id = headers
+    let session_id = match headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    {
+        Some(s) => {
+            if uuid::Uuid::parse_str(s).is_err() {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "type": "invalid_session_id",
+                            "message": "x-session-id must be a valid UUID v4."
+                        }
+                    })),
+                ).into_response());
+            }
+            s.to_owned()
+        }
+        None => Uuid::new_v4().to_string(),
+    };
 
     let t0 = Instant::now();
     let mut grpc_client = state.anonymizer_client.clone();

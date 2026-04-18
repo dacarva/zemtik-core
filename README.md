@@ -58,7 +58,7 @@ docker build --build-arg BUILD_FEATURES=embed \
 
 The ubuntu:24.04 base is required for embed because the ONNX Runtime C++ layer needs glibc 2.38+ (Debian Bookworm ships 2.36).
 
-> **POC status (v0.14.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; database connectivity requires a Supabase/PostgREST adapter (raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.14.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; FastLane supports `DB_BACKEND=sqlite` (default, in-memory) and `DB_BACKEND=supabase` (Supabase integration enabled only when explicitly set — raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -231,7 +231,7 @@ Zemtik can tokenize PII in prompts before they leave the host. Names, organizati
 → "Can [[Z:a1b2:0]] help with our payroll?"
 ```
 
-The `[[Z:xxxx:n]]` format encodes the entity type (`xxxx` = 4-char hash of `PERSON`, `ORG`, etc.) and a per-session counter (`n`). Zemtik maintains a session vault that accumulates token mappings across turns — multi-turn conversations deanonymize correctly.
+The `[[Z:xxxx:n]]` format encodes the entity type (`xxxx` = 4-char hash of `PERSON`, `ORG`, etc.) and a per-session counter (`n`). Zemtik maintains a per-session vault mapping each token to its original value (tokenization and per-session token mapping only — multi-turn deanonymization is Phase 2–3).
 
 **Start the sidecar first** (GLiNER NER model, ~500 MB image):
 

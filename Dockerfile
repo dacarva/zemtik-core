@@ -39,7 +39,10 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /build
 
 # Cache dependency compilation layer separately from source changes.
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
+# Proto definitions are needed by build.rs (tonic_build) to generate gRPC stubs.
+# Must be present before the stub dep-caching build so OUT_DIR is populated.
+COPY proto/ proto/
 # Create stub lib/main so `cargo build --release` can resolve the manifest.
 RUN mkdir -p src && echo 'fn main(){}' > src/main.rs && echo '' > src/lib.rs
 RUN cargo build --release --no-default-features --features ${BUILD_FEATURES} 2>&1 | tail -5 || true

@@ -564,8 +564,10 @@ fn anonymizer_entity_types_parsed_from_env() {
         &env(&[("ZEMTIK_ANONYMIZER_ENTITY_TYPES", "PERSON,EMAIL_ADDRESS")]),
         &default_cli(),
     ).unwrap();
-    assert!(config.anonymizer_entity_types.contains(&"PERSON".to_string()));
-    assert!(config.anonymizer_entity_types.contains(&"EMAIL_ADDRESS".to_string()));
+    assert_eq!(config.anonymizer_entity_types, "PERSON,EMAIL_ADDRESS");
+    let types: Vec<&str> = config.anonymizer_entity_types.split(',').map(str::trim).collect();
+    assert!(types.contains(&"PERSON"));
+    assert!(types.contains(&"EMAIL_ADDRESS"));
 }
 
 #[test]
