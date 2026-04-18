@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use zemtik::config::AppConfig;
 use zemtik::mcp_proxy::{
     list_mcp_audit_records, write_audit_record, sha256_hex, McpHandlerState,
-    ssrf_block_reason, is_private_or_loopback,
+    ssrf_block_reason, ssrf_dns_guard, is_private_or_loopback,
 };
 use zemtik::types::McpAuditRecord;
 
@@ -342,6 +342,13 @@ fn is_private_or_loopback_covers_rfc1918() {
         // SEC-1 regression: 0.0.0.0/8 routes to loopback on Linux
         ("0.0.0.0", true),
         ("0.1.2.3", true),
+        // RFC 6598 CGNAT: 100.64.0.0/10
+        ("100.64.0.1", true),
+        ("100.127.255.255", true),
+        ("100.63.255.255", false),  // just below range
+        ("100.128.0.1", false),     // just above range
+        // broadcast
+        ("255.255.255.255", true),
         ("8.8.8.8", false),
         ("1.1.1.1", false),
         ("172.15.0.1", false),
@@ -354,4 +361,69 @@ fn is_private_or_loopback_covers_rfc1918() {
             "{ip_str} expected private={expected}"
         );
     }
+}
+
+#[test]
+fn is_private_or_loopback_ipv4_mapped_ipv6() {
+    use std::net::IpAddr;
+    // ::ffff:x.x.x.x — IPv4-mapped IPv6 must be treated as its IPv4 equivalent
+    let mapped_loopback: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+    assert!(is_private_or_loopback(mapped_loopback), "::ffff:127.0.0.1 must be blocked");
+    let mapped_rfc1918: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+    assert!(is_private_or_loopback(mapped_rfc1918), "::ffff:192.168.1.1 must be blocked");
+    let mapped_imds: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+    assert!(is_private_or_loopback(mapped_imds), "::ffff:169.254.169.254 (IMDS) must be blocked");
+    let mapped_public: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
+    assert!(!is_private_or_loopback(mapped_public), "::ffff:8.8.8.8 must pass");
+}
+
+#[test]
+fn ssrf_blocks_cgnat_and_broadcast() {
+    assert!(ssrf_block_reason("https://100.64.0.1/").is_some(), "100.64.0.1 CGNAT must be blocked");
+    assert!(ssrf_block_reason("https://100.127.255.255/").is_some(), "100.127.255.255 CGNAT must be blocked");
+    assert!(ssrf_block_reason("https://255.255.255.255/").is_some(), "broadcast must be blocked");
+    // Boundaries: 100.63 and 100.128 are outside CGNAT range
+    assert!(ssrf_block_reason("https://100.63.255.255/").is_none(), "100.63.x outside CGNAT must pass");
+    assert!(ssrf_block_reason("https://100.128.0.1/").is_none(), "100.128.x outside CGNAT must pass");
+}
+
+#[test]
+fn ssrf_blocks_ipv4_mapped_ipv6_url() {
+    // IPv4-mapped IPv6 addresses in URL notation must be blocked
+    assert!(ssrf_block_reason("https://[::ffff:127.0.0.1]/").is_some(), "::ffff:127.0.0.1 must be blocked");
+    assert!(ssrf_block_reason("https://[::ffff:192.168.1.1]/").is_some(), "::ffff:192.168.1.1 must be blocked");
+    assert!(ssrf_block_reason("https://[::ffff:10.0.0.1]/").is_some(), "::ffff:10.0.0.1 must be blocked");
+}
+
+#[tokio::test]
+async fn ssrf_dns_guard_blocks_loopback_literal() {
+    // Literal private IPs must be rejected without DNS
+    assert!(ssrf_dns_guard("https://127.0.0.1/").await.is_err(), "127.0.0.1 literal must be blocked");
+    assert!(ssrf_dns_guard("https://[::1]/").await.is_err(), "[::1] literal must be blocked");
+    assert!(ssrf_dns_guard("https://[::ffff:127.0.0.1]/").await.is_err(), "::ffff:127.0.0.1 must be blocked");
+}
+
+#[tokio::test]
+async fn ssrf_dns_guard_blocks_private_literal() {
+    assert!(ssrf_dns_guard("https://10.0.0.1/").await.is_err(), "10.0.0.1 must be blocked");
+    assert!(ssrf_dns_guard("https://192.168.1.1/").await.is_err(), "192.168.1.1 must be blocked");
+    assert!(ssrf_dns_guard("https://100.64.0.1/").await.is_err(), "100.64.0.1 CGNAT must be blocked");
+}
+
+#[tokio::test]
+async fn ssrf_dns_guard_returns_vetted_addrs_for_literal() {
+    // For a literal public IP, ssrf_dns_guard returns the SocketAddr for TOCTOU pinning
+    let result = ssrf_dns_guard("https://8.8.8.8/").await;
+    assert!(result.is_ok(), "public IP literal must pass DNS guard");
+    let (host, addrs) = result.unwrap();
+    assert_eq!(host, "8.8.8.8");
+    assert!(!addrs.is_empty(), "must return at least one address for pinning");
+    assert_eq!(addrs[0].port(), 443);
+}
+
+#[tokio::test]
+async fn ssrf_dns_guard_resolves_localhost_hostname() {
+    // DNS resolution of "localhost" must return 127.0.0.1 / ::1 and be blocked
+    let result = ssrf_dns_guard("https://localhost/").await;
+    assert!(result.is_err(), "localhost must be blocked via DNS resolution");
 }

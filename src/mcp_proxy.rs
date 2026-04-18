@@ -85,24 +85,30 @@ pub fn is_private_or_loopback(addr: std::net::IpAddr) -> bool {
     match addr {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
-            o[0] == 0 // 0.0.0.0/8 — unspecified; routes to loopback on Linux
-                || o[0] == 127
-                || o[0] == 10
-                || (o[0] == 172 && (16..=31).contains(&o[1]))
-                || (o[0] == 192 && o[1] == 168)
-                || (o[0] == 169 && o[1] == 254)
+            o[0] == 0            // 0.0.0.0/8 — unspecified; routes to loopback on Linux
+                || o[0] == 127   // 127.0.0.0/8 loopback
+                || o[0] == 10    // 10.0.0.0/8 RFC 1918
+                || (o[0] == 172 && (16..=31).contains(&o[1])) // 172.16.0.0/12 RFC 1918
+                || (o[0] == 192 && o[1] == 168)               // 192.168.0.0/16 RFC 1918
+                || (o[0] == 169 && o[1] == 254)               // 169.254.0.0/16 link-local / IMDS
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // 100.64.0.0/10 RFC 6598 CGNAT
+                || o == [255, 255, 255, 255]                   // broadcast
         }
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified() // :: — IPv6 unspecified address
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // RFC 4193 ULA: fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // RFC 4291 link-local: fe80::/10
+                // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) — unwrap and re-check as IPv4
+                || v6.to_ipv4_mapped()
+                    .map_or(false, |v4| is_private_or_loopback(std::net::IpAddr::V4(v4)))
         }
     }
 }
 
 /// Returns `Some(reason)` if the URL should be blocked to prevent SSRF.
-/// Blocks: non-https schemes, private/loopback IPs, well-known local hostnames.
+/// Checks literal URL properties only (scheme, literal IP, known-bad hostname patterns).
+/// DNS-based checks (rebinding prevention) are performed by `ssrf_dns_guard` (async).
 pub fn ssrf_block_reason(url_str: &str) -> Option<String> {
     let url = match reqwest::Url::parse(url_str) {
         Ok(u) => u,
@@ -133,6 +139,64 @@ pub fn ssrf_block_reason(url_str: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolves the host in `url_str` and checks every returned address against
+/// `is_private_or_loopback`. Returns `(host, addrs)` on success so the caller
+/// can pin those addresses into reqwest via `resolve_to_addrs`, preventing TOCTOU
+/// (a second DNS lookup by reqwest cannot return a different, unvetted IP).
+///
+/// For literal-IP URLs no DNS query is issued; the IP is checked directly.
+/// IPv4-mapped IPv6 addresses (e.g. `::ffff:127.0.0.1`) are unwrapped before checking.
+pub async fn ssrf_dns_guard(
+    url_str: &str,
+) -> Result<(String, Vec<std::net::SocketAddr>), String> {
+    use std::net::{IpAddr, SocketAddr};
+
+    let url = reqwest::Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
+    let host = url.host_str().ok_or_else(|| "URL has no host".to_string())?;
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    // url.host_str() wraps IPv6 literals in brackets (e.g. "[::1]"); strip them.
+    let host_plain = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+
+    let check_ip = |ip: IpAddr| -> Result<(), String> {
+        // Unwrap IPv4-mapped IPv6 (::ffff:x.x.x.x) before the private-range check.
+        let effective = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+            other => other,
+        };
+        if is_private_or_loopback(effective) {
+            Err(format!("private/loopback IP blocked: {effective}"))
+        } else {
+            Ok(())
+        }
+    };
+
+    // Literal IP — no DNS needed.
+    if let Ok(ip) = host_plain.parse::<IpAddr>() {
+        check_ip(ip)?;
+        return Ok((host_plain.to_string(), vec![SocketAddr::new(ip, port)]));
+    }
+
+    // Hostname — resolve and check every returned address.
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host_plain, port))
+        .await
+        .map_err(|e| format!("DNS resolution failed for {host_plain}: {e}"))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolved no addresses for {host_plain}"));
+    }
+
+    for addr in &addrs {
+        check_ip(addr.ip())?;
+    }
+
+    Ok((host_plain.to_string(), addrs))
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +478,8 @@ impl ZemtikMcpHandler {
             }
         }
 
-        // SSRF guard: block private IPs, loopback, and non-https before any network I/O.
+        // SSRF guard — two-stage:
+        // Stage 1 (sync): reject bad schemes, literal private IPs, known-bad hostnames.
         if let Some(reason) = ssrf_block_reason(&url_str) {
             return Err(rmcp::ErrorData::new(
                 rmcp::model::ErrorCode(-32002),
@@ -422,9 +487,24 @@ impl ZemtikMcpHandler {
                 None,
             ));
         }
+        // Stage 2 (async): DNS-resolve the host, reject if any returned IP is private,
+        // then pin the vetted addresses into the per-request client (TOCTOU prevention —
+        // reqwest will use our pre-validated IPs instead of doing a second lookup).
+        let (vetted_host, vetted_addrs) = match ssrf_dns_guard(&url_str).await {
+            Ok(v) => v,
+            Err(reason) => return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                format!("ssrf_blocked: {reason}"),
+                None,
+            )),
+        };
+        let client = reqwest::Client::builder()
+            .timeout(self.state.fetch_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(&vetted_host, &vetted_addrs)
+            .build()
+            .unwrap_or_else(|_| self.state.http_client.clone());
 
-        // Execute HTTP fetch
-        let client = self.state.http_client.clone();
         let fetch_result = tokio::time::timeout(
             self.state.fetch_timeout,
             client.get(&url_str).send(),
