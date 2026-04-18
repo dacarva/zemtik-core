@@ -683,6 +683,13 @@ See canonical entry below: [PostgREST smoke-test at startup (P2, v0.9.2)](#postg
 - **Priority:** P3
 - **Depends on:** fix/general-queries merged, operator feedback on real use cases
 
+### DNS rebinding mitigation for `zemtik_fetch` SSRF guard (P2)
+- **What:** Pre-resolve hostnames via Tokio DNS and apply `is_private_or_loopback` to every returned IP before `reqwest` connects. Requires a custom `reqwest::dns::Resolve` implementation.
+- **Why:** Current guard checks URL hostname at parse time only. An attacker-controlled domain can resolve to a public IP (passing the guard) then rebind to a private IP (e.g. 169.254.169.254) on the actual connection. Short-TTL DNS makes this practical.
+- **Status:** Known limitation as of v0.13.5. The redirect-follow bypass and IPv6 bracket bypass are fixed; DNS rebinding is the remaining vector.
+- **Scope:** ~50 LOC in `src/mcp_proxy.rs`. Likely prerequisite before `governed` MCP mode is enabled in production.
+- **Priority:** P2
+
 ### Cluster-aware GeneralLane rate limiting (P2)
 - **What:** Move `ZEMTIK_GENERAL_MAX_RPM` from per-instance `VecDeque<Instant>` sliding window to a Redis-backed sliding window.
 - **Why:** Replicated Zemtik deployments (multiple proxy instances behind a load balancer) get N × MAX_RPM effective throughput. Per-instance limiting is only accurate for single-instance deployments.
