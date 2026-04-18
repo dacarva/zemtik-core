@@ -502,6 +502,40 @@ pub struct AppConfig {
     /// No startup error if unset — the hint is omitted silently.
     /// Env: ZEMTIK_PUBLIC_URL
     pub public_url: Option<String>,
+
+    // --- Anonymizer fields (v0.14.0+) ---
+
+    /// Enable the PII anonymizer pre-router hook. Default: false.
+    /// Env: ZEMTIK_ANONYMIZER_ENABLED=1|true
+    #[serde(skip)]
+    pub anonymizer_enabled: bool,
+    /// gRPC address of the Python anonymizer sidecar. Default: "http://localhost:50051".
+    /// Env: ZEMTIK_ANONYMIZER_SIDECAR_ADDR
+    pub anonymizer_sidecar_addr: String,
+    /// Timeout in milliseconds for each gRPC anonymize call. Default: 1500.
+    /// Env: ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS
+    pub anonymizer_sidecar_timeout_ms: u64,
+    /// Fall back to regex-only (LATAM IDs) when the sidecar is unavailable. Default: true.
+    /// When false, sidecar unavailability returns HTTP 503 (fail-closed).
+    /// Env: ZEMTIK_ANONYMIZER_FALLBACK_REGEX=1|true
+    #[serde(skip)]
+    pub anonymizer_fallback_regex: bool,
+    /// Comma-separated list of entity types to detect. Default: "PERSON,ORG,LOCATION".
+    /// Full list: see entity_hashes.rs (16 types).
+    /// Env: ZEMTIK_ANONYMIZER_ENTITY_TYPES
+    pub anonymizer_entity_types: String,
+    /// Expose outgoing_preview (first 200 chars of anonymized text) in zemtik_meta. Default: false.
+    /// Never enable in production — the preview contains sanitized prompt text.
+    /// Env: ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=1|true
+    #[serde(skip)]
+    pub anonymizer_debug_preview: bool,
+    /// Vault TTL in seconds. Entries older than this are evicted by the background task. Default: 300.
+    /// Env: ZEMTIK_ANONYMIZER_VAULT_TTL_SECS
+    pub anonymizer_vault_ttl_secs: u64,
+    /// Enable anonymizer hook for MCP tool results. Default: false.
+    /// Env: ZEMTIK_MCP_ANONYMIZER_ENABLED=1|true
+    #[serde(skip)]
+    pub mcp_anonymizer_enabled: bool,
 }
 
 impl AppConfig {
@@ -568,6 +602,14 @@ impl Default for AppConfig {
             general_passthrough_enabled: false,
             general_max_rpm: 0,
             public_url: None,
+            anonymizer_enabled: false,
+            anonymizer_sidecar_addr: "http://localhost:50051".to_owned(),
+            anonymizer_sidecar_timeout_ms: 1500,
+            anonymizer_fallback_regex: true,
+            anonymizer_entity_types: "PERSON,ORG,LOCATION".to_owned(),
+            anonymizer_debug_preview: false,
+            anonymizer_vault_ttl_secs: 300,
+            mcp_anonymizer_enabled: false,
         }
     }
 }
@@ -940,6 +982,74 @@ pub fn load_from_sources(
         if !url.is_empty() {
             config.public_url = Some(url);
         }
+    }
+
+    // Anonymizer env vars
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_ENABLED") {
+        let s = v.trim();
+        config.anonymizer_enabled = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_ANONYMIZER_ENABLED: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_SIDECAR_ADDR") {
+        let trimmed = v.trim().to_owned();
+        if !trimmed.is_empty() {
+            config.anonymizer_sidecar_addr = trimmed;
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS") {
+        let n = v.trim().parse::<u64>().context("parse ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS")?;
+        anyhow::ensure!(n >= 1, "ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS must be >= 1 (got {})", n);
+        config.anonymizer_sidecar_timeout_ms = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_FALLBACK_REGEX") {
+        let s = v.trim();
+        config.anonymizer_fallback_regex = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_ANONYMIZER_FALLBACK_REGEX: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_ENTITY_TYPES") {
+        let trimmed = v.trim().to_owned();
+        if !trimmed.is_empty() {
+            config.anonymizer_entity_types = trimmed;
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_DEBUG_PREVIEW") {
+        let s = v.trim();
+        config.anonymizer_debug_preview = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_ANONYMIZER_DEBUG_PREVIEW: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
+    }
+    if let Some(v) = env.get("ZEMTIK_ANONYMIZER_VAULT_TTL_SECS") {
+        let n = v.trim().parse::<u64>().context("parse ZEMTIK_ANONYMIZER_VAULT_TTL_SECS")?;
+        anyhow::ensure!(n >= 1, "ZEMTIK_ANONYMIZER_VAULT_TTL_SECS must be >= 1 (got {})", n);
+        config.anonymizer_vault_ttl_secs = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_MCP_ANONYMIZER_ENABLED") {
+        let s = v.trim();
+        config.mcp_anonymizer_enabled = match s {
+            "1" | "true" | "True" | "TRUE" => true,
+            "0" | "false" | "False" | "FALSE" => false,
+            other => anyhow::bail!(
+                "ZEMTIK_MCP_ANONYMIZER_ENABLED: unrecognized value {:?}; accepted: 0, 1, true, false",
+                other
+            ),
+        };
     }
 
     // Layer 4: CLI flags

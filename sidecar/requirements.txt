@@ -1,0 +1,6 @@
+gliner>=1.2,<2
+presidio-analyzer>=2.2,<3
+grpcio>=1.62,<2
+grpcio-tools>=1.62,<2
+grpcio-health-checking>=1.62,<2
+protobuf>=4.0,<6

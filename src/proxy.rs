@@ -23,6 +23,7 @@ use crate::types::{
     SignatureData, TokenUsage, ZemtikErrorCode,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, rewriter, router};
+use crate::anonymizer::{AnonymizerGrpcClient, VaultStore, Vault, new_vault_store, build_channel};
 
 pub(crate) struct ProxyState {
     pub(crate) http_client: reqwest::Client,
@@ -81,6 +82,11 @@ pub(crate) struct ProxyState {
     /// When set, zemtik_meta blocks include a verify_url hint.
     #[allow(dead_code)]
     pub(crate) public_url: Option<String>,
+    /// Session-scoped vault store. std::sync::Mutex — never hold guard across .await.
+    pub(crate) vault_store: VaultStore,
+    /// Lazy gRPC client for the anonymizer sidecar. Clone per request (tonic client is cheap to clone).
+    /// None when ZEMTIK_ANONYMIZER_ENABLED=false.
+    pub(crate) anonymizer_client: Option<AnonymizerGrpcClient>,
 }
 
 // Results returned from the blocking ZK pipeline (includes optional bundle).
@@ -286,7 +292,27 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         bjj_pub_x,
         bjj_pub_y,
         public_url: config.public_url.clone(),
+        vault_store: new_vault_store(),
+        anonymizer_client: if config.anonymizer_enabled {
+            Some(AnonymizerGrpcClient::new(build_channel(&config.anonymizer_sidecar_addr)))
+        } else {
+            None
+        },
     });
+
+    // Spawn background vault TTL eviction task (runs every 60s, evicts entries > TTL).
+    if config.anonymizer_enabled {
+        let vault_store = Arc::clone(&state.vault_store);
+        let ttl_secs = config.anonymizer_vault_ttl_secs;
+        tokio::spawn(async move {
+            let ttl = std::time::Duration::from_secs(ttl_secs);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let mut store = vault_store.lock().unwrap();
+                store.retain(|_, (_, ts)| ts.elapsed() < ttl);
+            }
+        });
+    }
 
     // If any configured origin is "*", use the wildcard policy.
     // Mixing "*" with specific origins (e.g. "*, https://app") is unsupported —
@@ -322,6 +348,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/health", get(handle_health))
             .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(handle_chat_completions))
+            .route("/v1/anonymize/preview", post(handle_anonymize_preview))
             .route("/receipts", get(handle_receipts_list))
             .route("/verify/{id}", get(handle_verify))
             .route("/{*path}", any(handle_passthrough)),
@@ -329,6 +356,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/health", get(handle_health))
             .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(crate::tunnel::handle_tunnel))
+            .route("/v1/anonymize/preview", post(handle_anonymize_preview))
             .route("/tunnel/audit", get(crate::tunnel::handle_audit))
             .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
             .route("/tunnel/summary", get(crate::tunnel::handle_summary))
@@ -400,7 +428,7 @@ pub async fn run_proxy(config: AppConfig) -> anyhow::Result<()> {
 async fn handle_chat_completions(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Result<Response, ProxyError> {
     let total_start = Instant::now();
 
@@ -431,7 +459,7 @@ async fn handle_chat_completions(
     // Extract the last user message prompt for intent parsing.
     // Handles both plain-string content and the content-parts array format
     // sent by openai-python v1.x and other modern SDKs.
-    let prompt = body
+    let mut prompt = body
         .get("messages")
         .and_then(|m| m.as_array())
         .and_then(|arr| {
@@ -447,11 +475,134 @@ async fn handle_chat_completions(
         })
         .unwrap_or_default();
 
+    // ---------------------------------------------------------------------------
+    // Anonymizer pre-router hook
+    // ---------------------------------------------------------------------------
+    // Invariant: skip in Tunnel mode (FORK 2 must see original text for diff).
+    let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
+    let anonymizer_vault: Option<Vault>;
+    let anonymizer_session_id = headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    if state.config.anonymizer_enabled
+        && state.config.mode != ZemtikMode::Tunnel
+    {
+        // Streaming + anonymizer → 415 (buffer+re-stream deferred to phase 3)
+        if is_streaming {
+            return Ok((
+                StatusCode::from_u16(415).unwrap(),
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "anonymizer_streaming_unsupported",
+                        "message": "Streaming not supported when anonymizer is enabled. Set stream: false or disable ZEMTIK_ANONYMIZER_ENABLED."
+                    }
+                })),
+            ).into_response());
+        }
+
+        let messages = body.get("messages").and_then(|m| m.as_array()).cloned().unwrap_or_default();
+        let messages_values: Vec<Value> = messages;
+
+        let mut grpc_client = state.anonymizer_client.clone();
+        let anon_result = crate::anonymizer::anonymize_conversation(
+            &messages_values,
+            &anonymizer_session_id,
+            grpc_client.as_mut(),
+            &state.config.anonymizer_entity_types,
+            state.config.anonymizer_sidecar_timeout_ms,
+            state.config.anonymizer_fallback_regex,
+            &state.config.anonymizer_sidecar_addr,
+        ).await;
+
+        match anon_result {
+            Ok((anon_messages, vault, meta)) => {
+                // Mutate body.messages with anonymized content
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("messages".to_owned(), Value::Array(anon_messages.clone()));
+                    // Inject system prompt as a separate message
+                    if !vault.is_empty() {
+                        if let Some(msgs) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                            msgs.push(serde_json::json!({
+                                "role": "system",
+                                "content": crate::anonymizer::SYSTEM_PROMPT_INJECT
+                            }));
+                        }
+                    }
+                }
+                // Re-extract prompt from anonymized messages
+                prompt = body
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .and_then(|arr| {
+                        arr.iter().rev().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    })
+                    .and_then(|m| m.get("content"))
+                    .map(|c| serde_json::from_value::<MessageContent>(c.clone()).map(|mc| mc.to_text()).unwrap_or_default())
+                    .unwrap_or_default();
+
+                // Insert vault into store; scopeguard removes it after this request
+                {
+                    let mut store = state.vault_store.lock().unwrap();
+                    store.insert(anonymizer_session_id.clone(), (vault.clone(), Instant::now()));
+                }
+                anonymizer_vault = Some(vault);
+
+                let _ = meta; // used for zemtik_meta below — stored in vault for now
+            }
+            Err(e) => {
+                let (code, error_type, error_code, msg) = match &e {
+                    crate::anonymizer::AnonymizerError::SidecarUnreachable { addr } => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "anonymizer_unavailable",
+                        "SidecarUnreachable",
+                        format!("PII sidecar unreachable at {addr}. Ensure the anonymizer service is running (docker compose up) or set ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true to use regex-only mode."),
+                    ),
+                    crate::anonymizer::AnonymizerError::SidecarStarting => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "anonymizer_unavailable",
+                        "SidecarStarting",
+                        "PII sidecar is starting. GLiNER model load takes 10-30s. Check container health (docker compose ps) and retry, or wait for the 'anonymizer' service to report 'healthy'.".to_owned(),
+                    ),
+                    _ => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "anonymizer_unavailable",
+                        "SidecarError",
+                        e.to_string(),
+                    ),
+                };
+                return Ok((
+                    code,
+                    Json(serde_json::json!({
+                        "error": {
+                            "type": error_type,
+                            "code": error_code,
+                            "message": msg
+                        }
+                    })),
+                ).into_response());
+            }
+        }
+    } else {
+        anonymizer_vault = None;
+    }
+    // scopeguard: remove vault entry after this request (after deanonymize, or on error/panic)
+    let _vault_cleanup = {
+        let store = Arc::clone(&state.vault_store);
+        let sid = anonymizer_session_id.clone();
+        scopeguard::guard((), move |_| {
+            if let Ok(mut s) = store.lock() {
+                s.remove(&sid);
+            }
+        })
+    };
+
     // Streaming guard (standard mode only). Tunnel mode supports stream:true via
     // forward_streaming. GeneralLane also supports streaming when
     // ZEMTIK_GENERAL_PASSTHROUGH=1 — allow stream:true through so intent extraction
     // can run; data lanes reject stream:true at their own dispatch point below.
-    let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
     if state.config.mode == crate::config::ZemtikMode::Standard
         && is_streaming
         && !state.general_passthrough_enabled
@@ -594,8 +745,8 @@ async fn handle_chat_completions(
                         return Ok(streaming_not_supported_for_data_lane());
                     }
                     return match route {
-                        Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start).await,
-                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), resolved, effective_client_id, total_start).await,
+                        Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start, anonymizer_vault.clone()).await,
+                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), resolved, effective_client_id, total_start, anonymizer_vault.clone()).await,
                         Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                     };
                 }
@@ -648,8 +799,8 @@ async fn handle_chat_completions(
                                     return Ok(streaming_not_supported_for_data_lane());
                                 }
                                 return match route {
-                                    Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start).await,
-                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), r, effective_client_id, total_start).await,
+                                    Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start, anonymizer_vault.clone()).await,
+                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), r, effective_client_id, total_start, anonymizer_vault.clone()).await,
                                     Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                                 };
                             }
@@ -662,7 +813,7 @@ async fn handle_chat_completions(
                                 if state.general_passthrough_enabled
                                     && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
                                 {
-                                    return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                                    return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone()).await;
                                 }
                                 return Ok(rewriting_failed_400("unresolvable"));
                             }
@@ -676,7 +827,7 @@ async fn handle_chat_completions(
                         if state.general_passthrough_enabled
                             && matches!(intent_err, IntentError::NoTableIdentified | IntentError::TimeRangeAmbiguous)
                         {
-                            return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                            return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone()).await;
                         }
                         return Ok(rewriting_failed_400("unresolvable"));
                     }
@@ -714,7 +865,7 @@ async fn handle_chat_completions(
             if state.general_passthrough_enabled
                 && matches!(intent_err, crate::intent::IntentError::NoTableIdentified | crate::intent::IntentError::TimeRangeAmbiguous)
             {
-                return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start).await;
+                return handle_general_lane(state, body, api_key, prompt, prompt_hash, Some(intent_err), total_start, anonymizer_vault.clone()).await;
             }
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -760,15 +911,15 @@ async fn handle_chat_completions(
 
     match route {
         Route::FastLane => {
-            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start).await
+            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start, anonymizer_vault.clone()).await
         }
         Route::ZkSlowLane => {
-            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt, intent_result, effective_client_id, total_start).await
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt, intent_result, effective_client_id, total_start, anonymizer_vault.clone()).await
         }
         Route::GeneralLane => {
             // GeneralLane variant is never produced by decide_route (it only returns
             // FastLane or ZkSlowLane for successfully resolved intents). Handled defensively.
-            handle_general_lane(state, body, api_key, prompt, prompt_hash, None, total_start).await
+            handle_general_lane(state, body, api_key, prompt, prompt_hash, None, total_start, anonymizer_vault.clone()).await
         }
     }
 }
@@ -902,6 +1053,7 @@ async fn handle_fast_lane(
     intent_result: crate::types::IntentResult,
     effective_client_id: i64,
     total_start: Instant,
+    vault: Option<Vault>,
 ) -> Result<Response, ProxyError> {
     println!(
         "[FAST] FastLane route → table='{}' start={} end={}",
@@ -1024,6 +1176,7 @@ async fn handle_fast_lane(
         &receipt_id,
         &intent_result,
         &ev,
+        &vault,
     )
     .await
 }
@@ -1113,6 +1266,7 @@ async fn handle_general_lane(
     prompt_hash: String,
     intent_err: Option<IntentError>,
     _total_start: Instant,
+    vault: Option<Vault>,
 ) -> Result<Response, ProxyError> {
     use std::time::Duration;
     use axum::http::HeaderName;
@@ -1285,6 +1439,19 @@ async fn handle_general_lane(
     // and the body is a JSON object (not array). Fall back to header-only for other cases.
     let final_body: Vec<u8> = if content_type.contains("application/json") {
         if let Ok(mut v) = serde_json::from_slice::<Value>(&resp_bytes) {
+            // Deanonymize LLM response text before returning to caller
+            if let Some(ref vlt) = vault {
+                if let Some(obj) = v.as_object_mut() {
+                    if let Some(choices) = obj.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                        for choice in choices.iter_mut() {
+                            if let Some(content) = choice.pointer_mut("/message/content").and_then(|c| c.as_str().map(|s| s.to_owned())) {
+                                let deanon = crate::anonymizer::deanonymize(&content, vlt);
+                                choice["message"]["content"] = Value::String(deanon);
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("zemtik_meta".to_string(), zemtik_meta);
                 serde_json::to_vec(&v).unwrap_or_else(|_| resp_bytes.to_vec())
@@ -1354,6 +1521,7 @@ async fn build_fast_lane_response(
     receipt_id: &str,
     intent: &IntentResult,
     ev: &EvidencePack,
+    vault: &Option<Vault>,
 ) -> Result<Response, ProxyError> {
     let message = format!(
         "Here is a cryptographically attested financial summary:\n\n{}",
@@ -1390,6 +1558,20 @@ async fn build_fast_lane_response(
         .context("parse OpenAI response")
         .map_err(ProxyError::Internal)?;
 
+    // Deanonymize FastLane response before returning to caller
+    if let Some(ref vlt) = vault {
+        if let Some(obj) = resp_body.as_object_mut() {
+            if let Some(choices) = obj.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                for choice in choices.iter_mut() {
+                    if let Some(content) = choice.pointer("/message/content").and_then(|c| c.as_str()).map(|s| s.to_owned()) {
+                        let deanon = crate::anonymizer::deanonymize(&content, vlt);
+                        choice["message"]["content"] = Value::String(deanon);
+                    }
+                }
+            }
+        }
+    }
+
     let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
@@ -1424,6 +1606,7 @@ async fn handle_zk_slow_lane(
     intent: crate::types::IntentResult,
     effective_client_id: i64,
     total_start: Instant,
+    vault: Option<Vault>,
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
     let prompt_hash_field = compute_prompt_hash_field(&original_prompt);
@@ -1616,6 +1799,20 @@ async fn handle_zk_slow_lane(
         .await
         .context("parse OpenAI response")
         .map_err(ProxyError::Internal)?;
+
+    // Deanonymize ZK SlowLane response before returning to caller
+    if let Some(ref vlt) = vault {
+        if let Some(obj) = resp_body.as_object_mut() {
+            if let Some(choices) = obj.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                for choice in choices.iter_mut() {
+                    if let Some(content) = choice.pointer("/message/content").and_then(|c| c.as_str()).map(|s| s.to_owned()) {
+                        let deanon = crate::anonymizer::deanonymize(&content, vlt);
+                        choice["message"]["content"] = Value::String(deanon);
+                    }
+                }
+            }
+        }
+    }
 
     let receipt_id_ev = committed_bundle
         .map(|b| b.bundle_id.clone())
@@ -2703,6 +2900,75 @@ impl IntoResponse for ProxyError {
 impl From<anyhow::Error> for ProxyError {
     fn from(e: anyhow::Error) -> Self {
         ProxyError::Internal(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Anonymize preview endpoint — no LLM call, returns tokenized messages
+// ---------------------------------------------------------------------------
+
+async fn handle_anonymize_preview(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Response, ProxyError> {
+    if !state.config.anonymizer_enabled {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "anonymizer_disabled",
+                    "message": "Set ZEMTIK_ANONYMIZER_ENABLED=1 to use the anonymizer preview endpoint."
+                }
+            })),
+        ).into_response());
+    }
+
+    let messages = body.get("messages").and_then(|m| m.as_array()).cloned().unwrap_or_default();
+    let session_id = headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let t0 = Instant::now();
+    let mut grpc_client = state.anonymizer_client.clone();
+    let result = crate::anonymizer::anonymize_conversation(
+        &messages,
+        &session_id,
+        grpc_client.as_mut(),
+        &state.config.anonymizer_entity_types,
+        state.config.anonymizer_sidecar_timeout_ms,
+        state.config.anonymizer_fallback_regex,
+        &state.config.anonymizer_sidecar_addr,
+    ).await;
+
+    let sidecar_ms = t0.elapsed().as_millis() as u64;
+
+    match result {
+        Ok((anon_messages, vault, meta)) => {
+            let tokens: Vec<&str> = vault.iter().map(|e| e.token.as_str()).collect();
+            let entity_types: Vec<&str> = vault.iter().map(|e| e.entity_type.as_str()).collect();
+            Ok(Json(serde_json::json!({
+                "anonymized_messages": anon_messages,
+                "tokens": tokens,
+                "entities_found": meta.entities_found,
+                "entity_types": entity_types,
+                "sidecar_used": meta.sidecar_used,
+                "sidecar_ms": sidecar_ms,
+            })).into_response())
+        }
+        Err(e) => {
+            Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "anonymizer_unavailable",
+                        "message": e.to_string()
+                    }
+                })),
+            ).into_response())
+        }
     }
 }
 

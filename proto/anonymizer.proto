@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package zemtik.anonymizer.v1;
+
+// A span of detected PII in the original text, with UTF-8 byte offsets.
+// GLiNER returns char offsets — the sidecar converts to byte offsets before
+// serializing so that accented characters (José, García) are handled correctly.
+message AuditSpan {
+  uint32 byte_start  = 1;
+  uint32 byte_end    = 2;
+  string entity_type = 3;
+  float  score       = 4;
+}
+
+// One message from the conversation (role + content).
+message Message {
+  string role    = 1;
+  string content = 2;
+}
+
+// Anonymize a batch of messages in one gRPC call.
+message AnonymizeRequest {
+  repeated Message messages     = 1;
+  string           session_id   = 2;
+  // CSV of entity types to detect; empty = use sidecar default.
+  string           entity_types = 3;
+}
+
+// Anonymized version of each message + audit spans.
+message AnonymizedMessage {
+  string           role              = 1;
+  string           anonymized_content = 2;
+  repeated AuditSpan spans           = 3;
+}
+
+message AnonymizeResponse {
+  repeated AnonymizedMessage messages = 1;
+}
+
+service AnonymizerService {
+  rpc Anonymize(AnonymizeRequest) returns (AnonymizeResponse);
+}
