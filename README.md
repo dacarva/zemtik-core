@@ -266,7 +266,33 @@ Every response includes a `zemtik_meta.anonymizer` block:
 }
 ```
 
+`dropped_tokens` counts how many vault tokens from this session are absent from the LLM's response — i.e., entities the model paraphrased or omitted rather than preserving as opaque `[[Z:xxxx:n]]` tokens. A non-zero value means the model did not fully respect the token-preservation system prompt; the vault still holds the mapping for deanonymization when that lands in Phase 2.
+
+When `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true` is set, the block also includes `outgoing_preview` — the first 200 characters of the anonymized prompt — to help verify tokenization in non-production environments. Disable in production.
+
 Pass `x-session-id: <id>` in requests to keep the vault across a multi-turn conversation. The sidecar falls back to regex matching if it's unreachable (`ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true` by default).
+
+**All anonymizer env vars:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZEMTIK_ANONYMIZER_ENABLED` | `false` | Master switch. Anonymizer is a no-op when disabled. |
+| `ZEMTIK_ANONYMIZER_SIDECAR_URL` | `http://localhost:50051` | gRPC address of the Python sidecar. |
+| `ZEMTIK_ANONYMIZER_FALLBACK_REGEX` | `true` | Use regex patterns when sidecar is unreachable. |
+| `ZEMTIK_ANONYMIZER_ENTITY_TYPES` | `PERSON,ORG,LOCATION` | Comma-separated entity types forwarded to the sidecar. |
+| `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW` | `false` | Emit `outgoing_preview` in `zemtik_meta.anonymizer`. Disable in production. |
+
+**Preview endpoint (debug only):**
+
+```bash
+# Tokenize messages without sending to OpenAI — useful for verifying entity detection
+curl -X POST http://localhost:4000/v1/anonymize/preview \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"messages": [{"role": "user", "content": "José García needs access."}]}'
+```
+
+Requires `ZEMTIK_ANONYMIZER_ENABLED=true`. Returns the tokenized messages array and audit spans without forwarding to OpenAI.
 
 **Phase 1 scope:** tokenization only. Deanonymization of LLM responses and vault persistence are planned for Phase 2-3. See `TODOS.md` for the roadmap.
 

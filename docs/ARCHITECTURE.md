@@ -18,8 +18,8 @@
 - **v0.11.0:** General Passthrough lane (`ZEMTIK_GENERAL_PASSTHROUGH`): non-data queries forwarded to OpenAI with receipt and `zemtik_meta` block; `ZEMTIK_GENERAL_MAX_RPM` rate limiter; `X-Zemtik-Engine` response header on all lanes
 - **v0.13.0:** MCP Attestation Proxy (`src/mcp_proxy.rs`, `src/mcp_auth.rs`, `src/mcp_tools.rs`): wraps every MCP tool call with ZK-backed attestation; stdio transport (`zemtik mcp`, Claude Desktop) and Streamable HTTP transport (`zemtik mcp-serve`, `:4001`); `McpAuditRecord` persistence in `mcp_audit.db`; `ZEMTIK_MCP_MODE=tunnel|governed`; built-in tools (`zemtik_fetch`, `zemtik_read_file`) with path/domain allowlists; dynamic tool registration via `mcp_tools.json`
 - **v0.13.2:** `evidence_version: 3`; `human_summary` and `checks_performed` fields on `EvidencePack`; `evidence_summary()` helper with shared const check names; AVG composite path gets distinct human_summary (two ZK circuits + attestation) and 11-item checks list (SUM circuit: intent + schema + sign + commit + prove + verify; COUNT circuit: sign + commit + prove + verify; division attestation)
-- **v0.14.0:** Anonymizer v1 (`src/anonymizer.rs`, `src/entity_hashes.rs`, `sidecar/`): PII tokenization pipeline; `VaultStore` (in-memory session vault + TTL eviction); `[[Z:xxxx:n]]` token format; gRPC sidecar (GLiNER + Presidio) with regex fallback; multimodal message support (content-parts arrays); `zemtik_meta.anonymizer` block on all proxy paths; `/v1/anonymize/preview` debug endpoint; `ZEMTIK_ANONYMIZER_*` env vars
 - **v0.13.4:** `evidence_json TEXT` column in receipts DB (migration v9) — full serialized `EvidencePack` stored per receipt; `/receipts` list page (100 most recent, "Showing N of M total" banner, engine badges, thousands-separated aggregates, links to detail); `/verify/{id}` rewritten to render from `evidence_json` (aggregate with thousands separator, table from `human_summary`, `human_summary` narrative, `checks_performed` ordered list, `attestation_hash`, collapsible JSON accordion, back-link to `/receipts`); falls back to ZK bundle for pre-v9 receipts; `count_receipts()` and `update_evidence_json()` added to `receipts.rs`
+- **v0.14.0:** Anonymizer v1 (`src/anonymizer.rs`, `src/entity_hashes.rs`, `sidecar/`): PII tokenization pipeline; `VaultStore` (in-memory session vault + TTL eviction); `[[Z:xxxx:n]]` token format; gRPC sidecar (GLiNER + Presidio) with regex fallback; multimodal message support (content-parts arrays); `zemtik_meta.anonymizer` block on all proxy paths; `/v1/anonymize/preview` debug endpoint; `ZEMTIK_ANONYMIZER_*` env vars
 
 ---
 
@@ -167,6 +167,11 @@ flowchart TD
 | `audit.rs` | JSON audit records under `audit/` |
 | `startup.rs` | Startup schema validation: Postgres column/row checks per table, ZK tools detection, `example_prompts` warnings, JSONL event log |
 | `tunnel.rs` | Tunnel mode: FORK 1 (transparent forward, streaming), FORK 2 (background ZK verification), `TunnelAuditRecord` persistence, diff computation |
+| `mcp_proxy.rs` | MCP attestation proxy: `run_mcp_stdio`, `run_mcp_serve`, `run_dry_run`; wraps every MCP tool call with ZK-backed attestation; `McpAuditRecord` persistence in `mcp_audit.db`; `list_mcp_audit_records`; SSRF guard (`ssrf_block_reason`, `ssrf_dns_guard`, `is_private_or_loopback`) |
+| `mcp_auth.rs` | MCP bearer key validation for `/mcp/audit` and `/mcp/summary`; hard startup error if `ZEMTIK_MCP_API_KEY` unset in `mcp-serve` mode |
+| `mcp_tools.rs` | Built-in MCP tool definitions (`zemtik_fetch`, `zemtik_read_file`); dynamic tool registration via `mcp_tools.json` (`ZEMTIK_MCP_TOOLS_PATH`); path and domain allowlist enforcement |
+| `anonymizer.rs` | PII tokenization pipeline: `anonymize_conversation()` (gRPC sidecar + regex fallback), `VaultStore` (`HashMap<session_id, (Vault, Instant)>` + TTL eviction), `count_dropped_tokens()`, `SYSTEM_PROMPT_INJECT` constant, `AuditMeta` for `zemtik_meta.anonymizer` block |
+| `entity_hashes.rs` | `ENTITY_HASHES` const table mapping entity-type strings to 4-char hex codes; `type_hash()` — canonical hash used in `[[Z:xxxx:n]]` token format; must stay in sync with `sidecar/entity_hashes.py` |
 
 Layered config order: defaults → `~/.zemtik/config.yaml` → env (`ZEMTIK_*`, `OPENAI_API_KEY`, `DB_BACKEND`, …) → CLI flags (`--port`, `--circuit-dir`).
 
