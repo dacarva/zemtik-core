@@ -247,20 +247,35 @@ pub async fn anonymize_conversation(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Extract user messages with their indices
-    let user_msgs: Vec<(usize, &str)> = messages
+    // Extract user messages with their indices. Track whether content was originally
+    // a parts array so we can write back correctly without destroying non-text parts.
+    // (msg_index, extracted_text, is_parts_array)
+    let user_msgs_owned: Vec<(usize, String, bool)> = messages
         .iter()
         .enumerate()
         .filter_map(|(i, m)| {
             let role = m.get("role")?.as_str()?;
-            if role == "user" {
-                let content = m.get("content")?.as_str()?;
-                Some((i, content))
-            } else {
-                None
+            if role != "user" {
+                return None;
             }
+            let content_val = m.get("content")?;
+            let (text, is_parts) = if let Some(s) = content_val.as_str() {
+                (s.to_owned(), false)
+            } else if let Some(parts) = content_val.as_array() {
+                // content-parts array: concatenate all text parts
+                let t = parts.iter()
+                    .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|p| p.get("text")?.as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                (t, true)
+            } else {
+                return None;
+            };
+            if text.is_empty() { None } else { Some((i, text, is_parts)) }
         })
         .collect();
+    let user_msgs: Vec<(usize, &str)> = user_msgs_owned.iter().map(|(i, s, _)| (*i, s.as_str())).collect();
 
     // No user messages — no-op
     if user_msgs.is_empty() {
@@ -296,10 +311,10 @@ pub async fn anonymize_conversation(
             Err(_elapsed) => Err(AnonymizerError::SidecarTimeout { ms: timeout_ms }),
             Ok(Err(status)) => {
                 // Map tonic status to appropriate error
-                if status.code() == tonic::Code::Unavailable {
-                    Err(AnonymizerError::SidecarUnreachable { addr: addr.to_owned() })
-                } else {
-                    Err(AnonymizerError::MalformedResponse { detail: status.message().to_owned() })
+                match status.code() {
+                    tonic::Code::Unavailable => Err(AnonymizerError::SidecarUnreachable { addr: addr.to_owned() }),
+                    tonic::Code::Unimplemented => Err(AnonymizerError::SidecarStarting),
+                    _ => Err(AnonymizerError::MalformedResponse { detail: status.code().description().to_owned() }),
                 }
             }
             Ok(Ok(response)) => Ok(response.into_inner()),
@@ -376,18 +391,44 @@ pub async fn anonymize_conversation(
     meta.entities_found = vault.len();
     meta.entity_types = vault.iter().map(|e| e.entity_type.clone()).collect::<std::collections::HashSet<_>>().into_iter().collect();
 
+    // Build lookup: message_index → (anonymized_text, is_parts_array)
+    // Using message index (not user-message counter) fixes P1 index mismatch when
+    // image-only user messages exist and get skipped in user_msgs_owned.
+    let anon_by_idx: std::collections::HashMap<usize, (String, bool)> = user_msgs_owned
+        .iter()
+        .zip(anonymized_contents.iter())
+        .map(|((msg_idx, _, is_parts), anon)| (*msg_idx, (anon.clone(), *is_parts)))
+        .collect();
+
     // Rebuild messages array with anonymized user content
     let mut result_messages = messages.to_vec();
-    let mut user_idx = 0;
-    for msg in result_messages.iter_mut() {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if role == "user" {
-            if let Some(anon_content) = anonymized_contents.get(user_idx) {
-                if let Some(obj) = msg.as_object_mut() {
-                    obj.insert("content".to_owned(), Value::String(anon_content.clone()));
+    for (msg_idx, msg) in result_messages.iter_mut().enumerate() {
+        if let Some((anon_text, is_parts)) = anon_by_idx.get(&msg_idx) {
+            if let Some(obj) = msg.as_object_mut() {
+                if *is_parts {
+                    // Preserve parts array structure: update text parts in-place,
+                    // keep non-text parts (images, audio) unchanged.
+                    if let Some(parts) = obj.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        let mut first_text_updated = false;
+                        for part in parts.iter_mut() {
+                            if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                if let Some(part_obj) = part.as_object_mut() {
+                                    if !first_text_updated {
+                                        // Write full anonymized text into first text part
+                                        part_obj.insert("text".to_owned(), Value::String(anon_text.clone()));
+                                        first_text_updated = true;
+                                    } else {
+                                        // Blank subsequent text parts (content already merged above)
+                                        part_obj.insert("text".to_owned(), Value::String(String::new()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    obj.insert("content".to_owned(), Value::String(anon_text.clone()));
                 }
             }
-            user_idx += 1;
         }
     }
 

@@ -485,6 +485,9 @@ async fn handle_chat_completions(
     let anonymizer_session_id = headers
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
+        .filter(|s| {
+            s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
         .map(|s| s.to_owned())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
@@ -746,8 +749,8 @@ async fn handle_chat_completions(
                         return Ok(streaming_not_supported_for_data_lane());
                     }
                     return match route {
-                        Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start, anonymizer_vault.clone()).await,
-                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), resolved, effective_client_id, total_start, anonymizer_vault.clone()).await,
+                        Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, resolved, effective_client_id, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await,
+                        Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), resolved, effective_client_id, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await,
                         Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                     };
                 }
@@ -800,8 +803,8 @@ async fn handle_chat_completions(
                                     return Ok(streaming_not_supported_for_data_lane());
                                 }
                                 return match route {
-                                    Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start, anonymizer_vault.clone()).await,
-                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), r, effective_client_id, total_start, anonymizer_vault.clone()).await,
+                                    Route::FastLane => handle_fast_lane(state, body, api_key, request_hash, prompt_hash, r, effective_client_id, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await,
+                                    Route::ZkSlowLane => handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt.clone(), r, effective_client_id, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await,
                                     Route::GeneralLane => unreachable!("decide_route never returns GeneralLane"),
                                 };
                             }
@@ -912,10 +915,10 @@ async fn handle_chat_completions(
 
     match route {
         Route::FastLane => {
-            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start, anonymizer_vault.clone()).await
+            handle_fast_lane(state, body, api_key, request_hash, prompt_hash, intent_result, effective_client_id, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await
         }
         Route::ZkSlowLane => {
-            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt, intent_result, effective_client_id, total_start, anonymizer_vault.clone()).await
+            handle_zk_slow_lane(state, body, headers, api_key, request_hash, prompt_hash, prompt, intent_result, effective_client_id, total_start, anonymizer_vault.clone(), anonymizer_meta.clone()).await
         }
         Route::GeneralLane => {
             // GeneralLane variant is never produced by decide_route (it only returns
@@ -1055,6 +1058,7 @@ async fn handle_fast_lane(
     effective_client_id: i64,
     total_start: Instant,
     vault: Option<Vault>,
+    anon_meta: Option<crate::anonymizer::AuditMeta>,
 ) -> Result<Response, ProxyError> {
     println!(
         "[FAST] FastLane route → table='{}' start={} end={}",
@@ -1178,6 +1182,7 @@ async fn handle_fast_lane(
         &intent_result,
         &ev,
         &vault,
+        &anon_meta,
     )
     .await
 }
@@ -1263,7 +1268,7 @@ async fn handle_general_lane(
     state: Arc<ProxyState>,
     body: Value,
     api_key: String,
-    _prompt: String,
+    prompt: String,
     prompt_hash: String,
     intent_err: Option<IntentError>,
     _total_start: Instant,
@@ -1460,13 +1465,20 @@ async fn handle_general_lane(
                     let raw = String::from_utf8_lossy(&resp_bytes);
                     crate::anonymizer::count_dropped_tokens(&raw, vlt)
                 }).unwrap_or(0);
-                zemtik_meta["anonymizer"] = serde_json::json!({
+                let mut anon_block = serde_json::json!({
                     "entities_found": meta.entities_found,
                     "entity_types": meta.entity_types,
                     "sidecar_used": meta.sidecar_used,
                     "sidecar_ms": meta.sidecar_ms,
                     "dropped_tokens": dropped,
                 });
+                // Only emit preview when sidecar ran — regex fallback skips PERSON/ORG/LOCATION,
+                // so partial-anonymized text could expose PII not in entity_types.
+                if state.config.anonymizer_debug_preview && meta.sidecar_used && !prompt.is_empty() {
+                    let preview: String = prompt.chars().take(200).collect();
+                    anon_block["outgoing_preview"] = serde_json::Value::String(preview);
+                }
+                zemtik_meta["anonymizer"] = anon_block;
             }
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("zemtik_meta".to_string(), zemtik_meta);
@@ -1538,6 +1550,7 @@ async fn build_fast_lane_response(
     intent: &IntentResult,
     ev: &EvidencePack,
     vault: &Option<Vault>,
+    anon_meta: &Option<crate::anonymizer::AuditMeta>,
 ) -> Result<Response, ProxyError> {
     let message = format!(
         "Here is a cryptographically attested financial summary:\n\n{}",
@@ -1588,6 +1601,25 @@ async fn build_fast_lane_response(
         }
     }
 
+    // Inject zemtik_meta.anonymizer stats into FastLane response
+    if let Some(ref meta) = anon_meta {
+        let dropped = vault.as_ref().map(|vlt| {
+            let raw = serde_json::to_string(&resp_body).unwrap_or_default();
+            crate::anonymizer::count_dropped_tokens(&raw, vlt)
+        }).unwrap_or(0);
+        if let Some(obj) = resp_body.as_object_mut() {
+            obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .map(|m| m.insert("anonymizer".to_string(), serde_json::json!({
+                    "entities_found": meta.entities_found,
+                    "entity_types": meta.entity_types,
+                    "sidecar_used": meta.sidecar_used,
+                    "sidecar_ms": meta.sidecar_ms,
+                    "dropped_tokens": dropped,
+                })));
+        }
+    }
+
     let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
@@ -1623,6 +1655,7 @@ async fn handle_zk_slow_lane(
     effective_client_id: i64,
     total_start: Instant,
     vault: Option<Vault>,
+    anon_meta: Option<crate::anonymizer::AuditMeta>,
 ) -> Result<Response, ProxyError> {
     println!("[ZK] ZkSlowLane route → starting ZK pipeline");
     let prompt_hash_field = compute_prompt_hash_field(&original_prompt);
@@ -1827,6 +1860,25 @@ async fn handle_zk_slow_lane(
                     }
                 }
             }
+        }
+    }
+
+    // Inject zemtik_meta.anonymizer stats into ZK SlowLane response
+    if let Some(ref meta) = anon_meta {
+        let dropped = vault.as_ref().map(|vlt| {
+            let raw = serde_json::to_string(&resp_body).unwrap_or_default();
+            crate::anonymizer::count_dropped_tokens(&raw, vlt)
+        }).unwrap_or(0);
+        if let Some(obj) = resp_body.as_object_mut() {
+            obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .map(|m| m.insert("anonymizer".to_string(), serde_json::json!({
+                    "entities_found": meta.entities_found,
+                    "entity_types": meta.entity_types,
+                    "sidecar_used": meta.sidecar_used,
+                    "sidecar_ms": meta.sidecar_ms,
+                    "dropped_tokens": dropped,
+                })));
         }
     }
 
@@ -2928,6 +2980,33 @@ async fn handle_anonymize_preview(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, ProxyError> {
+    // Validate Authorization header against the configured API key.
+    // The preview endpoint runs the sidecar and exposes PII-detection capabilities.
+    let provided_key = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let expected_key = state.config.openai_api_key.as_deref()
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().as_deref().map(|_| "").map(|_| "")).unwrap_or("");
+    let expected_key_owned = state.config.openai_api_key.clone()
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+    let authorized = match (provided_key, expected_key_owned.as_deref()) {
+        (Some(provided), Some(expected)) => provided == expected,
+        (Some(_), None) => true, // no key configured — allow any Bearer token
+        (None, _) => false,
+    };
+    if !authorized {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": {
+                    "type": "unauthorized",
+                    "message": "Invalid or missing Authorization header."
+                }
+            })),
+        ).into_response());
+    }
+
     if !state.config.anonymizer_enabled {
         return Ok((
             StatusCode::BAD_REQUEST,
