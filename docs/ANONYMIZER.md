@@ -86,6 +86,19 @@ Check `zemtik_meta.anonymizer` in the response body:
 }
 ```
 
+> **Single-turn vault:** The vault that maps tokens back to original values is cleared after each request via `scopeguard::defer!`. Tokens assigned in one turn are NOT available in the next — each request starts with a fresh vault. Multi-turn vault persistence is planned for Phase 2-3.
+
+> ⚠️ **Sidecar fallback indicator:** If `sidecar_used: false` appears in `zemtik_meta.anonymizer`, the sidecar was unreachable and only regex patterns were active. PERSON, ORG, and LOCATION detection requires the sidecar — structured IDs (emails, phone numbers, LATAM IDs) still work via the regex fallback, but named entity recognition is disabled.
+
+### Sidecar address — local dev vs Docker Compose
+
+| Deployment | `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` |
+|------------|----------------------------------|
+| Local dev (sidecar started manually with `docker run`) | `http://127.0.0.1:50051` |
+| Docker Compose (`--profile anonymizer`) | `http://sidecar:50051` (set automatically in `docker-compose.yml`) |
+
+When running both services inside Docker Compose, the proxy resolves `sidecar` via Docker's internal DNS. For local dev where only the sidecar container is running, use `127.0.0.1`.
+
 ### 4. Regex-only mode (no sidecar)
 
 For LATAM structured IDs without the sidecar:
@@ -98,6 +111,15 @@ cargo run -- proxy
 ```
 
 PERSON/ORG/LOCATION detection requires the sidecar. Regex mode only covers structured IDs (CO_CEDULA, BR_CPF, etc.).
+
+---
+
+## Architecture
+
+The anonymizer pipeline uses two detection backends:
+
+- **Sidecar (gRPC, port 50051):** Python service running GLiNER (`urchade/gliner_multi_pii-v1`) for named entity recognition plus Presidio `PatternRecognizer` plugins for structured PII. Handles `PERSON`, `ORG`, `LOCATION`, and supplementary Presidio patterns.
+- **Regex fast-path (Rust process):** Static patterns compiled at startup. Handles structured IDs (CO_CEDULA, BR_CPF, etc.), emails, phone numbers, and IBAN codes. Active even when the sidecar is down and `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true`.
 
 ---
 
@@ -119,21 +141,21 @@ These require the Python sidecar to be running.
 
 These are detected by the Rust process itself via regex patterns. Available even when the sidecar is down and `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true`.
 
-| Entity Type | Description | Pattern examples |
-|-------------|-------------|-----------------|
-| `CO_CEDULA` | Colombian national ID | `79.123.456`, `1023456789` |
-| `CO_NIT` | Colombian tax ID (NIT) | `900.123.456-7` |
-| `CL_RUT` | Chilean tax ID (RUT) | `12.345.678-9`, `12345678-K` |
-| `MX_CURP` | Mexican unique population registry code | `BADD110313HCMLNS09` |
-| `MX_RFC` | Mexican tax ID (RFC) | `XAXX010101000` |
-| `BR_CPF` | Brazilian individual tax ID | `000.000.000-00` |
-| `BR_CNPJ` | Brazilian company tax ID | `00.000.000/0000-00` |
-| `AR_DNI` | Argentine national ID | `12.345.678`, `12345678` |
-| `ES_NIF` | Spanish national ID / NIE | `12345678A`, `X1234567A` |
-| `PHONE_NUMBER` | Phone numbers (international or formatted) | `+57 300 123 4567`, `(601) 234-5678` |
-| `EMAIL_ADDRESS` | Email addresses | `user@example.com` |
-| `IBAN_CODE` | IBAN bank account numbers | `ES9121000418450200051332` |
-| `DATE_TIME` | Dates and times (regex-based; GLiNER may also detect) | `2024-01-15`, `15/01/2024` |
+| Entity Type | Description | Pattern examples | Coverage notes (Rust fallback) |
+|-------------|-------------|-----------------|-------------------------------|
+| `CO_CEDULA` | Colombian national ID | `79.123.456`, `CC 12345678` | Dotted format (`79.123.456`) OR keyword prefix (`Cédula`, `CC`, `C.C.`) required. Plain 8–10 digit runs without keyword context are not matched to avoid false positives on invoice numbers. Presidio patterns in the sidecar cover plain formats in context. |
+| `CO_NIT` | Colombian tax ID (NIT) | `900.123.456-7` | Full dotted-plus-check-digit format only. |
+| `CL_RUT` | Chilean tax ID (RUT) | `12.345.678-9`, `12345678-K` | Dotted or bare with hyphen separator. |
+| `MX_CURP` | Mexican unique population registry code | `BADD110313HCMLNS09` | Full 18-character alphanumeric structure. |
+| `MX_RFC` | Mexican tax ID (RFC) | `XAXX010101000` | 12–13 character alphanumeric structure. |
+| `BR_CPF` | Brazilian individual tax ID | `000.000.000-00` | Dotted format with hyphen only. |
+| `BR_CNPJ` | Brazilian company tax ID | `00.000.000/0000-00` | Full structured format only. |
+| `AR_DNI` | Argentine national ID | `12.345.678` | Dotted format only (`12.345.678`). Plain 8-digit runs are not matched — they overlap with phone numbers and Colombian cédulas. |
+| `ES_NIF` | Spanish national ID / NIE | `12345678A`, `X1234567A` | Letters I, O, U excluded per DNI/NIE spec. |
+| `PHONE_NUMBER` | Phone numbers (international or formatted) | `+57 300 123 4567`, `(601) 234-5678` | Requires international prefix (`+`) or separator characters; bare 10-digit runs are not matched. |
+| `EMAIL_ADDRESS` | Email addresses | `user@example.com` | Standard RFC 5321 structure. |
+| `IBAN_CODE` | IBAN bank account numbers | `ES9121000418450200051332` | 2-letter country code + 2 check digits + up to 30 alphanumerics. |
+| `DATE_TIME` | Dates and times (regex-based; GLiNER may also detect) | `2024-01-15`, `15/01/2024` | ISO 8601 and slash-separated formats. |
 
 ### Configuring entity types
 
@@ -176,6 +198,8 @@ Each detected entity is replaced with an opaque token:
 | `IBAN_CODE` | `3f21` | `[[Z:3f21:1]]` |
 | `DATE_TIME` | `322b` | `[[Z:322b:1]]` |
 
+> **Hash consistency:** Hashes are derived from `SHA256(entity_type)[0..2]` (first 2 bytes as hex). They are hardcoded in `src/entity_hashes.rs` and `sidecar/zemtik_entity_hashes.py` — both files must be updated together if a new entity type is added.
+
 Verify cross-layer hash parity (Rust ↔ Python):
 
 ```bash
@@ -209,6 +233,20 @@ cd sidecar && python -c "from entity_hashes import print_canonical_hashes; print
 2. The vault is stored in process memory under `std::sync::Mutex` — never written to disk in v1
 3. `scopeguard::defer!` ensures the vault is removed even if the LLM call panics
 4. Background TTL eviction runs every 60 seconds; vaults older than `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` (default 300s) are purged
+
+> **Single-turn limitation:** The vault persists for the duration of a single request only. Tokens from turn N are NOT reused in turn N+1 — each request starts with a fresh vault. This means multi-turn conversations where the LLM response in turn N contains tokens that need re-anonymization in turn N+1 are not covered in v1. Multi-turn vault persistence is planned for Phase 2-3.
+
+### System prompt injection
+
+The proxy automatically appends a system message to every request when the anonymizer is enabled:
+
+```
+This text contains privacy tokens in the format [[Z:xxxx:n]].
+Preserve every token exactly — do not expand, paraphrase, split, or omit them.
+Treat them as opaque identifiers.
+```
+
+This instructs the LLM to return tokens verbatim so deanonymization can succeed. If the LLM paraphrases or omits a token, `dropped_tokens` in `zemtik_meta.anonymizer` will be greater than 0. Consistently high `dropped_tokens` indicates the model is not following the instruction — consider switching to a stronger instruction-following model via `ZEMTIK_OPENAI_MODEL`.
 
 ### What "fail-closed" means
 
@@ -280,7 +318,7 @@ Mitigation: the system prompt injected by Zemtik instructs the model to treat to
 | Tool use / function calling | ⚠️ Partial | Anonymization runs on message content before routing. Tool call arguments and tool results are not anonymized. |
 | Structured outputs (`response_format: json_schema`) | ⚠️ Partial | Same as JSON mode — token restoration runs on raw output string. |
 | Multi-turn conversations | ✅ Supported | All user-role messages are anonymized in a single gRPC batch per request. Each turn creates a fresh vault. |
-| Tunnel mode | ✅ Skip (by design) | Anonymizer is disabled in tunnel mode — FORK 2 verification requires the original text to match. |
+| Tunnel mode | ✅ Skip (by design) | The anonymizer pipeline is skipped in tunnel mode — FORK 2 verification needs the original, unmodified text to diff against. The `/v1/anonymize/preview` endpoint remains available in tunnel mode for inspection purposes. |
 | FastLane (low sensitivity tables) | ✅ Supported | Deanonymization runs on the FastLane response body before envelope. |
 | ZK SlowLane (critical sensitivity tables) | ✅ Supported | Deanonymization runs on the ZK SlowLane response body before envelope. |
 | General Passthrough lane | ✅ Supported | Deanonymization and `zemtik_meta.anonymizer` block present on general lane responses. |
@@ -303,7 +341,9 @@ docker compose logs anonymizer --tail=50
 docker compose exec anonymizer grpc-health-probe -addr=localhost:50051
 ```
 
-GLiNER model download occurs at build time (`docker compose --build`). If the image was built without internet access, the model will not be present.
+**Healthcheck timing:** The sidecar container has a `start_period: 60s` before Docker begins counting healthcheck failures. During this window the container shows `starting` — this is expected. The sidecar server starts immediately but transitions from `NOT_SERVING` to `SERVING` only after GLiNER finishes loading (~10–30s). `healthy` means the gRPC health check returned `SERVING` — it is not sufficient for the container to be "running".
+
+If the sidecar is still `unhealthy` after 60s, the GLiNER model may be missing. GLiNER is baked into the image at build time (`docker compose --build`). If the image was built without internet access, the model will not be present.
 
 ### HTTP 503 — `SidecarUnreachable`
 

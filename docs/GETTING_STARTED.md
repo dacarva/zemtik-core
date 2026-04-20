@@ -226,6 +226,8 @@ The anonymizer runs a Python gRPC sidecar (GLiNER + Presidio) for entity recogni
 
 ```bash
 # Build the sidecar image (one-time)
+# Must be run from the repo root (zemtik-core/) — the Dockerfile does
+# COPY sidecar/ . which requires the repo root as the build context.
 docker build -f sidecar/Dockerfile -t zemtik-sidecar .
 
 # Run the sidecar (gRPC on port 50051)
@@ -278,6 +280,8 @@ The response includes a `zemtik_meta.anonymizer` block confirming what was found
 
 `dropped_tokens` counts tokens the deanonymizer could not resolve. A value of `0` means the response was fully deanonymized.
 
+> ⚠️ **Check `sidecar_used`:** If `sidecar_used: false` appears in the block, the sidecar was unreachable and only regex patterns were active. PERSON, ORG, and LOCATION detection requires the sidecar. Named entities in the prompt were not anonymized. Verify the sidecar is running with `docker ps` and that `ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://127.0.0.1:50051` is set correctly.
+
 ### Preview anonymization without calling OpenAI
 
 Use `POST /v1/anonymize/preview` to inspect what the anonymizer would produce for a given prompt, without running the ZK pipeline or calling OpenAI:
@@ -296,7 +300,7 @@ When `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true` and the sidecar is unreachable, the
 
 > **Phase 1 limitations**
 >
-> - Single-turn only: the vault is cleared after each request. Tokens assigned in turn 1 are not reused in turn 2.
+> - **Single-turn vault only.** The vault that maps tokens to original values is cleared after each request (removed via `scopeguard::defer!`). Tokens assigned in turn N are NOT available in turn N+1 — each request starts with a fresh vault. If you send a multi-turn conversation where the prior assistant message contains deanonymized text, that text will be re-anonymized on the next request.
 > - Multi-turn vault persistence and shared-session deanonymization are Phase 2-3 features.
 > - The sidecar is not in `docker-compose.yml`. You must start it manually as shown above.
 
