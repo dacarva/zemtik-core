@@ -108,8 +108,16 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                     logger.error("GLiNER prediction failed: %s", exc)
                     context.abort(grpc.StatusCode.INTERNAL, f"GLiNER prediction error: {exc}")
 
-            # Presidio for structured PII (IDs, phone, email, etc.)
-            presidio_types = [t for t in entity_types if t not in ("PERSON", "ORG", "LOCATION")]
+            # Record GLiNER span boundary before Presidio appends its results.
+            # Used for deduplication below.
+            gliner_end_idx = len(spans)
+
+            # Presidio for structured PII + ORG/LOCATION fallback.
+            # ORG and LOCATION are included here too so custom PatternRecognizers supplement
+            # GLiNER for street addresses and bank names it misses. Duplicates are deduplicated
+            # below by dropping Presidio spans that overlap existing GLiNER spans.
+            GLINER_ONLY = {"PERSON"}
+            presidio_types = [t for t in entity_types if t not in GLINER_ONLY]
             if presidio_types and self._presidio is None:
                 logger.error("Presidio model not ready — aborting request (fail-closed)")
                 context.abort(grpc.StatusCode.UNAVAILABLE, "Presidio analyzer not yet initialized")
@@ -119,7 +127,7 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                     results = self._presidio.analyze(
                         text=text,
                         entities=presidio_types,
-                        language="es",
+                        language="en",
                     )
                     for r in results:
                         byte_start = char_to_byte_offset(text, r.start)
@@ -133,6 +141,36 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                 except Exception as exc:
                     logger.error("Presidio analysis failed: %s", exc)
                     context.abort(grpc.StatusCode.INTERNAL, f"Presidio analysis error: {exc}")
+
+            # Deduplicate: reconcile GLiNER and Presidio spans.
+            # GLiNER results occupy spans[:gliner_end_idx]; Presidio results follow.
+            # For each Presidio span:
+            #   - No overlap with any GLiNER span → keep (Presidio adds new coverage).
+            #   - Fully contained within a GLiNER span → drop (GLiNER already covers it).
+            #   - Extends beyond a GLiNER span → expand the GLiNER span to the union so the
+            #     full entity is tokenized (e.g. GLiNER: "Carlos", Presidio: "Carlos García").
+            if gliner_end_idx:
+                gliner_spans = list(spans[:gliner_end_idx])
+                for ps in spans[gliner_end_idx:]:
+                    overlap_idx = next(
+                        (i for i, gs in enumerate(gliner_spans)
+                         if ps.byte_start < gs.byte_end and ps.byte_end > gs.byte_start),
+                        None,
+                    )
+                    if overlap_idx is None:
+                        gliner_spans.append(ps)
+                    else:
+                        gs = gliner_spans[overlap_idx]
+                        if ps.byte_start < gs.byte_start or ps.byte_end > gs.byte_end:
+                            # Presidio covers more text — expand GLiNER span to union.
+                            gliner_spans[overlap_idx] = anon_pb2.AuditSpan(
+                                byte_start=min(gs.byte_start, ps.byte_start),
+                                byte_end=max(gs.byte_end, ps.byte_end),
+                                entity_type=gs.entity_type,
+                                score=gs.score,
+                            )
+                        # else: Presidio fully contained — drop it.
+                spans = gliner_spans
 
             # Build anonymized content by applying spans (sorted by byte position, reverse)
             text_bytes = text.encode("utf-8")
@@ -180,8 +218,11 @@ def load_models():
 
     try:
         from presidio_analyzer import AnalyzerEngine
+        from recognizers import build_custom_recognizers
         presidio_analyzer = AnalyzerEngine()
-        logger.info("Presidio AnalyzerEngine ready")
+        for rec in build_custom_recognizers():
+            presidio_analyzer.registry.add_recognizer(rec)
+        logger.info("Presidio AnalyzerEngine ready (%d recognizers)", len(presidio_analyzer.registry.recognizers))
     except Exception as exc:
         raise RuntimeError(
             f"Presidio failed to load — cannot start sidecar in a safe state: {exc}"
@@ -207,7 +248,7 @@ def serve(port: int = DEFAULT_PORT) -> None:
 
     # Register anonymizer service with None models before start() to avoid UNIMPLEMENTED
     # errors on early requests. The servicer guards both model references with `is not None`
-    # checks, so requests arriving before models are ready return unmodified text.
+    # checks — requests arriving before models are ready abort with gRPC UNAVAILABLE (fail-closed).
     # Health stays NOT_SERVING until load_models() completes, so the proxy won't call
     # Anonymize until SERVING — but registering early eliminates the race.
     servicer = AnonymizerServicer(None, None)

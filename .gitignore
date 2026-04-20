@@ -29,6 +29,7 @@ audit/
 # Debugging
 *.log
 debug/
+__pycache__/
 
 # Local QA and scratch files (not committed)
 tmp/

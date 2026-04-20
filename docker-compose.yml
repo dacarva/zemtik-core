@@ -75,6 +75,8 @@ services:
       # The sidecar address uses the Docker Compose service name as the hostname.
       - ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://sidecar:50051
       - ZEMTIK_ANONYMIZER_ENABLED=${ZEMTIK_ANONYMIZER_ENABLED:-false}
+      - ZEMTIK_ANONYMIZER_ENTITY_TYPES=${ZEMTIK_ANONYMIZER_ENTITY_TYPES:-PERSON,ORG,LOCATION}
+      - ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=${ZEMTIK_ANONYMIZER_DEBUG_PREVIEW:-false}
       # OpenAI model forwarded to api.openai.com. gpt-5.4-nano is the current default.
       - ZEMTIK_OPENAI_MODEL=${ZEMTIK_OPENAI_MODEL:-gpt-5.4-nano}
       # Client ID used for DB filtering (default demo dataset uses 123).
