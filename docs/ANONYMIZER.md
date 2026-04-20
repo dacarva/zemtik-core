@@ -171,7 +171,7 @@ export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_CEDULA,CO_NIT,CL_R
 
 Each detected entity is replaced with an opaque token:
 
-```
+```text
 [[Z:{type_hash}:{counter}]]
 ```
 
@@ -258,7 +258,7 @@ When `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false` and the sidecar is unreachable:
 
 ### Limitations
 
-See the [Compatibility matrix](#compatibility-matrix) below.
+See the [Compatibility matrix](#compatibility-matrix-known-limitations) below.
 
 ---
 
@@ -268,7 +268,7 @@ Every response from the proxy includes a `zemtik_meta` object when anonymizer is
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `entities_found` | integer | Total number of entity spans detected and tokenized across all user messages |
+| `entities_found` | integer | Total number of entity spans detected and tokenized across all messages (user and assistant) |
 | `entity_types` | string[] | Deduplicated list of entity types detected (e.g. `["PERSON", "ORG"]`) |
 | `sidecar_used` | boolean | `true` if the gRPC sidecar ran; `false` if regex-only fallback was used |
 | `sidecar_ms` | integer | Wall-clock milliseconds for the gRPC anonymization call. `0` if sidecar was not used. |

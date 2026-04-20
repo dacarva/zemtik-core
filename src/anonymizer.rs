@@ -112,7 +112,7 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         // Colombian cédula: dotted format OR keyword-prefixed plain digits.
         // "Cédula 12345678", "CC 123456789", "C.C. 12345678" → tokenized.
         // Plain 8-10 digit runs without keyword context are NOT matched (false-positive risk).
-        ("CO_CEDULA", Regex::new(r"(?i)(?:c[eé]dula|c\.?c\.?)\s+\d{6,10}|\b\d{1,3}(?:\.\d{3}){1,2}\b").unwrap()),
+        ("CO_CEDULA", Regex::new(r"(?i)(?:c[eé]dula|c\.?c\.?)\s+\d{6,10}|\b\d{1,3}(?:\.\d{3}){2,3}\b").unwrap()),
         // Colombian NIT: 900.123.456-7
         ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),
         // Chilean RUT: 12.345.678-9 or 12345678-9

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Regex patterns extracted from recognizers.py — must stay in sync.
 PATTERNS = {
-    "CO_CEDULA_DOTTED_LONG": r"\b\d{1,3}\.\d{3}\.\d{3}\b",
+    "CO_CEDULA_DOTTED_LONG": r"\b\d{1,3}(?:\.\d{3}){2,3}\b",
     "CO_CEDULA_PLAIN": r"\b[1-9]\d{6,9}\b",
     "CO_NIT_DOTTED": r"\b\d{3}\.\d{3}\.\d{3}-\d\b",
     "CO_NIT_PLAIN": r"\b\d{9}-\d\b",
@@ -38,10 +38,10 @@ PATTERNS = {
         r"\bAv(?:enida|\.)?\s+[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_STREET": (
-        r"\bCalle\s+\d+\s*#\s*\d+[-–]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCalle\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_CARRERA": (
-        r"\bCarrera\s+\d+\s*#\s*\d+[-–]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCarrera\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "DATE_ES_TEXT": (
         r"\b\d{1,2} de (?:enero|febrero|marzo|abril|mayo|junio|julio|agosto"
@@ -52,16 +52,16 @@ PATTERNS = {
 
 
 def _match(pattern_key: str, text: str) -> bool:
-    return bool(re.search(PATTERNS[pattern_key], text))
+    return bool(re.fullmatch(PATTERNS[pattern_key], text))
 
 
 # ─── CO_CEDULA ────────────────────────────────────────────────────────────────
 
 def test_co_cedula_dotted_matches():
     assert _match("CO_CEDULA_DOTTED_LONG", "79.123.456")
-    # 3-group format (1+3+3 digits) — the pattern \b\d{1,3}\.\d{3}\.\d{3}\b
-    # matches exactly 3 groups; use a clear 3-group example here.
     assert _match("CO_CEDULA_DOTTED_LONG", "1.023.456")
+    # 10-digit cédula (3 dot groups)
+    assert _match("CO_CEDULA_DOTTED_LONG", "1.023.456.789")
 
 
 def test_co_cedula_dotted_no_match_on_plain():

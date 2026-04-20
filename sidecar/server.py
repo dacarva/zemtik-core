@@ -170,8 +170,8 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                         merged = anon_pb2.AuditSpan(
                             byte_start=union_start,
                             byte_end=union_end,
-                            entity_type=first.entity_type,
-                            score=first.score,
+                            entity_type=ps.entity_type,
+                            score=ps.score,
                         )
                         # Replace the first overlapping span with the merged one; remove the rest.
                         gliner_spans[overlap_indices[0]] = merged

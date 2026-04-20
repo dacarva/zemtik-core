@@ -136,6 +136,18 @@ fn regex_anonymize_email() {
 }
 
 #[test]
+fn regex_anonymize_colombian_cedula_10digit_dotted() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    // 10-digit cédula in dotted format (3 dot groups)
+    let text = "Cédula 1.023.456.789 del titular.";
+    let result = regex_anonymize(text, &["CO_CEDULA"], &mut vault, &mut counter);
+    assert!(!result.contains("1.023.456.789"), "10-digit dotted cédula must be tokenized");
+    assert!(result.contains("[[Z:"), "must contain token");
+    assert_eq!(vault[0].entity_type, "CO_CEDULA");
+}
+
+#[test]
 fn regex_anonymize_unknown_type_skipped() {
     let mut vault: Vault = Vec::new();
     let mut counter = 0usize;

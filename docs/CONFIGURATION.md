@@ -269,7 +269,7 @@ PII anonymization pipeline. Detects and tokenizes sensitive entities before forw
 | `PHONE_NUMBER` | Regex | Phone numbers (international or formatted) | `+57 300 123 4567` |
 | `EMAIL_ADDRESS` | Regex | Email addresses | `user@example.com` |
 | `IBAN_CODE` | Regex | IBAN bank account numbers | `ES9121000418450200051332` |
-| `DATE_TIME` | Regex | Dates and times | `2024-01-15`, `15/01/2024` |
+| `DATE_TIME` | Sidecar (Presidio) | Dates and times (requires sidecar) | `2024-01-15`, `15/01/2024`, `1 de marzo de 2024` |
 
 Sidecar-detected types (`PERSON`, `ORG`, `LOCATION`) require the Python sidecar to be running. Regex types are processed in the Rust process and are available even in fallback mode.
 
