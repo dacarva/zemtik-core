@@ -29,6 +29,14 @@ audit/
 # Debugging
 *.log
 debug/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+.venv/
+build/
+dist/
 
 # Local QA and scratch files (not committed)
 tmp/

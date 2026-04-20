@@ -109,24 +109,27 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("EMAIL_ADDRESS", Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap()),
         // IBAN — very specific structure
         ("IBAN_CODE", Regex::new(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b").unwrap()),
-        // Colombian cédula: 79.123.456 (dotted) or 8-10 contiguous digits (minimum 8 to avoid false positives)
-        ("CO_CEDULA", Regex::new(r"\b\d{1,3}(?:\.\d{3}){1,2}\b|\b\d{8,10}\b").unwrap()),
+        // Colombian cédula: dotted format OR keyword-prefixed plain digits.
+        // "Cédula 12345678", "CC 123456789", "C.C. 12345678" → tokenized.
+        // Plain 8-10 digit runs without keyword context are NOT matched (false-positive risk).
+        ("CO_CEDULA", Regex::new(r"(?i)(?:c[eé]dula|c\.?c\.?)\s+\d{6,10}|\b\d{1,3}(?:\.\d{3}){2,3}\b").unwrap()),
         // Colombian NIT: 900.123.456-7
         ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),
         // Chilean RUT: 12.345.678-9 or 12345678-9
         ("CL_RUT", Regex::new(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b").unwrap()),
-        // Mexican CURP: 18 chars alphanumeric
-        ("MX_CURP", Regex::new(r"\b[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]{2}\b").unwrap()),
+        // Mexican CURP: 18 chars — last char is always the numeric verification digit
+        ("MX_CURP", Regex::new(r"\b[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d\b").unwrap()),
         // Mexican RFC: 12-13 chars
         ("MX_RFC", Regex::new(r"\b[A-Z]{3,4}\d{6}[A-Z0-9]{3}\b").unwrap()),
         // Brazilian CPF: 000.000.000-00
         ("BR_CPF", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b").unwrap()),
         // Brazilian CNPJ: 00.000.000/0000-00
         ("BR_CNPJ", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b").unwrap()),
-        // Argentine DNI: 12.345.678 (dotted) or exactly 8 contiguous digits
-        ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b|\b\d{8}\b").unwrap()),
-        // Spanish NIF: 12345678A or X1234567A (NIE)
-        ("ES_NIF", Regex::new(r"\b\d{8}[A-Z]\b|\b[XYZ]\d{7}[A-Z]\b").unwrap()),
+        // Argentine DNI: 12.345.678 (dotted only — plain 8-digit runs overlap with phone
+        // numbers, codes, and Colombian cédulas, producing false positives)
+        ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b").unwrap()),
+        // Spanish NIF: 12345678A or X1234567A (NIE) — I, O, U are excluded per spec
+        ("ES_NIF", Regex::new(r"\b\d{8}[A-HJ-NP-TV-Z]\b|\b[XYZ]\d{7}[A-HJ-NP-TV-Z]\b").unwrap()),
         // Phone: requires international prefix (+\d) OR separators (spaces/dashes/parens)
         // AND at least 10 digit characters total, to avoid matching arbitrary digit runs.
         ("PHONE_NUMBER", Regex::new(r"(?:\+\d[\d\s\-().]{8,18}|\(?\d{2,4}\)?[\s\-]\d{3,4}[\s\-]\d{3,4}(?:[\s\-]\d{2,4})?)").unwrap()),
@@ -254,15 +257,16 @@ pub async fn anonymize_conversation(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Extract user messages with their indices. Track whether content was originally
-    // a parts array so we can write back correctly without destroying non-text parts.
+    // Extract user and assistant messages. Assistant turns must be re-anonymized so that
+    // deanonymized PII in prior assistant turns does not flow to OpenAI in multi-turn chats.
+    // System and tool messages are proxy-generated and never contain PII.
     // (msg_index, extracted_text, is_parts_array)
     let user_msgs_owned: Vec<(usize, String, bool)> = messages
         .iter()
         .enumerate()
         .filter_map(|(i, m)| {
             let role = m.get("role")?.as_str()?;
-            if role != "user" {
+            if !matches!(role, "user" | "assistant") {
                 return None;
             }
             let content_val = m.get("content")?;
@@ -366,7 +370,11 @@ pub async fn anonymize_conversation(
                     };
                     let hash = match type_hash(&span.entity_type) {
                         Some(h) => h,
-                        None => continue,
+                        // Unknown type: use fallback so PII is always tokenized, not silently skipped.
+                        None => {
+                            eprintln!("WARN [zemtik.anonymizer] Unknown entity type '{}' from sidecar — tokenizing with fallback hash '0000'", &span.entity_type);
+                            "0000"
+                        }
                     };
                     // Assign counter — same entity gets same counter
                     let existing = vault.iter().find(|e| e.original == original_text && e.entity_type == span.entity_type);

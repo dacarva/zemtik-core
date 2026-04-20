@@ -136,6 +136,18 @@ fn regex_anonymize_email() {
 }
 
 #[test]
+fn regex_anonymize_colombian_cedula_10digit_dotted() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    // 10-digit cédula in dotted format (3 dot groups)
+    let text = "Cédula 1.023.456.789 del titular.";
+    let result = regex_anonymize(text, &["CO_CEDULA"], &mut vault, &mut counter);
+    assert!(!result.contains("1.023.456.789"), "10-digit dotted cédula must be tokenized");
+    assert!(result.contains("[[Z:"), "must contain token");
+    assert_eq!(vault[0].entity_type, "CO_CEDULA");
+}
+
+#[test]
 fn regex_anonymize_unknown_type_skipped() {
     let mut vault: Vault = Vec::new();
     let mut counter = 0usize;
@@ -157,6 +169,120 @@ fn regex_anonymize_same_entity_same_token() {
     let count = result.matches(tok.as_str()).count();
     assert_eq!(count, 2, "same entity must produce same token (counter not incremented twice)");
     assert_eq!(vault.len(), 1, "one vault entry for identical entity");
+}
+
+// ─── regex_anonymize: additional LatAm entity types ─────────────────────────
+
+#[test]
+fn regex_anonymize_co_nit() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "NIT de la empresa: 900.123.456-7.";
+    let result = regex_anonymize(text, &["CO_NIT"], &mut vault, &mut counter);
+    assert!(!result.contains("900.123.456-7"), "NIT must be tokenized");
+    assert_eq!(vault[0].entity_type, "CO_NIT");
+}
+
+#[test]
+fn regex_anonymize_cl_rut() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "RUT del contribuyente: 12.345.678-9.";
+    let result = regex_anonymize(text, &["CL_RUT"], &mut vault, &mut counter);
+    assert!(!result.contains("12.345.678-9"), "RUT must be tokenized");
+    assert_eq!(vault[0].entity_type, "CL_RUT");
+}
+
+#[test]
+fn regex_anonymize_br_cpf() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "CPF do titular: 123.456.789-09.";
+    let result = regex_anonymize(text, &["BR_CPF"], &mut vault, &mut counter);
+    assert!(!result.contains("123.456.789-09"), "CPF must be tokenized");
+    assert_eq!(vault[0].entity_type, "BR_CPF");
+}
+
+#[test]
+fn regex_anonymize_br_cnpj() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "CNPJ: 12.345.678/0001-90.";
+    let result = regex_anonymize(text, &["BR_CNPJ"], &mut vault, &mut counter);
+    assert!(!result.contains("12.345.678/0001-90"), "CNPJ must be tokenized");
+    assert_eq!(vault[0].entity_type, "BR_CNPJ");
+}
+
+#[test]
+fn regex_anonymize_ar_dni() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "DNI del firmante: 12.345.678.";
+    let result = regex_anonymize(text, &["AR_DNI"], &mut vault, &mut counter);
+    assert!(!result.contains("12.345.678"), "DNI must be tokenized");
+    assert_eq!(vault[0].entity_type, "AR_DNI");
+}
+
+#[test]
+fn regex_anonymize_es_nif() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "NIF del representante: 12345678A.";
+    let result = regex_anonymize(text, &["ES_NIF"], &mut vault, &mut counter);
+    assert!(!result.contains("12345678A"), "NIF must be tokenized");
+    assert_eq!(vault[0].entity_type, "ES_NIF");
+}
+
+#[test]
+fn regex_anonymize_mx_curp() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "CURP: BADD110313HCMLNS09.";
+    let result = regex_anonymize(text, &["MX_CURP"], &mut vault, &mut counter);
+    assert!(!result.contains("BADD110313HCMLNS09"), "CURP must be tokenized");
+    assert_eq!(vault[0].entity_type, "MX_CURP");
+}
+
+#[test]
+fn regex_anonymize_mx_rfc() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "RFC del contribuyente: XAXX010101000.";
+    let result = regex_anonymize(text, &["MX_RFC"], &mut vault, &mut counter);
+    assert!(!result.contains("XAXX010101000"), "RFC must be tokenized");
+    assert_eq!(vault[0].entity_type, "MX_RFC");
+}
+
+#[test]
+fn regex_anonymize_phone_number() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "Llamar al +57 300 123 4567.";
+    let result = regex_anonymize(text, &["PHONE_NUMBER"], &mut vault, &mut counter);
+    assert!(!result.contains("+57 300 123 4567"), "phone must be tokenized");
+    assert_eq!(vault[0].entity_type, "PHONE_NUMBER");
+}
+
+#[test]
+fn regex_anonymize_iban_code() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "IBAN de la cuenta: CO1289354987654321098765.";
+    let result = regex_anonymize(text, &["IBAN_CODE"], &mut vault, &mut counter);
+    assert!(!result.contains("CO1289354987654321098765"), "IBAN must be tokenized");
+    assert_eq!(vault[0].entity_type, "IBAN_CODE");
+}
+
+#[test]
+fn regex_anonymize_date_time_is_sidecar_only() {
+    // DATE_TIME is not in the Rust regex fallback — it's handled by Presidio in the sidecar.
+    // Verify that requesting DATE_TIME via regex_anonymize is a no-op.
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "Firmado el 1 de marzo de 2024 en Bogotá.";
+    let result = regex_anonymize(text, &["DATE_TIME"], &mut vault, &mut counter);
+    assert_eq!(result, text, "DATE_TIME has no Rust regex — text must pass through unchanged");
+    assert!(vault.is_empty());
 }
 
 // ─── regex_anonymize: already-tokenized skip guard ───────────────────────────

@@ -236,6 +236,47 @@ See [docs/MCP_ATTESTATION.md](MCP_ATTESTATION.md) for the full MCP integration g
 
 ---
 
+### Anonymizer (v0.14.0+)
+
+PII anonymization pipeline. Detects and tokenizes sensitive entities before forwarding requests to OpenAI. See [docs/ANONYMIZER.md](ANONYMIZER.md) for the full guide.
+
+| Variable | Default | Values | Description |
+|----------|---------|--------|-------------|
+| `ZEMTIK_ANONYMIZER_ENABLED` | `false` | `true`, `false` | Master switch. Anonymizer is a no-op when disabled. |
+| `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` | `http://127.0.0.1:50051` | URI | gRPC address of the Python sidecar. Set to `http://sidecar:50051` when using Docker Compose. Deprecated alias `ZEMTIK_ANONYMIZER_SIDECAR_URL` accepted with a warning. |
+| `ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS` | `1500` | integer >= 1 | gRPC call timeout in milliseconds. Increase for long documents (>2000 tokens). |
+| `ZEMTIK_ANONYMIZER_FALLBACK_REGEX` | `true` | `true`, `false` | When `true`, use regex-only detection if the sidecar is unreachable. PERSON/ORG/LOCATION will not be detected in fallback mode — only structured IDs (CO_CEDULA, BR_CPF, etc.). When `false`, sidecar failure returns HTTP 503 (fail-closed). **For production deployments where PERSON/ORG/LOCATION detection is required, set this to `false` to fail-closed if the sidecar becomes unavailable.** |
+| `ZEMTIK_ANONYMIZER_ENTITY_TYPES` | `PERSON,ORG,LOCATION` | Comma-separated list | Entity types sent to the sidecar for detection. See the entity types table below. |
+| `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW` | `false` | `true`, `false` | When `true`, emits a 200-character preview of the sanitized outgoing prompt in `zemtik_meta.anonymizer.outgoing_preview`. **Disable in production** — the preview contains no PII but reveals the token structure. |
+| `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` | `300` | positive integer | Seconds before a session vault is evicted from memory by the background TTL eviction task (runs every 60s). |
+
+#### Supported entity types
+
+| Entity Type | Detection backend | Description | Example |
+|-------------|-------------------|-------------|---------|
+| `PERSON` | Sidecar (GLiNER) | Personal names | `Carlos García`, `María Pérez` |
+| `ORG` | Sidecar (GLiNER) | Organizations and companies | `ACME S.A.S.`, `Banco de Bogotá` |
+| `LOCATION` | Sidecar (GLiNER) | Locations, addresses, places | `Bogotá D.C.`, `Calle 72 # 10-34` |
+| `CO_CEDULA` | Regex | Colombian national ID | `79.123.456`, `CC 12345678`, `Cédula 1023456789` (plain digits without keyword prefix not matched) |
+| `CO_NIT` | Regex | Colombian tax ID (NIT) | `900.123.456-7` |
+| `CL_RUT` | Regex | Chilean tax ID (RUT) | `12.345.678-9`, `12345678-K` |
+| `MX_CURP` | Regex | Mexican CURP | `BADD110313HCMLNS09` |
+| `MX_RFC` | Regex | Mexican RFC | `XAXX010101000` |
+| `BR_CPF` | Regex | Brazilian individual tax ID | `000.000.000-00` |
+| `BR_CNPJ` | Regex | Brazilian company tax ID | `00.000.000/0000-00` |
+| `AR_DNI` | Regex | Argentine national ID | `12.345.678` (dotted only; plain 8-digit runs not matched) |
+| `ES_NIF` | Regex | Spanish NIF / NIE | `12345678A`, `X1234567A` |
+| `PHONE_NUMBER` | Regex | Phone numbers (international or formatted) | `+57 300 123 4567` |
+| `EMAIL_ADDRESS` | Regex | Email addresses | `user@example.com` |
+| `IBAN_CODE` | Regex | IBAN bank account numbers | `ES9121000418450200051332` |
+| `DATE_TIME` | Sidecar (Presidio) | Dates and times (requires sidecar) | `2024-01-15`, `15/01/2024`, `1 de marzo de 2024` |
+
+Sidecar-detected types (`PERSON`, `ORG`, `LOCATION`) require the Python sidecar to be running. Regex types are processed in the Rust process and are available even in fallback mode.
+
+**Production recommendation:** Start with `ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION"` (default). Add LATAM structured IDs as needed for your jurisdiction. Include all 16 types only if your documents contain all categories — unnecessary types add detection overhead.
+
+---
+
 ### Startup validation (v0.9.1+)
 
 | Variable | Default | Values | Description |
