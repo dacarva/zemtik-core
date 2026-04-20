@@ -9,13 +9,17 @@ All notable changes to this project will be documented in this file.
 - **`sidecar/tests/test_recognizer_patterns.py`** — 39 pure-regex unit tests for all custom PatternRecognizer patterns. Runs without GLiNER or Presidio models (import-free regex validation) in any Python 3.11 environment.
 - **11 new Rust unit tests** (`tests/test_anonymizer.rs`) covering regex_anonymize for CO_NIT, CL_RUT, BR_CPF, BR_CNPJ, AR_DNI, ES_NIF, MX_CURP, MX_RFC, PHONE_NUMBER, IBAN_CODE, and a sidecar-only assertion for DATE_TIME.
 
-### Fixed
+### Fixed (security)
+
 - **Multi-turn assistant PII bypass** — assistant-role messages are now included in the anonymizer batch alongside user messages. Previously, deanonymized PII in prior assistant turns would pass to OpenAI unfiltered in subsequent multi-turn requests.
+- **Unknown entity type fallback** — when the sidecar returns an entity type not in the hash table, the Rust proxy previously silently skipped tokenization (PII would reach the LLM). Now tokenizes with fallback hash `0000` and logs a warning.
+
+### Fixed
+
 - **GLiNER span dedup width bug** — when a GLiNER span partially covered an entity (e.g. "Carlos" of "Carlos García"), the deduplication dropped the larger Presidio span instead of expanding the GLiNER span to the union. Fixed: overlapping Presidio spans that extend beyond a GLiNER span now expand the GLiNER span to the union; Presidio spans fully contained within a GLiNER span are dropped.
 - **MX_CURP Rust/Python regex divergence** — Rust fallback had `[A-Z0-9]{2}` for the last two chars; the spec and Python pattern require `[A-Z0-9]\d` (verification digit must be numeric). Aligned.
 - **ES_NIF invalid letter acceptance** — Rust fallback accepted I, O, U which are excluded from valid Spanish NIFs and NIEs. Fixed to `[A-HJ-NP-TV-Z]`.
 - **CO_CEDULA / AR_DNI false positives** — plain 8–10 digit and plain 8-digit patterns in the Rust fallback matched invoice numbers, phone digits, and other non-PII runs. AR_DNI restricted to dotted format only (`12.345.678`). CO_CEDULA now matches dotted format OR keyword-prefixed plain digits (`Cédula 12345678`, `CC 123456789`, `C.C. 12345678`), eliminating false positives while preserving coverage for the most common text representations. The sidecar's Presidio `CO_CEDULA_PLAIN` pattern is unaffected.
-- **Unknown entity type fallback** — when the sidecar returns an entity type not in the hash table, the Rust proxy previously silently skipped tokenization (PII would reach the LLM). Now tokenizes with fallback hash `0000` and logs a warning.
 
 ## [0.14.0] - 2026-04-17
 

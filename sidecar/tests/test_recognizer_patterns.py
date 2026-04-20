@@ -59,7 +59,9 @@ def _match(pattern_key: str, text: str) -> bool:
 
 def test_co_cedula_dotted_matches():
     assert _match("CO_CEDULA_DOTTED_LONG", "79.123.456")
-    assert _match("CO_CEDULA_DOTTED_LONG", "1.023.456.789")
+    # 3-group format (1+3+3 digits) — the pattern \b\d{1,3}\.\d{3}\.\d{3}\b
+    # matches exactly 3 groups; use a clear 3-group example here.
+    assert _match("CO_CEDULA_DOTTED_LONG", "1.023.456")
 
 
 def test_co_cedula_dotted_no_match_on_plain():

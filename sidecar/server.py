@@ -152,24 +152,31 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
             if gliner_end_idx:
                 gliner_spans = list(spans[:gliner_end_idx])
                 for ps in spans[gliner_end_idx:]:
-                    overlap_idx = next(
-                        (i for i, gs in enumerate(gliner_spans)
-                         if ps.byte_start < gs.byte_end and ps.byte_end > gs.byte_start),
-                        None,
-                    )
-                    if overlap_idx is None:
+                    # Collect ALL GLiNER spans that overlap this Presidio span — a Presidio
+                    # span can bridge two adjacent GLiNER spans (e.g. "Carlos" + "García"
+                    # both detected separately by GLiNER, Presidio sees "Carlos García").
+                    overlap_indices = [
+                        i for i, gs in enumerate(gliner_spans)
+                        if ps.byte_start < gs.byte_end and ps.byte_end > gs.byte_start
+                    ]
+                    if not overlap_indices:
                         gliner_spans.append(ps)
                     else:
-                        gs = gliner_spans[overlap_idx]
-                        if ps.byte_start < gs.byte_start or ps.byte_end > gs.byte_end:
-                            # Presidio covers more text — expand GLiNER span to union.
-                            gliner_spans[overlap_idx] = anon_pb2.AuditSpan(
-                                byte_start=min(gs.byte_start, ps.byte_start),
-                                byte_end=max(gs.byte_end, ps.byte_end),
-                                entity_type=gs.entity_type,
-                                score=gs.score,
-                            )
-                        # else: Presidio fully contained — drop it.
+                        # Compute union over all overlapping GLiNER spans + this Presidio span.
+                        union_start = min(ps.byte_start, *(gliner_spans[i].byte_start for i in overlap_indices))
+                        union_end = max(ps.byte_end, *(gliner_spans[i].byte_end for i in overlap_indices))
+                        # Keep entity_type/score from the first (leftmost) GLiNER span.
+                        first = gliner_spans[overlap_indices[0]]
+                        merged = anon_pb2.AuditSpan(
+                            byte_start=union_start,
+                            byte_end=union_end,
+                            entity_type=first.entity_type,
+                            score=first.score,
+                        )
+                        # Replace the first overlapping span with the merged one; remove the rest.
+                        gliner_spans[overlap_indices[0]] = merged
+                        for i in reversed(overlap_indices[1:]):
+                            del gliner_spans[i]
                 spans = gliner_spans
 
             # Build anonymized content by applying spans (sorted by byte position, reverse)
