@@ -41,13 +41,16 @@ Expected response (with default `ZEMTIK_ANONYMIZER_ENTITY_TYPES=PERSON,ORG,LOCAT
   "anonymized_messages": [
     {"role": "user", "content": "El contrato de la empresa [[Z:0e67:1]] fue firmado por [[Z:e47f:2]], titular de la cédula 79.123.456"}
   ],
-  "tokens": ["[[Z:0e67:1]]", "[[Z:e47f:2]]"],
+  "tokens":    ["[[Z:0e67:1]]", "[[Z:e47f:2]]"],
+  "originals": ["ACME", "Carlos García"],
   "entities_found": 2,
   "entity_types": ["ORG", "PERSON"],
   "sidecar_used": true,
   "sidecar_ms": 42
 }
 ```
+
+`tokens`, `originals`, and `entity_types` are parallel arrays with identical length and ordering — consumers can zip them to reconstruct `(original, token, type)` triples.
 
 > **Note:** With the default entity types, `79.123.456` (Colombian cédula) is not anonymized.
 > To include LATAM structured IDs, add them to `ZEMTIK_ANONYMIZER_ENTITY_TYPES`:
