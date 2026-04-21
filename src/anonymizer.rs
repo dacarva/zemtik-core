@@ -109,6 +109,11 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("EMAIL_ADDRESS", Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap()),
         // IBAN — very specific structure
         ("IBAN_CODE", Regex::new(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b").unwrap()),
+        // LatAm currency amounts: $120.000.000 COP, $1.500.000 USD, $60.000.000
+        // Must appear BEFORE CO_CEDULA and AR_DNI: sequential replacement means
+        // "$120.000.000" is tokenized here first so the dotted-digit patterns below
+        // never see the digit run. (Rust regex crate has no lookbehind support.)
+        ("MONEY", Regex::new(r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
         // Colombian cédula: dotted format OR keyword-prefixed plain digits.
         // "Cédula 12345678", "CC 123456789", "C.C. 12345678" → tokenized.
         // Plain 8-10 digit runs without keyword context are NOT matched (false-positive risk).
@@ -125,10 +130,6 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("BR_CPF", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b").unwrap()),
         // Brazilian CNPJ: 00.000.000/0000-00
         ("BR_CNPJ", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b").unwrap()),
-        // LatAm currency amounts: $120.000.000 COP, $1.500.000 USD, $60.000.000
-        // Must appear BEFORE AR_DNI and CO_CEDULA: sequential replacement means
-        // "$12.500.000" is tokenized here first, so AR_DNI never sees the digits.
-        ("MONEY", Regex::new(r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
         // Argentine DNI: 12.345.678 (dotted only — plain 8-digit runs overlap with phone
         // numbers, codes, and Colombian cédulas, producing false positives).
         ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b").unwrap()),
