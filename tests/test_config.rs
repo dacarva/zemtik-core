@@ -581,3 +581,14 @@ fn anonymizer_debug_preview_enabled_via_env() {
     let config = load_from_sources(None, &env(&[("ZEMTIK_ANONYMIZER_DEBUG_PREVIEW", "1")]), &default_cli()).unwrap();
     assert!(config.anonymizer_debug_preview);
 }
+
+#[test]
+fn anonymizer_entity_types_default_includes_money_and_latam_ids() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    let types: Vec<&str> = config.anonymizer_entity_types.split(',').map(str::trim).collect();
+    for expected in &["PERSON", "ORG", "LOCATION", "MONEY", "CO_NIT", "CO_CEDULA",
+                      "AR_DNI", "CL_RUT", "BR_CPF", "BR_CNPJ", "MX_CURP", "MX_RFC",
+                      "ES_NIF", "IBAN_CODE", "DATE_TIME"] {
+        assert!(types.contains(expected), "default anonymizer_entity_types missing: {expected}");
+    }
+}
