@@ -11,7 +11,7 @@ def build_custom_recognizers():
             supported_entity="CO_CEDULA",
             supported_language="en",
             patterns=[
-                Pattern("CO_CEDULA_DOTTED_LONG", r"\b\d{1,3}(?:\.\d{3}){2,3}\b", 0.65),
+                Pattern("CO_CEDULA_DOTTED_LONG", r"(?<!\$)\b\d{1,3}(?:\.\d{3}){2,3}\b", 0.65),
                 Pattern("CO_CEDULA_PLAIN", r"\b[1-9]\d{6,9}\b", 0.3),
             ],
             context=["cédula", "cedula", "c.c.", " cc ", "identificación", "documento de identidad"],
@@ -34,7 +34,7 @@ def build_custom_recognizers():
             supported_entity="AR_DNI",
             supported_language="en",
             patterns=[
-                Pattern("AR_DNI_DOTTED", r"\b\d{2}\.\d{3}\.\d{3}\b", 0.65),
+                Pattern("AR_DNI_DOTTED", r"(?<!\$)\b\d{2}\.\d{3}\.\d{3}\b", 0.65),
                 Pattern("AR_DNI_PLAIN", r"\b[1-9]\d{7}\b", 0.3),
             ],
             context=["dni", "d.n.i.", "documento nacional", "identidad"],
@@ -143,12 +143,12 @@ def build_custom_recognizers():
                 ),
                 Pattern(
                     "LOCATION_LATAM_STREET",
-                    r"\bCalle\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?",
+                    r"\bCalle\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?",
                     0.85,
                 ),
                 Pattern(
                     "LOCATION_LATAM_CARRERA",
-                    r"\bCarrera\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?",
+                    r"\bCarrera\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?",
                     0.85,
                 ),
             ],
@@ -189,5 +189,21 @@ def build_custom_recognizers():
                     0.85,
                 ),
             ],
+        ),
+
+        # MONEY: Colombian/LatAm currency amounts with dot-thousands separator.
+        # Covers "$120.000.000 COP", "$60.000.000", "$1.500.000 USD", etc.
+        # Requires at least one .NNN group to avoid matching bare "$5".
+        PatternRecognizer(
+            supported_entity="MONEY",
+            supported_language="en",
+            patterns=[
+                Pattern(
+                    "MONEY_LATAM",
+                    r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?\b",
+                    0.85,
+                ),
+            ],
+            context=["valor", "precio", "pago", "salario", "honorarios", "costo", "monto"],
         ),
     ]

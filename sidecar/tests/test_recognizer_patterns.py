@@ -12,11 +12,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Regex patterns extracted from recognizers.py — must stay in sync.
 PATTERNS = {
-    "CO_CEDULA_DOTTED_LONG": r"\b\d{1,3}(?:\.\d{3}){2,3}\b",
+    "CO_CEDULA_DOTTED_LONG": r"(?<!\$)\b\d{1,3}(?:\.\d{3}){2,3}\b",
     "CO_CEDULA_PLAIN": r"\b[1-9]\d{6,9}\b",
     "CO_NIT_DOTTED": r"\b\d{3}\.\d{3}\.\d{3}-\d\b",
     "CO_NIT_PLAIN": r"\b\d{9}-\d\b",
-    "AR_DNI_DOTTED": r"\b\d{2}\.\d{3}\.\d{3}\b",
+    "AR_DNI_DOTTED": r"(?<!\$)\b\d{2}\.\d{3}\.\d{3}\b",
     "AR_DNI_PLAIN": r"\b[1-9]\d{7}\b",
     "ES_NIF_NIF": r"\b\d{8}[A-HJ-NP-TV-Z]\b",
     "ES_NIF_NIE": r"\b[XYZ]\d{7}[A-HJ-NP-TV-Z]\b",
@@ -38,11 +38,12 @@ PATTERNS = {
         r"\bAv(?:enida|\.)?\s+[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_STREET": (
-        r"\bCalle\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCalle\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_CARRERA": (
-        r"\bCarrera\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCarrera\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
+    "MONEY_LATAM": r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?\b",
     "DATE_ES_TEXT": (
         r"\b\d{1,2} de (?:enero|febrero|marzo|abril|mayo|junio|julio|agosto"
         r"|septiembre|octubre|noviembre|diciembre) de \d{4}\b"
@@ -66,6 +67,16 @@ def test_co_cedula_dotted_matches():
 
 def test_co_cedula_dotted_no_match_on_plain():
     assert not _match("CO_CEDULA_DOTTED_LONG", "79123456")
+
+
+def test_co_cedula_no_match_dollar_prefixed():
+    # $120.000.000 is a money amount — the lookbehind (?<!\$) must reject it
+    assert not re.search(PATTERNS["CO_CEDULA_DOTTED_LONG"], "$120.000.000")
+
+
+def test_co_cedula_no_match_dollar_prefixed_min_groups():
+    # Two dot-groups (minimum for the pattern) still rejected when $ precedes
+    assert not re.search(PATTERNS["CO_CEDULA_DOTTED_LONG"], "$1.200.000")
 
 
 def test_co_cedula_plain_matches():
@@ -101,6 +112,14 @@ def test_ar_dni_plain_matches():
 
 def test_ar_dni_no_match_too_short():
     assert not _match("AR_DNI_DOTTED", "1.234.567")  # only 1+3+3 = 7 digits
+
+
+def test_ar_dni_no_match_dollar_prefixed():
+    # $12.500.000 must not match as AR_DNI — it's a money amount.
+    # Without this guard, MONEY_LATAM and AR_DNI_DOTTED both fire on the same
+    # bytes, producing corrupted token output in the replacement loop.
+    assert not re.search(PATTERNS["AR_DNI_DOTTED"], "$12.500.000")
+    assert not re.search(PATTERNS["AR_DNI_DOTTED"], "$34.567.890")
 
 
 # ─── ES_NIF / NIE ─────────────────────────────────────────────────────────────
@@ -260,8 +279,69 @@ def test_location_avenue_matches():
 def test_location_street_matches():
     assert _match("LOCATION_LATAM_STREET", "Calle 72 # 10-34, Bogotá")
     assert _match("LOCATION_LATAM_STREET", "Calle 100 # 15-20")
+    assert _match("LOCATION_LATAM_STREET", "Calle 30A No. 6-22")
 
 
 def test_location_carrera_matches():
     assert _match("LOCATION_LATAM_CARRERA", "Carrera 15 # 93-47, Bogotá")
     assert _match("LOCATION_LATAM_CARRERA", "Carrera 7 # 32-16")
+    assert _match("LOCATION_LATAM_CARRERA", "Carrera 12B No. 45-67")
+
+
+def test_location_street_no_match_missing_separator():
+    # address number must be preceded by # or No. — bare space is not enough
+    assert not _match("LOCATION_LATAM_STREET", "Calle 72 10-34")
+
+
+def test_location_carrera_no_match_missing_separator():
+    assert not _match("LOCATION_LATAM_CARRERA", "Carrera 15 93-47")
+
+
+def test_location_street_letter_suffix_on_second_number():
+    assert _match("LOCATION_LATAM_STREET", "Calle 72 # 10-34A")
+    assert _match("LOCATION_LATAM_STREET", "Calle 30A No. 6-22B")
+
+
+def test_location_carrera_letter_suffix_on_second_number():
+    assert _match("LOCATION_LATAM_CARRERA", "Carrera 12B No. 45-67A")
+
+
+# ─── MONEY ────────────────────────────────────────────────────────────────────
+
+def test_money_latam_cop_matches():
+    assert _match("MONEY_LATAM", "$120.000.000 COP")
+    assert _match("MONEY_LATAM", "$60.000.000 COP")
+    assert _match("MONEY_LATAM", "$1.500.000")
+
+
+def test_money_latam_usd_matches():
+    assert _match("MONEY_LATAM", "$50.000 USD")
+
+
+def test_money_no_match_plain_dollar():
+    # bare "$5" should not match — requires at least one .NNN group
+    assert not _match("MONEY_LATAM", "$5")
+
+
+def test_money_no_match_without_dollar_prefix():
+    # numbers with dot-thousands separator but no $ must not match
+    assert not _match("MONEY_LATAM", "1.500.000")
+    assert not _match("MONEY_LATAM", "120.000.000")
+
+
+def test_money_no_match_long_currency_suffix():
+    # currency code is exactly 3 uppercase letters; 4+ letters must not match
+    assert not _match("MONEY_LATAM", "$1.500.000 EURO")
+    assert not _match("MONEY_LATAM", "$1.500.000 ABCDE")
+
+
+def test_money_no_match_empty():
+    assert not _match("MONEY_LATAM", "")
+
+
+def test_money_no_partial_consumption_of_longer_currency_token():
+    # re.search on "$1.500.000 USDT" must match only "$1.500.000", not "$1.500.000 USD".
+    # The \b at the end prevents consuming the first 3 letters of a 4-letter token.
+    m = re.search(PATTERNS["MONEY_LATAM"], "$1.500.000 USDT")
+    assert m is not None
+    assert m.group(0) == "$1.500.000", f"expected '$1.500.000', got '{m.group(0)}'"

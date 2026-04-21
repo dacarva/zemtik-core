@@ -329,6 +329,36 @@ fn system_prompt_inject_contains_token_format() {
     );
 }
 
+// ─── regex_anonymize: pattern ordering — NIT/DNI before CO_CEDULA ────────────
+
+#[test]
+fn regex_anonymize_nit_not_tokenized_as_cedula() {
+    // CO_NIT must run before CO_CEDULA. CO_CEDULA's dotted alternative
+    // `\d{1,3}(?:\.\d{3}){2,3}` would match `900.123.456` from `900.123.456-7`
+    // (the `-7` creates a word boundary after `456`). With CO_NIT first it
+    // consumes the full token including the check digit.
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "NIT de la empresa: 900.123.456-7.";
+    let result = regex_anonymize(text, &["CO_NIT", "CO_CEDULA"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "exactly one entity should be tokenized");
+    assert_eq!(vault[0].entity_type, "CO_NIT", "900.123.456-7 must be CO_NIT not CO_CEDULA");
+    assert!(result.contains("[[Z:"), "must contain token");
+}
+
+#[test]
+fn regex_anonymize_ar_dni_not_tokenized_as_cedula() {
+    // AR_DNI must run before CO_CEDULA. `12.345.678` matches both AR_DNI
+    // (`\d{2}\.\d{3}\.\d{3}`) and CO_CEDULA's dotted alternative (2 dot groups).
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "DNI del firmante: 12.345.678 registrado.";
+    let result = regex_anonymize(text, &["AR_DNI", "CO_CEDULA"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "exactly one entity should be tokenized");
+    assert_eq!(vault[0].entity_type, "AR_DNI", "12.345.678 must be AR_DNI not CO_CEDULA");
+    assert!(result.contains("[[Z:"), "must contain token");
+}
+
 // ─── AuditMeta default ────────────────────────────────────────────────────────
 
 #[test]

@@ -48,8 +48,41 @@ from offsets import char_to_byte_offset  # noqa: E402
 
 logger = logging.getLogger("zemtik.anonymizer")
 
-DEFAULT_ENTITY_TYPES = ["PERSON", "ORG", "LOCATION"]
+DEFAULT_ENTITY_TYPES = [
+    "PERSON", "ORG", "LOCATION",
+    # Colombian
+    "CO_NIT", "CO_CEDULA",
+    # Argentine
+    "AR_DNI",
+    # Chilean
+    "CL_RUT",
+    # Brazilian
+    "BR_CPF", "BR_CNPJ",
+    # Mexican
+    "MX_CURP", "MX_RFC",
+    # Spanish
+    "ES_NIF",
+    # Cross-border
+    "IBAN_CODE",
+    # Temporal / financial
+    "DATE_TIME", "MONEY",
+]
 DEFAULT_PORT = int(os.environ.get("ZEMTIK_ANONYMIZER_PORT", "50051"))
+
+# Entity types handled by GLiNER (neural NER). LOCATION is intentionally excluded:
+# urchade/gliner_multi_pii-v1 produces false positives on Spanish words ("La",
+# "sociedad") when asked for LOCATION. Presidio custom recognizers handle LatAm
+# addresses via precise regex patterns instead.
+GLINER_ENTITY_TYPES: frozenset[str] = frozenset({"PERSON", "ORG"})
+
+# GLiNER results shorter than this are dropped — defense against single-word
+# false positives that slip through the confidence threshold.
+# Configurable via ZEMTIK_MIN_ENTITY_CHARS (default 3 to preserve short names like "Ana").
+MIN_ENTITY_CHARS = int(os.environ.get("ZEMTIK_MIN_ENTITY_CHARS", "3"))
+
+# Spanish determiners / articles that GLiNER sometimes hallucinates as entities.
+# Applied alongside MIN_ENTITY_CHARS — only short tokens that match both filters are dropped.
+GLINER_STOPWORDS: frozenset[str] = frozenset({"la", "el", "los", "las", "una", "un", "del", "de"})
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +117,20 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
             text = msg.content
             spans = []
 
-            # GLiNER entity detection (PERSON, ORG, LOCATION, custom)
-            gliner_types = [t for t in entity_types if t in ("PERSON", "ORG", "LOCATION")]
+            # GLiNER entity detection (PERSON, ORG only — LOCATION handled by Presidio regex)
+            gliner_types = [t for t in entity_types if t in GLINER_ENTITY_TYPES]
             if gliner_types and self._gliner is None:
                 logger.error("GLiNER model not ready — aborting request (fail-closed)")
                 context.abort(grpc.StatusCode.UNAVAILABLE, "GLiNER model not yet initialized")
                 return anon_pb2.AnonymizeResponse(messages=[])
             if gliner_types and self._gliner is not None:
                 try:
-                    entities = self._gliner.predict_entities(text, gliner_types, threshold=0.5)
+                    raw_entities = self._gliner.predict_entities(text, gliner_types, threshold=0.5)
+                    entities = [
+                        e for e in raw_entities
+                        if (e["end"] - e["start"]) >= MIN_ENTITY_CHARS
+                        and text[e["start"]:e["end"]].lower().strip() not in GLINER_STOPWORDS
+                    ]
                     for ent in entities:
                         char_start = ent["start"]
                         char_end = ent["end"]

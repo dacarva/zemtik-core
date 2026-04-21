@@ -520,8 +520,9 @@ pub struct AppConfig {
     /// Env: ZEMTIK_ANONYMIZER_FALLBACK_REGEX=1|true
     #[serde(skip)]
     pub anonymizer_fallback_regex: bool,
-    /// Comma-separated list of entity types to detect. Default: "PERSON,ORG,LOCATION".
-    /// Full list: see entity_hashes.rs (16 types).
+    /// Comma-separated list of entity types to detect.
+    /// Default: 15-type set (excludes PHONE_NUMBER and EMAIL_ADDRESS from the 17-type hash table).
+    /// Full list: see entity_hashes.rs (17 types).
     /// Env: ZEMTIK_ANONYMIZER_ENTITY_TYPES
     pub anonymizer_entity_types: String,
     /// Expose outgoing_preview (first 200 chars of anonymized text) in zemtik_meta. Default: false.
@@ -610,7 +611,7 @@ impl Default for AppConfig {
             anonymizer_sidecar_addr: "http://localhost:50051".to_owned(),
             anonymizer_sidecar_timeout_ms: 1500,
             anonymizer_fallback_regex: true,
-            anonymizer_entity_types: "PERSON,ORG,LOCATION".to_owned(),
+            anonymizer_entity_types: "PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY".to_owned(),
             anonymizer_debug_preview: false,
             anonymizer_vault_ttl_secs: 300,
             mcp_anonymizer_enabled: false,
