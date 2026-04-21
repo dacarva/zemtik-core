@@ -77,7 +77,12 @@ GLINER_ENTITY_TYPES: frozenset[str] = frozenset({"PERSON", "ORG"})
 
 # GLiNER results shorter than this are dropped — defense against single-word
 # false positives that slip through the confidence threshold.
-MIN_ENTITY_CHARS = 4
+# Configurable via ZEMTIK_MIN_ENTITY_CHARS (default 3 to preserve short names like "Ana").
+MIN_ENTITY_CHARS = int(os.environ.get("ZEMTIK_MIN_ENTITY_CHARS", "3"))
+
+# Spanish determiners / articles that GLiNER sometimes hallucinates as entities.
+# Applied alongside MIN_ENTITY_CHARS — only short tokens that match both filters are dropped.
+GLINER_STOPWORDS: frozenset[str] = frozenset({"la", "el", "los", "las", "una", "un", "del", "de"})
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +129,7 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                     entities = [
                         e for e in raw_entities
                         if (e["end"] - e["start"]) >= MIN_ENTITY_CHARS
+                        and text[e["start"]:e["end"]].lower().strip() not in GLINER_STOPWORDS
                     ]
                     for ent in entities:
                         char_start = ent["start"]

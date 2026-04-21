@@ -38,12 +38,12 @@ PATTERNS = {
         r"\bAv(?:enida|\.)?\s+[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_STREET": (
-        r"\bCalle\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCalle\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_CARRERA": (
-        r"\bCarrera\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCarrera\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
-    "MONEY_LATAM": r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?",
+    "MONEY_LATAM": r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?\b",
     "DATE_ES_TEXT": (
         r"\b\d{1,2} de (?:enero|febrero|marzo|abril|mayo|junio|julio|agosto"
         r"|septiembre|octubre|noviembre|diciembre) de \d{4}\b"
@@ -297,6 +297,15 @@ def test_location_carrera_no_match_missing_separator():
     assert not _match("LOCATION_LATAM_CARRERA", "Carrera 15 93-47")
 
 
+def test_location_street_letter_suffix_on_second_number():
+    assert _match("LOCATION_LATAM_STREET", "Calle 72 # 10-34A")
+    assert _match("LOCATION_LATAM_STREET", "Calle 30A No. 6-22B")
+
+
+def test_location_carrera_letter_suffix_on_second_number():
+    assert _match("LOCATION_LATAM_CARRERA", "Carrera 12B No. 45-67A")
+
+
 # ─── MONEY ────────────────────────────────────────────────────────────────────
 
 def test_money_latam_cop_matches():
@@ -328,3 +337,11 @@ def test_money_no_match_long_currency_suffix():
 
 def test_money_no_match_empty():
     assert not _match("MONEY_LATAM", "")
+
+
+def test_money_no_partial_consumption_of_longer_currency_token():
+    # re.search on "$1.500.000 USDT" must match only "$1.500.000", not "$1.500.000 USD".
+    # The \b at the end prevents consuming the first 3 letters of a 4-letter token.
+    m = re.search(PATTERNS["MONEY_LATAM"], "$1.500.000 USDT")
+    assert m is not None
+    assert m.group(0) == "$1.500.000", f"expected '$1.500.000', got '{m.group(0)}'"

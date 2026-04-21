@@ -114,14 +114,18 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         // "$120.000.000" is tokenized here first so the dotted-digit patterns below
         // never see the digit run. (Rust regex crate has no lookbehind support.)
         ("MONEY", Regex::new(r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
+        // Colombian NIT: 900.123.456-7 — BEFORE CO_CEDULA so its dotted alternative
+        // does not consume the digit run of a NIT (the `-\d` suffix makes it unambiguous).
+        ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),
+        // Chilean RUT: 12.345.678-9 or 12345678-9
+        ("CL_RUT", Regex::new(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b").unwrap()),
+        // Argentine DNI: 12.345.678 — BEFORE CO_CEDULA: the dotted alternative in
+        // CO_CEDULA (`\d{1,3}(?:\.\d{3}){2,3}`) overlaps with the `NN.NNN.NNN` format.
+        ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b").unwrap()),
         // Colombian cédula: dotted format OR keyword-prefixed plain digits.
         // "Cédula 12345678", "CC 123456789", "C.C. 12345678" → tokenized.
         // Plain 8-10 digit runs without keyword context are NOT matched (false-positive risk).
         ("CO_CEDULA", Regex::new(r"(?i)(?:c[eé]dula|c\.?c\.?)\s+\d{6,10}|\b\d{1,3}(?:\.\d{3}){2,3}\b").unwrap()),
-        // Colombian NIT: 900.123.456-7
-        ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),
-        // Chilean RUT: 12.345.678-9 or 12345678-9
-        ("CL_RUT", Regex::new(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b").unwrap()),
         // Mexican CURP: 18 chars — last char is always the numeric verification digit
         ("MX_CURP", Regex::new(r"\b[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d\b").unwrap()),
         // Mexican RFC: 12-13 chars
@@ -130,9 +134,6 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("BR_CPF", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b").unwrap()),
         // Brazilian CNPJ: 00.000.000/0000-00
         ("BR_CNPJ", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b").unwrap()),
-        // Argentine DNI: 12.345.678 (dotted only — plain 8-digit runs overlap with phone
-        // numbers, codes, and Colombian cédulas, producing false positives).
-        ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b").unwrap()),
         // Spanish NIF: 12345678A or X1234567A (NIE) — I, O, U are excluded per spec
         ("ES_NIF", Regex::new(r"\b\d{8}[A-HJ-NP-TV-Z]\b|\b[XYZ]\d{7}[A-HJ-NP-TV-Z]\b").unwrap()),
         // Phone: requires international prefix (+\d) OR separators (spaces/dashes/parens)
