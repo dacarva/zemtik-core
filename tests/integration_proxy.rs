@@ -1176,8 +1176,14 @@ async fn anonymizer_preview_endpoint_returns_tokens() {
     let tokens = body["tokens"].as_array().expect("tokens must be an array");
     let originals = body["originals"].as_array().expect("originals must be an array");
     let entity_types = body["entity_types"].as_array().expect("entity_types must be an array");
+    assert!(!originals.is_empty(), "originals must be non-empty");
     assert_eq!(originals.len(), tokens.len(), "originals.len() must equal tokens.len()");
     assert_eq!(entity_types.len(), tokens.len(), "entity_types.len() must equal tokens.len()");
+    assert_eq!(
+        originals[0].as_str().unwrap(),
+        "test@example.com",
+        "expected preview original to be test@example.com"
+    );
     for orig in originals {
         assert!(!orig.as_str().unwrap_or("").is_empty(), "each original must be non-empty");
     }
