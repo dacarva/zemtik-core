@@ -11,7 +11,7 @@ def build_custom_recognizers():
             supported_entity="CO_CEDULA",
             supported_language="en",
             patterns=[
-                Pattern("CO_CEDULA_DOTTED_LONG", r"\b\d{1,3}(?:\.\d{3}){2,3}\b", 0.65),
+                Pattern("CO_CEDULA_DOTTED_LONG", r"(?<!\$)\b\d{1,3}(?:\.\d{3}){2,3}\b", 0.65),
                 Pattern("CO_CEDULA_PLAIN", r"\b[1-9]\d{6,9}\b", 0.3),
             ],
             context=["cédula", "cedula", "c.c.", " cc ", "identificación", "documento de identidad"],

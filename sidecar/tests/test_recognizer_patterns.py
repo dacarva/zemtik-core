@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Regex patterns extracted from recognizers.py — must stay in sync.
 PATTERNS = {
-    "CO_CEDULA_DOTTED_LONG": r"\b\d{1,3}(?:\.\d{3}){2,3}\b",
+    "CO_CEDULA_DOTTED_LONG": r"(?<!\$)\b\d{1,3}(?:\.\d{3}){2,3}\b",
     "CO_CEDULA_PLAIN": r"\b[1-9]\d{6,9}\b",
     "CO_NIT_DOTTED": r"\b\d{3}\.\d{3}\.\d{3}-\d\b",
     "CO_NIT_PLAIN": r"\b\d{9}-\d\b",
@@ -67,6 +67,11 @@ def test_co_cedula_dotted_matches():
 
 def test_co_cedula_dotted_no_match_on_plain():
     assert not _match("CO_CEDULA_DOTTED_LONG", "79123456")
+
+
+def test_co_cedula_no_match_dollar_prefixed():
+    # $120.000.000 is a money amount — the lookbehind (?<!\$) must reject it
+    assert not re.search(PATTERNS["CO_CEDULA_DOTTED_LONG"], "$120.000.000")
 
 
 def test_co_cedula_plain_matches():
