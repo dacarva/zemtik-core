@@ -74,6 +74,11 @@ def test_co_cedula_no_match_dollar_prefixed():
     assert not re.search(PATTERNS["CO_CEDULA_DOTTED_LONG"], "$120.000.000")
 
 
+def test_co_cedula_no_match_dollar_prefixed_min_groups():
+    # Two dot-groups (minimum for the pattern) still rejected when $ precedes
+    assert not re.search(PATTERNS["CO_CEDULA_DOTTED_LONG"], "$1.200.000")
+
+
 def test_co_cedula_plain_matches():
     assert _match("CO_CEDULA_PLAIN", "52987654")
     assert _match("CO_CEDULA_PLAIN", "1020304050")
@@ -275,6 +280,15 @@ def test_location_carrera_matches():
     assert _match("LOCATION_LATAM_CARRERA", "Carrera 12B No. 45-67")
 
 
+def test_location_street_no_match_missing_separator():
+    # address number must be preceded by # or No. — bare space is not enough
+    assert not _match("LOCATION_LATAM_STREET", "Calle 72 10-34")
+
+
+def test_location_carrera_no_match_missing_separator():
+    assert not _match("LOCATION_LATAM_CARRERA", "Carrera 15 93-47")
+
+
 # ─── MONEY ────────────────────────────────────────────────────────────────────
 
 def test_money_latam_cop_matches():
@@ -290,3 +304,19 @@ def test_money_latam_usd_matches():
 def test_money_no_match_plain_dollar():
     # bare "$5" should not match — requires at least one .NNN group
     assert not _match("MONEY_LATAM", "$5")
+
+
+def test_money_no_match_without_dollar_prefix():
+    # numbers with dot-thousands separator but no $ must not match
+    assert not _match("MONEY_LATAM", "1.500.000")
+    assert not _match("MONEY_LATAM", "120.000.000")
+
+
+def test_money_no_match_long_currency_suffix():
+    # currency code is exactly 3 uppercase letters; 4+ letters must not match
+    assert not _match("MONEY_LATAM", "$1.500.000 EURO")
+    assert not _match("MONEY_LATAM", "$1.500.000 ABCDE")
+
+
+def test_money_no_match_empty():
+    assert not _match("MONEY_LATAM", "")

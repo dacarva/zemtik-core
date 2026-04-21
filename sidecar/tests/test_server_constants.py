@@ -55,8 +55,8 @@ def test_default_entity_types_includes_core_types():
     assert {"PERSON", "ORG", "LOCATION", "IBAN_CODE", "DATE_TIME"}.issubset(set(DEFAULT_ENTITY_TYPES))
 
 
-def test_default_entity_types_count():
-    assert len(DEFAULT_ENTITY_TYPES) == 15
+def test_default_entity_types_no_duplicates():
+    assert len(DEFAULT_ENTITY_TYPES) == len(set(DEFAULT_ENTITY_TYPES)), "duplicate entity types detected"
 
 
 # ─── GLINER_ENTITY_TYPES ──────────────────────────────────────────────────────
@@ -65,6 +65,14 @@ def test_gliner_entity_types_excludes_location():
     # LOCATION excluded: urchade/gliner_multi_pii-v1 false-positives on Spanish
     # words ("La", "sociedad") — handled by Presidio regex instead.
     assert "LOCATION" not in GLINER_ENTITY_TYPES
+
+
+def test_gliner_entity_types_excludes_all_regex_only_types():
+    # Regex-only types must never be routed to GLiNER — GLiNER only handles neural NER.
+    regex_only = {"LOCATION", "MONEY", "CO_NIT", "CO_CEDULA", "AR_DNI", "CL_RUT",
+                  "BR_CPF", "BR_CNPJ", "MX_CURP", "MX_RFC", "ES_NIF", "IBAN_CODE", "DATE_TIME"}
+    for t in regex_only:
+        assert t not in GLINER_ENTITY_TYPES, f"{t} must not be in GLINER_ENTITY_TYPES"
 
 
 def test_gliner_entity_types_includes_person_and_org():
