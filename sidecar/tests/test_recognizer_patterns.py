@@ -38,11 +38,12 @@ PATTERNS = {
         r"\bAv(?:enida|\.)?\s+[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_STREET": (
-        r"\bCalle\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCalle\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "LOCATION_LATAM_CARRERA": (
-        r"\bCarrera\s+\d+\s*#\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
+        r"\bCarrera\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
+    "MONEY_LATAM": r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?",
     "DATE_ES_TEXT": (
         r"\b\d{1,2} de (?:enero|febrero|marzo|abril|mayo|junio|julio|agosto"
         r"|septiembre|octubre|noviembre|diciembre) de \d{4}\b"
@@ -260,8 +261,27 @@ def test_location_avenue_matches():
 def test_location_street_matches():
     assert _match("LOCATION_LATAM_STREET", "Calle 72 # 10-34, Bogotá")
     assert _match("LOCATION_LATAM_STREET", "Calle 100 # 15-20")
+    assert _match("LOCATION_LATAM_STREET", "Calle 30A No. 6-22")
 
 
 def test_location_carrera_matches():
     assert _match("LOCATION_LATAM_CARRERA", "Carrera 15 # 93-47, Bogotá")
     assert _match("LOCATION_LATAM_CARRERA", "Carrera 7 # 32-16")
+    assert _match("LOCATION_LATAM_CARRERA", "Carrera 12B No. 45-67")
+
+
+# ─── MONEY ────────────────────────────────────────────────────────────────────
+
+def test_money_latam_cop_matches():
+    assert _match("MONEY_LATAM", "$120.000.000 COP")
+    assert _match("MONEY_LATAM", "$60.000.000 COP")
+    assert _match("MONEY_LATAM", "$1.500.000")
+
+
+def test_money_latam_usd_matches():
+    assert _match("MONEY_LATAM", "$50.000 USD")
+
+
+def test_money_no_match_plain_dollar():
+    # bare "$5" should not match — requires at least one .NNN group
+    assert not _match("MONEY_LATAM", "$5")
