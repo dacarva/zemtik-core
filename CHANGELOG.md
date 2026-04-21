@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **`originals` field on `/v1/anonymize/preview` response** — additive field returning the plaintext strings that were replaced, in 1:1 positional alignment with `tokens` and `entity_types`. Enables downstream consumers (e.g. `zemtik-playground`) to reconstruct `EntityMapping { real, alias }` pairs. No security impact — caller already sends these strings in the request body.
+
 ## [0.15.0] - 2026-04-20
 
 ### Added

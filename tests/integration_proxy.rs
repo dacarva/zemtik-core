@@ -1173,7 +1173,14 @@ async fn anonymizer_preview_endpoint_returns_tokens() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert!(body.get("anonymized_messages").is_some(), "must have anonymized_messages: {body}");
-    assert!(body.get("tokens").is_some(), "must have tokens list: {body}");
+    let tokens = body["tokens"].as_array().expect("tokens must be an array");
+    let originals = body["originals"].as_array().expect("originals must be an array");
+    let entity_types = body["entity_types"].as_array().expect("entity_types must be an array");
+    assert_eq!(originals.len(), tokens.len(), "originals.len() must equal tokens.len()");
+    assert_eq!(entity_types.len(), tokens.len(), "entity_types.len() must equal tokens.len()");
+    for orig in originals {
+        assert!(!orig.as_str().unwrap_or("").is_empty(), "each original must be non-empty");
+    }
 }
 
 /// Anonymizer disabled: POST /v1/anonymize/preview must return 400.

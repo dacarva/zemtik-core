@@ -3104,10 +3104,12 @@ async fn handle_anonymize_preview(
     match result {
         Ok((anon_messages, vault, meta)) => {
             let tokens: Vec<&str> = vault.iter().map(|e| e.token.as_str()).collect();
+            let originals: Vec<&str> = vault.iter().map(|e| e.original.as_str()).collect();
             let entity_types: Vec<&str> = vault.iter().map(|e| e.entity_type.as_str()).collect();
             Ok(Json(serde_json::json!({
                 "anonymized_messages": anon_messages,
                 "tokens": tokens,
+                "originals": originals,
                 "entities_found": meta.entities_found,
                 "entity_types": entity_types,
                 "sidecar_used": meta.sidecar_used,
