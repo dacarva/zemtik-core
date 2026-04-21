@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.2] - 2026-04-21
+
+### Added
+- **MONEY entity type** — new `MONEY_LATAM` Presidio pattern detects Colombian/LatAm currency amounts (`$120.000.000 COP`, `$1.500.000`, `$50.000 USD`). Requires at least one `.NNN` dot-thousands group to avoid matching bare `$5`. Added to `ENTITY_HASHES` in both Rust and Python, and to the Rust regex fallback for sidecar-unavailable scenarios.
+- **Expanded default entity types** — `ZEMTIK_ANONYMIZER_ENTITY_TYPES` default now covers all 15 supported types: `PERSON`, `ORG`, `LOCATION`, `CO_NIT`, `CO_CEDULA`, `AR_DNI`, `CL_RUT`, `BR_CPF`, `BR_CNPJ`, `MX_CURP`, `MX_RFC`, `ES_NIF`, `IBAN_CODE`, `DATE_TIME`, `MONEY`. Previously defaulted to only `PERSON,ORG,LOCATION`. `docker-compose.yml` updated to match.
+- **Multi-country PII support** — Argentina (`AR_DNI`), Chile (`CL_RUT`), Brazil (`BR_CPF`, `BR_CNPJ`), Mexico (`MX_CURP`, `MX_RFC`), Spain (`ES_NIF`), and cross-border IBAN now active by default.
+- **GLiNER false-positive defense** — LOCATION removed from GLiNER entity types; urchade/gliner_multi_pii-v1 was producing false positives on Spanish words ("La", "sociedad"). LatAm address patterns handled by Presidio regex instead. `MIN_ENTITY_CHARS=4` filter drops single-word short entities.
+- **Address pattern improvements** — LOCATION_LATAM_STREET and LOCATION_LATAM_CARRERA now match `No.` notation and optional letter suffixes (e.g. `Calle 30A No. 6-22`, `Carrera 12B No. 45-67`).
+
+### Fixed
+- **CO_CEDULA / MONEY overlap** — `CO_CEDULA_DOTTED_LONG` now has a `(?<!\$)` negative lookbehind so `$120.000.000 COP` is classified as MONEY and not as a cédula. Applied in both the Presidio sidecar and documented as a sequential-ordering constraint in the Rust fallback.
+- **AR_DNI / MONEY overlap** — same fix applied to `AR_DNI_DOTTED`; `$12.500.000` (2-digit leading group, common in Colombian salaries) was matching as an Argentine DNI. Lookbehind in Python/Presidio, pattern ordering in Rust (no lookbehind support in regex crate).
+- **Rust fallback MONEY ordering** — `MONEY` pattern moved before `CO_CEDULA` in `REGEX_PATTERNS` to ensure sequential replacement tokenizes currency amounts first, preventing the CO_CEDULA dotted pattern from claiming the digit run inside a `$`-prefixed amount.
+
 ## [0.15.1] - 2026-04-21
 
 ### Added
