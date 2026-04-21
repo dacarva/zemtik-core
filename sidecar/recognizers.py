@@ -34,7 +34,7 @@ def build_custom_recognizers():
             supported_entity="AR_DNI",
             supported_language="en",
             patterns=[
-                Pattern("AR_DNI_DOTTED", r"\b\d{2}\.\d{3}\.\d{3}\b", 0.65),
+                Pattern("AR_DNI_DOTTED", r"(?<!\$)\b\d{2}\.\d{3}\.\d{3}\b", 0.65),
                 Pattern("AR_DNI_PLAIN", r"\b[1-9]\d{7}\b", 0.3),
             ],
             context=["dni", "d.n.i.", "documento nacional", "identidad"],

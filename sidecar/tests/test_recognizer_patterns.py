@@ -16,7 +16,7 @@ PATTERNS = {
     "CO_CEDULA_PLAIN": r"\b[1-9]\d{6,9}\b",
     "CO_NIT_DOTTED": r"\b\d{3}\.\d{3}\.\d{3}-\d\b",
     "CO_NIT_PLAIN": r"\b\d{9}-\d\b",
-    "AR_DNI_DOTTED": r"\b\d{2}\.\d{3}\.\d{3}\b",
+    "AR_DNI_DOTTED": r"(?<!\$)\b\d{2}\.\d{3}\.\d{3}\b",
     "AR_DNI_PLAIN": r"\b[1-9]\d{7}\b",
     "ES_NIF_NIF": r"\b\d{8}[A-HJ-NP-TV-Z]\b",
     "ES_NIF_NIE": r"\b[XYZ]\d{7}[A-HJ-NP-TV-Z]\b",
@@ -112,6 +112,14 @@ def test_ar_dni_plain_matches():
 
 def test_ar_dni_no_match_too_short():
     assert not _match("AR_DNI_DOTTED", "1.234.567")  # only 1+3+3 = 7 digits
+
+
+def test_ar_dni_no_match_dollar_prefixed():
+    # $12.500.000 must not match as AR_DNI — it's a money amount.
+    # Without this guard, MONEY_LATAM and AR_DNI_DOTTED both fire on the same
+    # bytes, producing corrupted token output in the replacement loop.
+    assert not re.search(PATTERNS["AR_DNI_DOTTED"], "$12.500.000")
+    assert not re.search(PATTERNS["AR_DNI_DOTTED"], "$34.567.890")
 
 
 # ─── ES_NIF / NIE ─────────────────────────────────────────────────────────────

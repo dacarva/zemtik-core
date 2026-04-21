@@ -125,8 +125,12 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("BR_CPF", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b").unwrap()),
         // Brazilian CNPJ: 00.000.000/0000-00
         ("BR_CNPJ", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b").unwrap()),
+        // LatAm currency amounts: $120.000.000 COP, $1.500.000 USD, $60.000.000
+        // Must appear BEFORE AR_DNI and CO_CEDULA: sequential replacement means
+        // "$12.500.000" is tokenized here first, so AR_DNI never sees the digits.
+        ("MONEY", Regex::new(r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
         // Argentine DNI: 12.345.678 (dotted only — plain 8-digit runs overlap with phone
-        // numbers, codes, and Colombian cédulas, producing false positives)
+        // numbers, codes, and Colombian cédulas, producing false positives).
         ("AR_DNI", Regex::new(r"\b\d{2}\.\d{3}\.\d{3}\b").unwrap()),
         // Spanish NIF: 12345678A or X1234567A (NIE) — I, O, U are excluded per spec
         ("ES_NIF", Regex::new(r"\b\d{8}[A-HJ-NP-TV-Z]\b|\b[XYZ]\d{7}[A-HJ-NP-TV-Z]\b").unwrap()),
