@@ -61,8 +61,30 @@ pub(crate) async fn handle_tunnel(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Strip zemtik-internal fields before forwarding. OpenAI rejects unknown top-level fields.
-    let body = if body_value.get("zemtik_mode").is_some() {
+    // Validate and strip zemtik-internal fields before forwarding.
+    // OpenAI rejects unknown top-level fields with 400, so the strip must happen first.
+    // Tunnel mode is transparent passthrough — valid values are silently ignored,
+    // but invalid values (wrong type or unknown string) are still rejected so clients
+    // with a single config catch typos when targeting either mode.
+    let body = if let Some(mode_val) = body_value.get("zemtik_mode") {
+        let valid = match mode_val.as_str() {
+            Some("document") | Some("data") => true,
+            Some(_) | None => false,
+        };
+        if !valid {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "invalid_zemtik_mode",
+                        "message": format!(
+                            "invalid zemtik_mode {:?}: expected 'document' or 'data'",
+                            mode_val
+                        )
+                    }
+                })),
+            ).into_response();
+        }
         let mut stripped = body_value.clone();
         if let Some(obj) = stripped.as_object_mut() {
             obj.remove("zemtik_mode");

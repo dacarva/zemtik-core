@@ -175,12 +175,14 @@ pub fn extract_intent_with_backend(
         prompt
     };
 
+    // Cache after outer truncation — avoids recomputing O(n) char count below.
+    let prompt_len = prompt.chars().count();
     let prompt_lower = prompt.to_lowercase();
 
     // Only run the substring gate for short prompts. Long prompts are almost always
     // document-processing requests (contracts, reports, letters) where incidental
     // table-term mentions in the body should not short-circuit the margin check.
-    let substring_hits = if prompt.chars().count() <= gate_max_chars {
+    let substring_hits = if prompt_len <= gate_max_chars {
         tables_matching_substrings(&prompt_lower, schema)
     } else {
         Vec::new()
@@ -207,7 +209,7 @@ pub fn extract_intent_with_backend(
     // does substring matching on whatever it receives; the embedding backend applies
     // its own internal cap on top of this. Both should ignore the document body.
     let backend_prompt_buf;
-    let backend_prompt = if prompt.chars().count() > gate_max_chars && gate_max_chars != usize::MAX {
+    let backend_prompt = if prompt_len > gate_max_chars {
         backend_prompt_buf = crate::intent_embed::truncate_chars(prompt, gate_max_chars);
         backend_prompt_buf
     } else {
@@ -229,9 +231,10 @@ pub fn extract_intent_with_backend(
         }
     }
 
-    // Parse time range (uses LazyLock regexes — no per-call compile)
+    // Parse time range from the same instruction window shown to the backend.
+    // Using the full prompt risks document-body dates causing ambiguous matches.
     let time_range =
-        parse_time_range(prompt, schema.fiscal_year_offset_months).map_err(IntentError::from)?;
+        parse_time_range(backend_prompt, schema.fiscal_year_offset_months).map_err(IntentError::from)?;
 
     Ok(IntentResult {
         category_name: table.clone(),

@@ -1115,6 +1115,20 @@ pub fn load_from_sources(
         config.schema_config_hash = Some(hash);
     }
 
+    // Post-layer validation: catch zero/invalid values that the YAML layer can set
+    // (serde deserializes without range checks; env-layer parsing validates its own inputs,
+    // but a YAML file with intent_substring_gate_max_chars: 0 would pass serde unchanged).
+    anyhow::ensure!(
+        config.intent_substring_gate_max_chars > 0,
+        "intent_substring_gate_max_chars must be > 0, got {} (check config YAML or ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS)",
+        config.intent_substring_gate_max_chars
+    );
+    anyhow::ensure!(
+        config.intent_embed_prompt_max_chars > 0,
+        "intent_embed_prompt_max_chars must be > 0, got {} (check config YAML or ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS)",
+        config.intent_embed_prompt_max_chars
+    );
+
     Ok(config)
 }
 

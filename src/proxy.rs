@@ -477,25 +477,40 @@ async fn handle_chat_completions(
     // zemtik_mode: parse, validate, and strip before hashing / forwarding.
     // OpenAI rejects unknown top-level fields, so the strip must happen first.
     // ---------------------------------------------------------------------------
-    let requested_mode = match body.get("zemtik_mode").and_then(|v| v.as_str()) {
+    let requested_mode = match body.get("zemtik_mode") {
         None => RequestedMode::Unspecified,
-        Some("document") => RequestedMode::Document,
-        Some("data") => RequestedMode::Data,
-        Some(other) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "type": "invalid_zemtik_mode",
-                        "message": format!(
-                            "invalid zemtik_mode {:?}: expected 'document' or 'data'",
-                            other
-                        )
-                    }
-                })),
-            )
-                .into_response());
-        }
+        Some(v) => match v.as_str() {
+            Some("document") => RequestedMode::Document,
+            Some("data") => RequestedMode::Data,
+            Some(other) => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "type": "invalid_zemtik_mode",
+                            "message": format!(
+                                "invalid zemtik_mode {:?}: expected 'document' or 'data'",
+                                other
+                            )
+                        }
+                    })),
+                )
+                    .into_response());
+            }
+            // Non-string value (true, 42, null, {}, …) — reject instead of silently ignoring.
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "type": "invalid_zemtik_mode",
+                            "message": "zemtik_mode must be a string: expected 'document' or 'data'"
+                        }
+                    })),
+                )
+                    .into_response());
+            }
+        },
     };
     // Strip before hashing so request_hash doesn't include this zemtik-internal field.
     if let Some(obj) = body.as_object_mut() {
@@ -536,40 +551,6 @@ async fn handle_chat_completions(
     // overwrite `prompt` with the tokenized version, but intent matching must
     // run against the real text so entity names don't break embedding scores.
     let original_prompt_for_intent = prompt.clone();
-
-    // ---------------------------------------------------------------------------
-    // zemtik_mode: document — skip intent matching, force general_lane.
-    // Tunnel mode: field is accepted but ignored (transparent passthrough).
-    // ---------------------------------------------------------------------------
-    if requested_mode == RequestedMode::Document
-        && state.config.mode != ZemtikMode::Tunnel
-    {
-        if !state.general_passthrough_enabled {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "type": "zemtik_mode_document_requires_passthrough",
-                        "message": "zemtik_mode=document requires ZEMTIK_GENERAL_PASSTHROUGH=1"
-                    }
-                })),
-            )
-                .into_response());
-        }
-        let prompt_hash_clone = prompt_hash.clone();
-        return handle_general_lane(
-            state,
-            body,
-            api_key,
-            prompt,
-            prompt_hash_clone,
-            None,
-            total_start,
-            None,
-            None,
-        )
-        .await;
-    }
 
     // ---------------------------------------------------------------------------
     // Anonymizer pre-router hook
@@ -698,6 +679,38 @@ async fn handle_chat_completions(
             }
         })
     };
+
+    // ---------------------------------------------------------------------------
+    // zemtik_mode: document — skip intent matching, force general_lane.
+    // Placed after the anonymizer block so PII is tokenized before routing.
+    // Tunnel mode: field is accepted but ignored (transparent passthrough).
+    // ---------------------------------------------------------------------------
+    if requested_mode == RequestedMode::Document && state.config.mode != ZemtikMode::Tunnel {
+        if !state.general_passthrough_enabled {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "zemtik_mode_document_requires_passthrough",
+                        "message": "zemtik_mode=document requires ZEMTIK_GENERAL_PASSTHROUGH=1"
+                    }
+                })),
+            )
+                .into_response());
+        }
+        return handle_general_lane(
+            state,
+            body,
+            api_key,
+            prompt,
+            prompt_hash,
+            None,
+            total_start,
+            anonymizer_vault,
+            anonymizer_meta,
+        )
+        .await;
+    }
 
     // Streaming guard (standard mode only). Tunnel mode supports stream:true via
     // forward_streaming. GeneralLane also supports streaming when

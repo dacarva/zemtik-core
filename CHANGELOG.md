@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.4] - 2026-04-22
+
+### Added
+- **`zemtik_mode` request field** — clients can set `"zemtik_mode": "document"` at the top level of a `POST /v1/chat/completions` request to skip intent matching entirely and force the general lane. Intended for document processing workloads (contract review, legal analysis, HR policy summarization) where data query routing is not desired. Requires `ZEMTIK_GENERAL_PASSTHROUGH=1`; returns HTTP 400 if passthrough is disabled. `"zemtik_mode": "data"` forces normal routing. Invalid values return HTTP 400. Field is stripped before forwarding to OpenAI. Ignored in tunnel mode.
+- **Intent false-positive fix for long documents (issue #36)** — the substring gate is now skipped for prompts longer than `ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS` (default `300`). Prompts exceeding this length bypass the substring short-circuit, preventing document bodies with incidental table-term mentions (e.g. "payroll" in an employment contract) from being silently routed to data lanes. Both the substring gate and backend prompt are capped independently. The EmbeddingBackend further caps its input at `ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS` (default `250`) to prevent document bodies from dominating cosine similarity. The `extract_intent` CLI shim passes `usize::MAX` so backward-compatible non-proxy callers are unaffected.
+- **`zemtik_mode_document` routing reason** — `zemtik_meta.reason` is now `"zemtik_mode_document"` (instead of `"no_table_match"`) when the general lane was selected because the client explicitly set `"zemtik_mode": "document"`.
+
+### Configuration
+- `ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS` — new env var (default `300`). Prompts longer than this skip the substring short-circuit gate. Set higher to allow longer prompts through the substring gate; set lower to be more aggressive about bypassing it.
+- `ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS` — new env var (default `250`). Maximum characters of the user prompt fed to the EmbeddingBackend. Truncation prevents long document bodies from dominating cosine similarity and producing false-positive table matches.
+
 ## [0.15.3] - 2026-04-22
 
 ### Added

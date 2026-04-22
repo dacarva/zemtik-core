@@ -69,9 +69,10 @@ Zemtik runs as a local proxy on `localhost:4000`. Point your application at it i
 ```mermaid
 flowchart TD
     App["Your Application"]
-    App -->|"POST /v1/chat/completions\nnatural-language query"| Proxy
+    App -->|"POST /v1/chat/completions\nnatural-language query"| Anon
 
     subgraph Proxy["Zemtik Proxy  (localhost:4000)"]
+        Anon["Anonymizer\n(if enabled)\nPII → [[Z:xxxx:n]] tokens"]
         Intent["Intent extraction\n+ routing\nschema_config.json sensitivity"]
 
         subgraph FastLane["FastLane  (sensitivity: low)"]
@@ -88,17 +89,24 @@ flowchart TD
             ZK1 --> ZK2 --> ZK3
         end
 
+        subgraph General["General Lane  (zemtik_mode: document or no table match)"]
+            GL1["Forward to OpenAI\nno data query, no ZK proof\nPII already tokenized"]
+        end
+
+        Anon --> Intent
         Intent -->|"sensitivity: low"| FastLane
         Intent -->|"sensitivity: critical"| ZKSlow
+        Intent -->|"zemtik_mode: document\nor ZEMTIK_GENERAL_PASSTHROUGH"| General
     end
 
     FL3 -->|"aggregate + attestation_hash\ndata_exfiltrated: 0"| OpenAI
     ZK3 -->|"aggregate + proof_hash\ndata_exfiltrated: 0"| OpenAI
+    GL1 -->|"tokenized prompt\nno raw data"| OpenAI
 
     OpenAI["OpenAI API\n{ aggregate, provenance:\nZEMTIK_FAST_LANE or ZEMTIK_ZK }"]
 ```
 
-In both paths, raw transaction rows **never leave the Zemtik process**. Which path runs is determined by the `sensitivity` field in `schema_config.json`. See [Two Lanes: FastLane vs ZK SlowLane](#two-lanes-fastlane-vs-zk-slowlane) below.
+In all paths, raw transaction rows **never leave the Zemtik process**. The anonymizer (if enabled) tokenizes PII before any path runs. Which data path executes is determined by the `sensitivity` field in `schema_config.json` or by the `zemtik_mode` field in the request. See [Two Lanes: FastLane vs ZK SlowLane](#two-lanes-fastlane-vs-zk-slowlane) and [PII-Safe Document Processing](#pii-safe-document-processing-v0154) below.
 
 > **KMS note:** `~/.zemtik/keys/bank_sk` is a 32-byte file (mode 0600) that acts as the BabyJubJub signing key. The ZK circuit's soundness guarantee — `assert(eddsa_verify(...))` — holds only if this key is genuinely controlled by the institution. A compromised file means a compromised attestation. Production deployments must replace this with an HSM or KMS (v2 roadmap).
 
@@ -188,6 +196,82 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#general-passthrough-v0110) for
 
 ---
 
+## PII-Safe Document Processing (v0.15.4+)
+
+The anonymizer and `zemtik_mode: document` work together as a complete document processing pipeline. Set `"zemtik_mode": "document"` in any chat/completions request to skip intent-based routing entirely and send the request straight to the general lane — bypassing the data query pipeline. The anonymizer still runs. Names, tax IDs, salaries, and other PII are tokenized before OpenAI sees the document, and the response is de-anonymized before it reaches the client.
+
+Use this for contract review, legal analysis, HR policy summarization, or any workload where you want PII protection without data query routing overhead.
+
+**Setup:**
+
+```bash
+# Start the sidecar (required for NER-based detection)
+docker build -f sidecar/Dockerfile -t zemtik-sidecar .
+docker run -p 50051:50051 zemtik-sidecar
+
+# Start the proxy with passthrough + anonymizer enabled
+export OPENAI_API_KEY=sk-...
+export ZEMTIK_GENERAL_PASSTHROUGH=1
+export ZEMTIK_ANONYMIZER_ENABLED=true
+export ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://localhost:50051
+cargo run -- proxy
+```
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "x-session-id: session-abc123" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "zemtik_mode": "document",
+    "messages": [{
+      "role": "user",
+      "content": "Summarize the key obligations in this contract. The contractor is Carlos García (CC 79.123.456) and the company is Inversiones Andinas S.A.S. (NIT 900.123.456-7). Salary: $12.500.000 COP/month."
+    }]
+  }'
+```
+
+What Zemtik sends to OpenAI:
+
+```
+Summarize the key obligations in this contract. The contractor is [[Z:a1b2:0]] (CC [[Z:c3d4:1]]) and the company is [[Z:e5f6:2]] (NIT [[Z:g7h8:3]]). Salary: [[Z:i9j0:4]] COP/month.
+```
+
+The response includes:
+
+```json
+{
+  "zemtik_meta": {
+    "engine_used": "general_lane",
+    "zk_coverage": "none",
+    "reason": "zemtik_mode_document",
+    "anonymizer": {
+      "entities_found": 5,
+      "entity_types": ["PERSON", "CO_CEDULA", "ORG", "CO_NIT", "MONEY"],
+      "sidecar_used": true,
+      "sidecar_ms": 38,
+      "dropped_tokens": 0
+    }
+  }
+}
+```
+
+`zemtik_mode: "data"` forces normal routing (the default when the field is absent). The field is stripped before forwarding to OpenAI. Passing an invalid value returns HTTP 400. The field is ignored in tunnel mode.
+
+**Document-only deployments:** use `schema_config.legal.json` (included in the repo root) — an empty `tables` map that forces all requests to the general lane while keeping the anonymizer pipeline active. Mount it as `ZEMTIK_SCHEMA_CONFIG_PATH=./schema_config.legal.json` or via Docker volume:
+
+```bash
+docker run -e ZEMTIK_GENERAL_PASSTHROUGH=1 \
+           -e ZEMTIK_ANONYMIZER_ENABLED=true \
+           -v ./schema_config.legal.json:/root/.zemtik/schema_config.json \
+           zemtik:latest
+```
+
+---
+
 ## Tunnel Mode (Pilot Evaluation)
 
 Tunnel Mode is designed for customers who want to evaluate Zemtik without any risk to their production traffic. Set `ZEMTIK_MODE=tunnel` and Zemtik becomes a **transparent passthrough proxy** — every request is forwarded to OpenAI exactly as received (FORK 1) while Zemtik runs its verification pipeline in the background (FORK 2) and logs a comparison audit record.
@@ -224,7 +308,7 @@ See [docs/TUNNEL_MODE.md](docs/TUNNEL_MODE.md) for the full configuration refere
 
 ## Anonymizer (v0.14.0+)
 
-Zemtik can tokenize PII in prompts before they leave the host. Names, organizations, and locations are replaced with typed tokens so the model never sees raw PII.
+Zemtik can tokenize PII in prompts before they leave the host. Names, organizations, and locations are replaced with typed tokens so the model never sees raw PII. The anonymizer runs on every lane — FastLane, ZK SlowLane, and general lane. This means it also protects document processing workloads: combine it with `"zemtik_mode": "document"` for PII-safe contract review, legal analysis, or HR document summarization without data query routing. See [PII-Safe Document Processing](#pii-safe-document-processing-v0154) for the full setup.
 
 ```
 "Can José García help with our payroll?"

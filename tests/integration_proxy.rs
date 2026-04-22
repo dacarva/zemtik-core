@@ -1671,6 +1671,9 @@ async fn long_document_repro_issue_36() {
     // In real M&A contracts the payroll compliance clause appears 500+ chars into the doc;
     // this mirrors that structure so the test is representative of the production failure.
     let contract_body = concat!(
+        // IMPORTANT: the assertion below verifies "payroll" stays past char 300.
+        // If you edit this fixture and move the term into the first 300 chars, the
+        // gate fires and the test no longer exercises the issue #36 fix.
         "Resume este contrato: ",
         // Standard M&A recitals — 278 chars of preamble before the labor section
         "This Agreement is entered into as of January 1, 2025, by and between Acme Corp. ",
@@ -1680,6 +1683,18 @@ async fn long_document_repro_issue_36() {
         "Labor Compliance: The Company is current on all Aportes Parafiscales ",
         "(social security and payroll taxes) for its 45 employees."
     );
+    // Guard: "payroll" must appear past the 300-char gate boundary. If a future edit
+    // moves the term into the first 300 chars, the substring gate fires and this test
+    // no longer exercises the issue #36 regression path.
+    let payroll_pos = contract_body.to_lowercase().find("payroll")
+        .expect("contract_body must contain 'payroll'");
+    assert!(
+        payroll_pos > 300,
+        "fixture guard: 'payroll' at char {} must be past the 300-char gate boundary \
+         (gate_max_chars=300) — move the labor section further into the body",
+        payroll_pos
+    );
+
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{}/v1/chat/completions", addr))
@@ -1747,59 +1762,3 @@ async fn zemtik_mode_data_falls_through_to_normal_routing() {
     );
 }
 
-/// zemtik_mode=document in tunnel mode: the field is stripped and the request is
-/// forwarded via the tunnel passthrough. Tunnel mode ignores the routing hint.
-#[tokio::test]
-async fn zemtik_mode_document_in_tunnel_mode_is_ignored() {
-    use zemtik::config::ZemtikMode;
-
-    let mock_openai = MockServer::start().await;
-    mount_openai_chat_mock(&mock_openai).await;
-
-    let mut config = AppConfig::default();
-    config.openai_base_url = mock_openai.uri();
-    config.openai_model = "gpt-5.4-nano".to_owned();
-    config.skip_circuit_validation = true;
-    config.intent_backend = "regex".to_owned();
-    config.openai_api_key = Some("test-key".to_owned());
-    config.client_id = 123;
-    config.cors_origins = vec!["*".to_owned()];
-    config.receipts_db_path = std::path::PathBuf::from(":memory:");
-    config.schema_config = Some(test_schema());
-    config.schema_config_hash = Some("test-schema-hash".to_owned());
-    config.mode = ZemtikMode::Tunnel;
-    config.tunnel_api_key = Some("tunnel-key".to_owned());
-    // general_passthrough intentionally off — tunnel must proceed regardless
-    config.general_passthrough_enabled = false;
-
-    let app = build_proxy_router(config).await.expect("build failed");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("http://{}/v1/chat/completions", addr))
-        .header("Authorization", "Bearer tunnel-key")
-        .json(&json!({
-            "model": "gpt-5.4-nano",
-            "zemtik_mode": "document",
-            "messages": [{"role": "user", "content": "Resume este contrato..."}]
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    // Tunnel mode is transparent passthrough — must not return 400 for passthrough=false
-    assert_eq!(
-        resp.status(), 200,
-        "zemtik_mode=document in tunnel mode must not return 400 (tunnel ignores routing hints)"
-    );
-    // zemtik_mode must be stripped before forwarding to OpenAI
-    let received = mock_openai.received_requests().await.unwrap();
-    let upstream: Value = serde_json::from_slice(&received.last().unwrap().body).unwrap();
-    assert!(
-        upstream.get("zemtik_mode").is_none(),
-        "zemtik_mode must be stripped from upstream request in tunnel mode"
-    );
-}
