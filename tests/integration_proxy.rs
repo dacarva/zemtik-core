@@ -1538,3 +1538,175 @@ async fn anonymizer_tunnel_mode_skip() {
     // Tunnel mode passes through; anonymizer is skipped in tunnel mode.
     assert_eq!(resp.status(), 200, "tunnel mode must pass through successfully, skipping anonymizer");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #36 regression tests: zemtik_mode field + document-body false-positive
+// ---------------------------------------------------------------------------
+
+/// Spawn a proxy with general_passthrough enabled.
+async fn spawn_general_passthrough_proxy() -> (SocketAddr, MockServer) {
+    let mock_openai = MockServer::start().await;
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+    config.intent_substring_gate_max_chars = 300;
+
+    let app = build_proxy_router(config).await.expect("build_proxy_router failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve failed") });
+    (addr, mock_openai)
+}
+
+#[tokio::test]
+async fn zemtik_mode_document_routes_to_general_lane() {
+    let (addr, mock_openai) = spawn_general_passthrough_proxy().await;
+    mount_openai_chat_mock(&mock_openai).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "document",
+            "messages": [{"role": "user", "content": "Summarize this: payroll taxes for all 45 employees are current."}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["zemtik_meta"]["engine_used"].as_str().unwrap(),
+        "general_lane",
+        "zemtik_mode=document must route to general_lane"
+    );
+
+    // Verify zemtik_mode was stripped before forwarding to OpenAI
+    let received = mock_openai.received_requests().await.unwrap();
+    let upstream: Value = serde_json::from_slice(&received.last().unwrap().body).unwrap();
+    assert!(
+        upstream.get("zemtik_mode").is_none(),
+        "zemtik_mode must be stripped from the upstream request"
+    );
+}
+
+#[tokio::test]
+async fn zemtik_mode_invalid_returns_400() {
+    let (addr, _mock_openai) = spawn_general_passthrough_proxy().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "banana",
+            "messages": [{"role": "user", "content": "What is the weather?"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("expected 'document' or 'data'"),
+        "error message must describe valid values, got: {:?}",
+        msg
+    );
+}
+
+#[tokio::test]
+async fn zemtik_mode_document_without_passthrough_returns_400() {
+    // Proxy with general_passthrough disabled (default)
+    let (addr, _mock_openai) = spawn_test_proxy().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "document",
+            "messages": [{"role": "user", "content": "Summarize this contract."}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("ZEMTIK_GENERAL_PASSTHROUGH"),
+        "error must mention ZEMTIK_GENERAL_PASSTHROUGH requirement, got: {:?}",
+        msg
+    );
+}
+
+#[tokio::test]
+async fn long_document_repro_issue_36() {
+    // Exact payload from the issue: contract body containing "payroll taxes" must NOT
+    // route to the payroll table. With the length guard at 300 chars, the substring
+    // gate is skipped for this 500+ char prompt, so intent falls back to no-match
+    // and general_lane handles it.
+    let (addr, mock_openai) = spawn_general_passthrough_proxy().await;
+    mount_openai_chat_mock(&mock_openai).await;
+
+    // Document with the contract instruction at the head, followed by boilerplate text
+    // that pushes the "payroll taxes" keyword well past the 300-char gate boundary.
+    // In real M&A contracts the payroll compliance clause appears 500+ chars into the doc;
+    // this mirrors that structure so the test is representative of the production failure.
+    let contract_body = concat!(
+        "Resume este contrato: ",
+        // Standard M&A recitals — 278 chars of preamble before the labor section
+        "This Agreement is entered into as of January 1, 2025, by and between Acme Corp. ",
+        "('Buyer') and XYZ Holdings S.A.S. ('Seller') for the acquisition of 100% of the ",
+        "outstanding shares. The parties agree as follows: ",
+        // Labor section — 'payroll' now appears around char 340, past the 300-char gate
+        "Labor Compliance: The Company is current on all Aportes Parafiscales ",
+        "(social security and payroll taxes) for its 45 employees."
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{
+                "role": "user",
+                "content": contract_body
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let engine = body["zemtik_meta"]["engine_used"].as_str().unwrap_or("");
+    assert_eq!(
+        engine, "general_lane",
+        "issue #36: contract with 'payroll taxes' in body must route to general_lane, not fast_lane. engine_used={}",
+        engine
+    );
+    let table = &body["zemtik_meta"]["intent"]["table"];
+    assert!(
+        table.is_null(),
+        "issue #36: intent.table must be null for document routing, got: {}",
+        table
+    );
+}

@@ -390,6 +390,7 @@ async fn run_fork2_pipeline(
     };
 
     let threshold = state.config.intent_confidence_threshold;
+    let gate_max_chars = state.config.intent_substring_gate_max_chars;
     let backend = Arc::clone(&state.intent_backend);
     let prompt_clone = prompt.clone();
     let schema_clone = schema.clone();
@@ -400,6 +401,7 @@ async fn run_fork2_pipeline(
             &schema_clone,
             backend.as_ref(),
             threshold,
+            gate_max_chars,
         ).map_err(|e| e.to_string())
     })
     .await

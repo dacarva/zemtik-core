@@ -137,7 +137,7 @@ fn year_only_range_timestamps() {
 fn ambiguous_time_returns_error() {
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.90)]);
-    let result = extract_intent_with_backend("What happened recently?", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("What happened recently?", &schema, &backend, 0.65, usize::MAX);
     assert!(
         matches!(result, Err(IntentError::TimeRangeAmbiguous)),
         "ambiguous time expression should return TimeRangeAmbiguous"
@@ -149,7 +149,7 @@ fn low_score_returns_no_table() {
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.40)]);
     // No schema key/alias substring so the mock score gate is exercised (not short-circuit).
-    let result = extract_intent_with_backend("Q1 2026 infra costs", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("Q1 2026 infra costs", &schema, &backend, 0.65, usize::MAX);
     assert!(matches!(result, Err(IntentError::NoTableIdentified)));
 }
 
@@ -158,7 +158,7 @@ fn narrow_margin_returns_no_table() {
     // Scores 0.68 and 0.67 — margin = 0.01 < 0.10, should reject
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.68), ("payroll", 0.67)]);
-    let result = extract_intent_with_backend("Q1 2026 spend analysis", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("Q1 2026 spend analysis", &schema, &backend, 0.65, usize::MAX);
     assert!(
         matches!(result, Err(IntentError::NoTableIdentified)),
         "narrow margin 0.01 should be rejected"
@@ -172,7 +172,7 @@ fn sufficient_margin_succeeds() {
     let backend = MockBackend::new(vec![("aws_spend", 0.70), ("payroll", 0.55)]);
     // Prompt must not substring-match any table key/alias (else short-circuit uses confidence 1.0).
     let result =
-        extract_intent_with_backend("Q1 2026 infra costs", &schema, &backend, 0.65).unwrap();
+        extract_intent_with_backend("Q1 2026 infra costs", &schema, &backend, 0.65, usize::MAX).unwrap();
     assert_eq!(result.table, "aws_spend");
     assert!((result.confidence - 0.70).abs() < 0.001);
 }
@@ -182,7 +182,7 @@ fn exact_threshold_passes() {
     // Score exactly 0.65 should pass (>= not >)
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.65)]);
-    let result = extract_intent_with_backend("AWS spend 2025", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("AWS spend 2025", &schema, &backend, 0.65, usize::MAX);
     assert!(result.is_ok(), "score exactly at threshold should pass");
 }
 
@@ -191,7 +191,7 @@ fn exact_margin_passes() {
     // Margin exactly 0.10 should pass (>= not >)
     let schema = test_schema();
     let backend = MockBackend::new(vec![("aws_spend", 0.80), ("payroll", 0.70)]);
-    let result = extract_intent_with_backend("AWS spend 2025", &schema, &backend, 0.65);
+    let result = extract_intent_with_backend("AWS spend 2025", &schema, &backend, 0.65, usize::MAX);
     assert!(result.is_ok(), "margin exactly 0.10 should pass");
 }
 
@@ -232,6 +232,7 @@ fn te_alias_bypasses_embedding_margin_rejection() {
         &schema,
         &backend,
         0.65,
+        usize::MAX,
     )
     .unwrap();
     assert_eq!(result.table, "travel");
@@ -254,4 +255,69 @@ fn prompt_truncation_does_not_panic() {
     // Should not panic even on very long prompts
     let result = extract_intent(&long_prompt, &schema);
     assert!(result.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #36 regression tests: document-body false-positive prevention
+// ---------------------------------------------------------------------------
+
+#[test]
+fn long_document_with_payroll_term_does_not_short_circuit() {
+    // A contract body containing "payroll taxes" must NOT route to the payroll table.
+    // The gate_max_chars=300 guard means prompts longer than that skip the substring gate.
+    let schema = test_schema();
+    let backend = MockBackend::new(vec![]); // empty → NoTableIdentified
+    let body = "x".repeat(1200);
+    let prompt = format!(
+        "Resume este contrato: ...Labor Compliance: The Company is current on all Aportes \
+         Parafiscales (social security and payroll taxes) for its 45 employees... {}",
+        body
+    );
+    assert!(
+        prompt.chars().count() > 300,
+        "test prompt must be longer than gate_max_chars=300"
+    );
+    let result = extract_intent_with_backend(&prompt, &schema, &backend, 0.65, 300);
+    assert!(
+        matches!(result, Err(IntentError::NoTableIdentified)),
+        "long document with incidental 'payroll' must not silently route to payroll lane"
+    );
+}
+
+#[test]
+fn short_prompt_with_table_key_still_short_circuits() {
+    // Short data-query prompts keep the fast-path behavior.
+    let schema = test_schema();
+    let backend = MockBackend::new(vec![]); // backend not consulted when gate fires
+    let result = extract_intent_with_backend("payroll Q2 2025", &schema, &backend, 0.65, 300);
+    assert!(result.is_ok(), "short data query must still route via substring gate");
+    let r = result.unwrap();
+    assert_eq!(r.table, "payroll");
+    assert_eq!(r.confidence, 1.0);
+}
+
+#[test]
+fn substring_gate_boundary() {
+    // Exactly gate_max_chars=300: gate fires. One char over: gate skipped.
+    let schema = test_schema();
+
+    // Build a prompt whose instruction is exactly 300 chars and includes "payroll".
+    // The rest of the padding must not contain any table key or alias.
+    let prefix = "payroll Q2 2025 ";
+    let padding = "z".repeat(300usize.saturating_sub(prefix.len()));
+    let prompt_at_300 = format!("{}{}", prefix, padding);
+    assert_eq!(prompt_at_300.chars().count(), 300);
+
+    let backend_empty = MockBackend::new(vec![]);
+    let result_at = extract_intent_with_backend(&prompt_at_300, &schema, &backend_empty, 0.65, 300);
+    assert!(result_at.is_ok(), "exactly 300 chars — gate fires, 'payroll' routes");
+
+    // One character longer: gate is skipped; backend returns empty → NoTableIdentified.
+    let prompt_over_300 = format!("{}z", prompt_at_300);
+    assert_eq!(prompt_over_300.chars().count(), 301);
+    let result_over = extract_intent_with_backend(&prompt_over_300, &schema, &backend_empty, 0.65, 300);
+    assert!(
+        matches!(result_over, Err(IntentError::NoTableIdentified)),
+        "301 chars — gate skipped, empty backend → NoTableIdentified"
+    );
 }

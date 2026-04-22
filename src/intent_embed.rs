@@ -18,6 +18,19 @@ use crate::config::SchemaConfig;
 use crate::intent::IntentBackend;
 
 // ---------------------------------------------------------------------------
+// Shared helper
+// ---------------------------------------------------------------------------
+
+/// Truncate `s` to at most `max` Unicode scalar values, at a valid char boundary.
+/// Returns the original slice if it is already within the limit.
+pub fn truncate_chars(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((byte_pos, _)) => &s[..byte_pos],
+        None => s,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EmbeddingBackend (feature-gated)
 // ---------------------------------------------------------------------------
 
@@ -44,6 +57,10 @@ mod embed_impl {
         model: std::sync::Mutex<TextEmbedding>,
         /// All (table_key, embedding) pairs — multiple per table (key + aliases + desc + examples)
         index: Vec<IndexEntry>,
+        /// Max chars of the user prompt to embed. The intent signal lives at the head of the
+        /// message; truncating prevents document bodies from dominating cosine similarity.
+        /// Default: 250. Configurable via ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS.
+        prompt_max_chars: usize,
     }
 
     impl EmbeddingBackend {
@@ -51,7 +68,7 @@ mod embed_impl {
         ///
         /// On success, the model is cached at `models_dir/bge-small-en/`. Subsequent
         /// calls are instant. First download is ~130 MB and may take 30–120 seconds.
-        pub fn new(models_dir: &Path) -> anyhow::Result<Self> {
+        pub fn new(models_dir: &Path, prompt_max_chars: usize) -> anyhow::Result<Self> {
             std::fs::create_dir_all(models_dir)
                 .context("create models directory")?;
 
@@ -61,7 +78,7 @@ mod embed_impl {
 
             let model = TextEmbedding::try_new(options).context("init fastembed BGE-small-en")?;
 
-            Ok(EmbeddingBackend { model: std::sync::Mutex::new(model), index: Vec::new() })
+            Ok(EmbeddingBackend { model: std::sync::Mutex::new(model), index: Vec::new(), prompt_max_chars })
         }
 
         fn embed_texts(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -153,14 +170,12 @@ mod embed_impl {
                 return Vec::new();
             }
 
-            // Truncate at char boundary, not byte boundary (avoids panic on multi-byte UTF-8)
+            // Truncate to the instruction head only. Document bodies beyond this cap
+            // contain domain terms that corrupt cosine similarity against table descriptions.
+            // Truncate at char boundary, not byte boundary (avoids panic on multi-byte UTF-8).
             let truncated_buf;
-            let prompt = if prompt.len() > 2000 {
-                truncated_buf = prompt
-                    .char_indices()
-                    .nth(2000)
-                    .map(|(i, _)| &prompt[..i])
-                    .unwrap_or(prompt);
+            let prompt = if prompt.chars().count() > self.prompt_max_chars {
+                truncated_buf = crate::intent_embed::truncate_chars(prompt, self.prompt_max_chars);
                 truncated_buf
             } else {
                 prompt
@@ -205,6 +220,7 @@ mod embed_impl {
 #[cfg(not(feature = "embed"))]
 pub fn try_new_embedding_backend(
     _models_dir: &Path,
+    _prompt_max_chars: usize,
 ) -> Option<Box<dyn IntentBackend>> {
     None
 }
@@ -215,8 +231,9 @@ pub fn try_new_embedding_backend(
 #[cfg(feature = "embed")]
 pub fn try_new_embedding_backend(
     models_dir: &Path,
+    prompt_max_chars: usize,
 ) -> Option<Box<dyn IntentBackend>> {
-    match EmbeddingBackend::new(models_dir) {
+    match EmbeddingBackend::new(models_dir, prompt_max_chars) {
         Ok(backend) => Some(Box::new(backend) as Box<dyn IntentBackend>),
         Err(e) => {
             eprintln!(

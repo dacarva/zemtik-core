@@ -308,6 +308,19 @@ pub enum Route {
     GeneralLane,
 }
 
+/// Client-requested routing mode from the `zemtik_mode` request-body field.
+///
+/// - `Document` — skip intent matching entirely; force general_lane.
+///   Requires `ZEMTIK_GENERAL_PASSTHROUGH=1`.
+/// - `Data` — explicit standard routing (same as default behavior).
+/// - `Unspecified` — field absent; follow normal routing pipeline.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestedMode {
+    Document,
+    Data,
+    Unspecified,
+}
+
 /// Result of the FastLane engine.
 #[derive(Debug)]
 pub struct FastLaneResult {

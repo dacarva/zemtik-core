@@ -19,8 +19,8 @@ use crate::config::{AggFn, AppConfig, RewriterConfig, ZemtikMode};
 use crate::intent::{IntentBackend, IntentError};
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
-    OpenAiRequestLog, OpenAiResponseLog, QueryParams, RewriteMethod, Route, SchemaValidationResult,
-    SignatureData, TokenUsage, ZemtikErrorCode,
+    OpenAiRequestLog, OpenAiResponseLog, QueryParams, RequestedMode, RewriteMethod, Route,
+    SchemaValidationResult, SignatureData, TokenUsage, ZemtikErrorCode,
 };
 use crate::{audit, bundle, db, engine_fast, evidence, intent, intent_embed, keys, prover, receipts, rewriter, router};
 use crate::anonymizer::{AnonymizerGrpcClient, VaultStore, Vault, new_vault_store, build_channel, check_sidecar_health, SidecarHealth};
@@ -152,7 +152,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
                 b.index_schema(&schema);
                 b as Box<dyn IntentBackend>
             } else {
-                match intent_embed::try_new_embedding_backend(&config.models_dir) {
+                match intent_embed::try_new_embedding_backend(&config.models_dir, config.intent_embed_prompt_max_chars) {
                     Some(mut b) => {
                         b.index_schema(&schema);
                         b
@@ -473,6 +473,35 @@ async fn handle_chat_completions(
             ))
         })?;
 
+    // ---------------------------------------------------------------------------
+    // zemtik_mode: parse, validate, and strip before hashing / forwarding.
+    // OpenAI rejects unknown top-level fields, so the strip must happen first.
+    // ---------------------------------------------------------------------------
+    let requested_mode = match body.get("zemtik_mode").and_then(|v| v.as_str()) {
+        None => RequestedMode::Unspecified,
+        Some("document") => RequestedMode::Document,
+        Some("data") => RequestedMode::Data,
+        Some(other) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "invalid_zemtik_mode",
+                        "message": format!(
+                            "invalid zemtik_mode {:?}: expected 'document' or 'data'",
+                            other
+                        )
+                    }
+                })),
+            )
+                .into_response());
+        }
+    };
+    // Strip before hashing so request_hash doesn't include this zemtik-internal field.
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("zemtik_mode");
+    }
+
     let request_hash = hex::encode(Sha256::digest(
         &serde_json::to_vec(&body)
             .context("serialize request body for hashing")
@@ -507,6 +536,40 @@ async fn handle_chat_completions(
     // overwrite `prompt` with the tokenized version, but intent matching must
     // run against the real text so entity names don't break embedding scores.
     let original_prompt_for_intent = prompt.clone();
+
+    // ---------------------------------------------------------------------------
+    // zemtik_mode: document — skip intent matching, force general_lane.
+    // Tunnel mode: field is accepted but ignored (transparent passthrough).
+    // ---------------------------------------------------------------------------
+    if requested_mode == RequestedMode::Document
+        && state.config.mode != ZemtikMode::Tunnel
+    {
+        if !state.general_passthrough_enabled {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "zemtik_mode_document_requires_passthrough",
+                        "message": "zemtik_mode=document requires ZEMTIK_GENERAL_PASSTHROUGH=1"
+                    }
+                })),
+            )
+                .into_response());
+        }
+        let prompt_hash_clone = prompt_hash.clone();
+        return handle_general_lane(
+            state,
+            body,
+            api_key,
+            prompt,
+            prompt_hash_clone,
+            None,
+            total_start,
+            None,
+            None,
+        )
+        .await;
+    }
 
     // ---------------------------------------------------------------------------
     // Anonymizer pre-router hook
@@ -688,8 +751,9 @@ async fn handle_chat_completions(
         let prompt_clone = original_prompt_for_intent.clone();
         let schema_clone = schema.clone();
         let threshold = state.config.intent_confidence_threshold;
+        let gate_max_chars = state.config.intent_substring_gate_max_chars;
         tokio::task::spawn_blocking(move || {
-            intent::extract_intent_with_backend(&prompt_clone, &schema_clone, backend.as_ref(), threshold)
+            intent::extract_intent_with_backend(&prompt_clone, &schema_clone, backend.as_ref(), threshold, gate_max_chars)
         })
         .await
         .map_err(|e| ProxyError::Internal(anyhow::anyhow!("intent backend thread panicked: {}", e)))?
@@ -741,6 +805,7 @@ async fn handle_chat_completions(
                     let schema_clone = schema.clone();
                     let threshold = state.config.intent_confidence_threshold;
                     let max_scan = rw_config.max_scan_messages;
+                    let gate_max_chars = state.config.intent_substring_gate_max_chars;
                     tokio::task::spawn_blocking(move || {
                         rewriter::deterministic_resolve(
                             &messages_clone,
@@ -748,6 +813,7 @@ async fn handle_chat_completions(
                             backend.as_ref(),
                             threshold,
                             max_scan,
+                            gate_max_chars,
                         )
                     })
                     .await
@@ -800,8 +866,9 @@ async fn handle_chat_completions(
                         let q_clone = q.clone();
                         let schema_clone = schema.clone();
                         let threshold = state.config.intent_confidence_threshold;
+                        let gate_max_chars = state.config.intent_substring_gate_max_chars;
                         let re_intent_join = tokio::task::spawn_blocking(move || {
-                            intent::extract_intent_with_backend(&q_clone, &schema_clone, backend.as_ref(), threshold)
+                            intent::extract_intent_with_backend(&q_clone, &schema_clone, backend.as_ref(), threshold, gate_max_chars)
                         })
                         .await;
 

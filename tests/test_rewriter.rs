@@ -71,7 +71,7 @@ fn deterministic_resolve_returns_prior_as_is_when_no_current_time() {
         ("assistant", "Your AWS spend in Q1 2024 was $100,000."),
         ("user", "Tell me more."),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_some(), "should resolve from prior message");
     let intent = result.unwrap();
     assert_eq!(intent.table, "aws_spend");
@@ -92,7 +92,7 @@ fn deterministic_resolve_time_pivot_uses_current_time() {
         ("assistant", "Your AWS spend in Q1 2024 was $100,000."),
         ("user", "How about Q2 2024?"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_some(), "should resolve with time-pivot");
     let intent = result.unwrap();
     assert_eq!(intent.table, "aws_spend");
@@ -111,7 +111,7 @@ fn deterministic_resolve_returns_none_when_no_prior_resolves() {
         ("assistant", "I'm doing well!"),
         ("user", "What was the spend?"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_none(), "should return None when no prior resolves");
 }
 
@@ -126,7 +126,7 @@ fn deterministic_resolve_skips_prior_message_without_explicit_time() {
         ("assistant", "aws_spend tracks your cloud costs."),
         ("user", "How much was it?"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     // The prior "Tell me about aws_spend" has no explicit time → must be rejected.
     // Result: None (no prior with explicit time + table).
     assert!(result.is_none(), "prior without explicit time must NOT be accepted");
@@ -146,7 +146,7 @@ fn deterministic_resolve_respects_max_scan() {
         ("user", "What about the spending?"), // current
     ]);
     // max_scan=1 → only scans "Something unrelated." → no table match
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 1);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 1, usize::MAX);
     assert!(result.is_none(), "max_scan=1 should not reach the valid prior");
 }
 
@@ -164,7 +164,7 @@ fn deterministic_resolve_returns_none_for_same_period_phrase() {
         ("assistant", "AWS spend Q1 2024 was $12M."),
         ("user", "same thing but for last year same period"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(
         result.is_none(),
         "'same period' + 'last year' must return None — LLM rewriter required"
@@ -182,7 +182,7 @@ fn deterministic_resolve_returns_none_for_last_year_phrase() {
         ("assistant", "AWS spend Q1 2024 was $12M."),
         ("user", "how about last year?"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(
         result.is_none(),
         "'last year' must return None — LLM rewriter required for correct year pivot"
@@ -195,7 +195,7 @@ fn deterministic_resolve_returns_none_with_single_user_message() {
     let schema = make_schema();
     let backend = make_backend(&schema);
     let msgs = messages(&[("user", "How about Q2 2024?")]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_none(), "single user message — no prior to scan, must return None");
 }
 
@@ -208,7 +208,7 @@ fn deterministic_resolve_returns_none_for_same_quarter_phrase() {
         ("assistant", "AWS spend Q1 2024 was $12M."),
         ("user", "same quarter last year"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_none(), "'same quarter' must return None — needs LLM");
 }
 
@@ -221,7 +221,7 @@ fn deterministic_resolve_returns_none_for_same_month_phrase() {
         ("assistant", "AWS spend January 2024 was $4M."),
         ("user", "same month last year"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_none(), "'same month' must return None — needs LLM");
 }
 
@@ -234,7 +234,7 @@ fn deterministic_resolve_returns_none_for_prior_year_phrase() {
         ("assistant", "AWS spend Q3 2024 was $8M."),
         ("user", "what about prior year?"),
     ]);
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(result.is_none(), "'prior year' must return None — needs LLM for quarter pivot");
 }
 
@@ -506,7 +506,7 @@ fn per_table_rewriting_disable_respected_in_deterministic() {
 
     // deterministic_resolve itself doesn't check the flag — the call site (proxy.rs) does.
     // This test verifies the resolve still returns the intent (flag checked upstream).
-    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, usize::MAX);
     assert!(
         result.is_some(),
         "deterministic_resolve should return the intent (flag enforcement is caller's responsibility)"
