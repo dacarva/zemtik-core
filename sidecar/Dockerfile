@@ -14,8 +14,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 
 # Build context must be the repo root:
 #   docker build -f sidecar/Dockerfile -t zemtik-sidecar .
+#
+# GPU build (requires nvidia-container-toolkit on the host):
+#   INSTALL_CUDA=true DOCKER_BUILDKIT=1 docker compose --profile anonymizer build
+# CPU build (default):
+#   docker compose --profile anonymizer build
+ARG INSTALL_CUDA=false
+
 COPY sidecar/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install CUDA torch before gliner so gliner picks up CUDA wheels instead of CPU.
+# CUDA 12.4 wheels require driver >= 550. Adjust the index URL for other CUDA versions
+# (cu118, cu121, cu126 — see https://pytorch.org/get-started/locally/).
+RUN if [ "$INSTALL_CUDA" = "true" ]; then \
+      pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124; \
+    fi && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Bake the GLiNER model into the image at build time.
 # This avoids a 10-30s download on every container start and makes the

@@ -251,11 +251,14 @@ def load_models():
     presidio_analyzer = None
 
     try:
+        import torch
         from gliner import GLiNER
-        logger.info("Loading GLiNER model urchade/gliner_multi_pii-v1 ...")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("Loading GLiNER model urchade/gliner_multi_pii-v1 on %s ...", device)
         t0 = time.time()
         gliner_model = GLiNER.from_pretrained("urchade/gliner_multi_pii-v1")
-        logger.info("GLiNER loaded in %.1fs", time.time() - t0)
+        gliner_model = gliner_model.to(device)
+        logger.info("GLiNER loaded in %.1fs (device: %s)", time.time() - t0, device)
     except Exception as exc:
         raise RuntimeError(
             f"GLiNER failed to load — cannot start sidecar in a safe state: {exc}"
