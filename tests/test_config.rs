@@ -592,3 +592,56 @@ fn anonymizer_entity_types_default_includes_money_and_latam_ids() {
         assert!(types.contains(expected), "default anonymizer_entity_types missing: {expected}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #36 — new intent gate config env vars (ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS,
+// ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn intent_gate_defaults_are_correct() {
+    let config = load_from_sources(None, &HashMap::new(), &default_cli()).unwrap();
+    assert_eq!(config.intent_substring_gate_max_chars, 300,
+        "default gate_max_chars must be 300");
+    assert_eq!(config.intent_embed_prompt_max_chars, 250,
+        "default embed_prompt_max_chars must be 250");
+}
+
+#[test]
+fn intent_gate_max_chars_env_override() {
+    let e = env(&[("ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS", "500")]);
+    let config = load_from_sources(None, &e, &default_cli()).unwrap();
+    assert_eq!(config.intent_substring_gate_max_chars, 500);
+}
+
+#[test]
+fn intent_embed_prompt_max_chars_env_override() {
+    let e = env(&[("ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS", "128")]);
+    let config = load_from_sources(None, &e, &default_cli()).unwrap();
+    assert_eq!(config.intent_embed_prompt_max_chars, 128);
+}
+
+#[test]
+fn intent_gate_max_chars_zero_is_rejected() {
+    let e = env(&[("ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS", "0")]);
+    let result = load_from_sources(None, &e, &default_cli());
+    assert!(result.is_err(), "ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS=0 must be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS"), "error must name the var: {msg}");
+}
+
+#[test]
+fn intent_embed_prompt_max_chars_zero_is_rejected() {
+    let e = env(&[("ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS", "0")]);
+    let result = load_from_sources(None, &e, &default_cli());
+    assert!(result.is_err(), "ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS=0 must be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS"), "error must name the var: {msg}");
+}
+
+#[test]
+fn intent_gate_max_chars_non_integer_is_rejected() {
+    let e = env(&[("ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS", "abc")]);
+    let result = load_from_sources(None, &e, &default_cli());
+    assert!(result.is_err(), "non-integer ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS must be rejected");
+}

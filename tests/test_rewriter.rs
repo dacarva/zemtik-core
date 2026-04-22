@@ -575,3 +575,49 @@ mod token_budget_tests {
         assert!(result.is_ok(), "rewrite_query must not error on token budget truncation");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #36 — gate_max_chars threading through deterministic_resolve
+// ---------------------------------------------------------------------------
+
+/// When gate_max_chars is set to a small value (e.g. 50), a prior message shorter than 50
+/// chars resolves normally — the gate fires and carries the intent forward.
+#[test]
+fn deterministic_resolve_with_small_gate_max_chars_resolves_prior() {
+    // Prior: "What was aws_spend in Q1 2024?" = 30 chars, under gate_max_chars=50.
+    // Gate fires → resolves to aws_spend/Q1 2024. Current: no time → carries forward.
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let msgs = messages(&[
+        ("user", "What was aws_spend in Q1 2024?"),
+        ("assistant", "Your AWS spend in Q1 2024 was $100,000."),
+        ("user", "Tell me more."),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, 50);
+    assert!(result.is_some(), "should resolve prior intent with gate_max_chars=50");
+    let intent = result.unwrap();
+    assert_eq!(intent.table, "aws_spend");
+}
+
+/// When gate_max_chars=50, a prior message longer than 50 chars with "aws_spend" at
+/// the head still resolves: the gate is skipped but the backend receives the truncated
+/// head (first 50 chars), which contains the keyword.
+#[test]
+fn deterministic_resolve_long_prior_with_keyword_at_head_still_resolves() {
+    // Prior: "aws_spend Q1 2025 " + 100 'z's → 118 chars > gate_max_chars=50.
+    // Gate skipped; backend receives first 50 chars: "aws_spend Q1 2025 zzzzzzzzzzzzzz"
+    // — "aws_spend" is still in that window → resolves. Current: no time → carries forward.
+    let schema = make_schema();
+    let backend = make_backend(&schema);
+    let prior = format!("aws_spend Q1 2025 {}", "z".repeat(100));
+    assert!(prior.chars().count() > 50, "prior must exceed gate_max_chars");
+    let msgs = messages(&[
+        ("user", prior.as_str()),
+        ("assistant", "Your AWS spend in Q1 2025 was $200,000."),
+        ("user", "Tell me more."),
+    ]);
+    let result = deterministic_resolve(&msgs, &schema, &backend, 0.0, 5, 50);
+    assert!(result.is_some(), "aws_spend at position 0 is within first 50 chars → must resolve");
+    let intent = result.unwrap();
+    assert_eq!(intent.table, "aws_spend");
+}

@@ -1710,3 +1710,96 @@ async fn long_document_repro_issue_36() {
         table
     );
 }
+
+/// zemtik_mode=data is accepted and falls through to normal routing (same as absent).
+/// A data query that matches a table key routes to fast_lane as usual.
+#[tokio::test]
+async fn zemtik_mode_data_falls_through_to_normal_routing() {
+    let (addr, mock_openai) = spawn_general_passthrough_proxy().await;
+    mount_openai_chat_mock(&mock_openai).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "data",
+            "messages": [{"role": "user", "content": "aws_spend Q1 2024 total"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "zemtik_mode=data must return 200 for a data query");
+    // Must route to fast_lane, not general_lane
+    assert_eq!(
+        resp.headers().get("x-zemtik-engine").and_then(|v| v.to_str().ok()),
+        Some("fast_lane"),
+        "zemtik_mode=data must route to fast_lane for a matching data query"
+    );
+    // zemtik_mode must be stripped before forwarding to OpenAI
+    let received = mock_openai.received_requests().await.unwrap();
+    let upstream: Value = serde_json::from_slice(&received.last().unwrap().body).unwrap();
+    assert!(
+        upstream.get("zemtik_mode").is_none(),
+        "zemtik_mode must be stripped from the upstream request, body: {upstream}"
+    );
+}
+
+/// zemtik_mode=document in tunnel mode: the field is stripped and the request is
+/// forwarded via the tunnel passthrough. Tunnel mode ignores the routing hint.
+#[tokio::test]
+async fn zemtik_mode_document_in_tunnel_mode_is_ignored() {
+    use zemtik::config::ZemtikMode;
+
+    let mock_openai = MockServer::start().await;
+    mount_openai_chat_mock(&mock_openai).await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.mode = ZemtikMode::Tunnel;
+    config.tunnel_api_key = Some("tunnel-key".to_owned());
+    // general_passthrough intentionally off — tunnel must proceed regardless
+    config.general_passthrough_enabled = false;
+
+    let app = build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer tunnel-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "document",
+            "messages": [{"role": "user", "content": "Resume este contrato..."}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Tunnel mode is transparent passthrough — must not return 400 for passthrough=false
+    assert_eq!(
+        resp.status(), 200,
+        "zemtik_mode=document in tunnel mode must not return 400 (tunnel ignores routing hints)"
+    );
+    // zemtik_mode must be stripped before forwarding to OpenAI
+    let received = mock_openai.received_requests().await.unwrap();
+    let upstream: Value = serde_json::from_slice(&received.last().unwrap().body).unwrap();
+    assert!(
+        upstream.get("zemtik_mode").is_none(),
+        "zemtik_mode must be stripped from upstream request in tunnel mode"
+    );
+}

@@ -61,6 +61,17 @@ pub(crate) async fn handle_tunnel(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Strip zemtik-internal fields before forwarding. OpenAI rejects unknown top-level fields.
+    let body = if body_value.get("zemtik_mode").is_some() {
+        let mut stripped = body_value.clone();
+        if let Some(obj) = stripped.as_object_mut() {
+            obj.remove("zemtik_mode");
+        }
+        Bytes::from(serde_json::to_vec(&stripped).unwrap_or_else(|_| body.to_vec()))
+    } else {
+        body
+    };
+
     // Compute hashes for audit.
     let request_hash = hex::encode(Sha256::digest(&body));
     let prompt_hash = hex::encode(Sha256::digest(
