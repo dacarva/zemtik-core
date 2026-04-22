@@ -23,8 +23,22 @@ services:
     build:
       context: .
       dockerfile: sidecar/Dockerfile
+      args:
+        # Set INSTALL_CUDA=true to build with CUDA torch (GPU inference, ~50-100ms vs ~1-2s on CPU).
+        # Requires nvidia-container-toolkit on the host and driver >= 550 (CUDA 12.4).
+        # Build: INSTALL_CUDA=true docker compose --profile anonymizer build
+        INSTALL_CUDA: "${INSTALL_CUDA:-false}"
     expose:
       - "50051"
+    # GPU: uncomment the deploy block below when INSTALL_CUDA=true.
+    # Requires nvidia-container-toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     healthcheck:
       test: ["CMD", "grpc-health-probe", "-addr=localhost:50051"]
       interval: 10s
@@ -77,6 +91,8 @@ services:
       - ZEMTIK_ANONYMIZER_ENABLED=${ZEMTIK_ANONYMIZER_ENABLED:-false}
       - ZEMTIK_ANONYMIZER_ENTITY_TYPES=${ZEMTIK_ANONYMIZER_ENTITY_TYPES:-PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY}
       - ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=${ZEMTIK_ANONYMIZER_DEBUG_PREVIEW:-false}
+      # GLiNER runs on CPU in Docker — inference takes 2-4s on first call. Default 1500ms is too tight.
+      - ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS=${ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS:-5000}
       # OpenAI model forwarded to api.openai.com. gpt-5.4-nano is the current default.
       - ZEMTIK_OPENAI_MODEL=${ZEMTIK_OPENAI_MODEL:-gpt-5.4-nano}
       # Client ID used for DB filtering (default demo dataset uses 123).
