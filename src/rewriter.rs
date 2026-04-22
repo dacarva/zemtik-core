@@ -58,6 +58,7 @@ pub fn deterministic_resolve(
     backend: &dyn IntentBackend,
     threshold: f32,
     max_scan: usize,
+    gate_max_chars: usize,
 ) -> Option<IntentResult> {
     let start = Instant::now();
 
@@ -165,7 +166,7 @@ pub fn deterministic_resolve(
 
         // Try intent extraction on this prior message.
         if let Ok(prior_intent) =
-            intent::extract_intent_with_backend(&text, schema, backend, threshold)
+            intent::extract_intent_with_backend(&text, schema, backend, threshold, gate_max_chars)
         {
             found = Some(prior_intent);
             break;

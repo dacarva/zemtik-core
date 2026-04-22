@@ -64,6 +64,8 @@ flowchart LR
 |----------|---------|--------|-------------|
 | `ZEMTIK_INTENT_BACKEND` | `embed` | `embed`, `regex` | Intent extraction backend. `embed` uses BGE-small-en ONNX for semantic matching. `regex` uses keyword substring matching. Case-insensitive. |
 | `ZEMTIK_INTENT_THRESHOLD` | `0.65` | `0.0`–`1.0` | Cosine similarity threshold for the embedding backend. Prompts below this confidence score return HTTP 400 `NoTableIdentified` — they are not routed to ZK SlowLane. |
+| `ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS` | `300` | positive integer | Prompts longer than this value skip the substring short-circuit gate entirely. Prevents document bodies with incidental table-term mentions (e.g. the word "payroll" in an employment contract) from being false-positive matched to data tables. Set higher to allow longer prompts through the gate; set lower to bypass it more aggressively. The `extract_intent` CLI shim passes `usize::MAX` for backward compatibility. (v0.15.4+, issue #36) |
+| `ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS` | `250` | positive integer | Maximum characters of the user prompt fed to the EmbeddingBackend. The prompt is truncated to this length before computing cosine similarity. Prevents long document bodies from dominating the embedding and producing false-positive table matches. Does not affect the substring gate. (v0.15.4+, issue #36) |
 
 ### OpenAI client
 
@@ -123,6 +125,33 @@ General Passthrough routes these requests to OpenAI directly and logs a receipt.
 |----------|---------|--------|-------------|
 | `ZEMTIK_GENERAL_PASSTHROUGH` | `false` | `1`, `true` | Enable General Passthrough. Off by default — preserves existing 400 behavior. |
 | `ZEMTIK_GENERAL_MAX_RPM` | `0` | positive integer | Max requests/minute for the general lane. `0` = unlimited. Per-instance (not cluster-wide). |
+
+#### `zemtik_mode` request field (v0.15.4+)
+
+Clients can force the general lane on a per-request basis by adding `"zemtik_mode": "document"` to the top-level request body. This bypasses intent extraction entirely — useful for document processing workloads where data query routing is not wanted.
+
+| Value | Effect |
+|-------|--------|
+| `"document"` | Skip intent matching; route directly to general lane. Requires `ZEMTIK_GENERAL_PASSTHROUGH=1`. Returns HTTP 400 if passthrough is disabled. |
+| `"data"` | Force normal routing (same as omitting the field). |
+| absent | Normal routing — intent extraction runs as usual. |
+
+The anonymizer runs regardless of `zemtik_mode` value. The field is stripped before forwarding to OpenAI. Tunnel mode ignores the field. Invalid values return HTTP 400.
+
+`zemtik_meta.reason` is `"zemtik_mode_document"` when the general lane was selected due to this field (distinguishes it from `"no_table_match"`).
+
+```bash
+# Document processing with PII protection — no data routing
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "x-session-id: session-abc123" \
+  -d '{
+    "model": "gpt-5.4-nano",
+    "zemtik_mode": "document",
+    "messages": [{"role": "user", "content": "Summarize the obligations in this contract..."}]
+  }'
+```
 
 > **Production warning:** `ZEMTIK_GENERAL_MAX_RPM` defaults to `0` (unlimited). In production, set an explicit limit to prevent runaway OpenAI API costs from unexpected traffic. Recommended starting point: `60` RPM per instance.
 

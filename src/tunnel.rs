@@ -61,6 +61,39 @@ pub(crate) async fn handle_tunnel(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Validate and strip zemtik-internal fields before forwarding.
+    // OpenAI rejects unknown top-level fields with 400, so the strip must happen first.
+    // Tunnel mode is transparent passthrough — valid values are silently ignored,
+    // but invalid values (wrong type or unknown string) are still rejected so clients
+    // with a single config catch typos when targeting either mode.
+    let body = if let Some(mode_val) = body_value.get("zemtik_mode") {
+        let valid = match mode_val.as_str() {
+            Some("document") | Some("data") => true,
+            Some(_) | None => false,
+        };
+        if !valid {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "invalid_zemtik_mode",
+                        "message": format!(
+                            "invalid zemtik_mode {:?}: expected 'document' or 'data'",
+                            mode_val
+                        )
+                    }
+                })),
+            ).into_response();
+        }
+        let mut stripped = body_value.clone();
+        if let Some(obj) = stripped.as_object_mut() {
+            obj.remove("zemtik_mode");
+        }
+        Bytes::from(serde_json::to_vec(&stripped).unwrap_or_else(|_| body.to_vec()))
+    } else {
+        body
+    };
+
     // Compute hashes for audit.
     let request_hash = hex::encode(Sha256::digest(&body));
     let prompt_hash = hex::encode(Sha256::digest(
@@ -390,6 +423,7 @@ async fn run_fork2_pipeline(
     };
 
     let threshold = state.config.intent_confidence_threshold;
+    let gate_max_chars = state.config.intent_substring_gate_max_chars;
     let backend = Arc::clone(&state.intent_backend);
     let prompt_clone = prompt.clone();
     let schema_clone = schema.clone();
@@ -400,6 +434,7 @@ async fn run_fork2_pipeline(
             &schema_clone,
             backend.as_ref(),
             threshold,
+            gate_max_chars,
         ).map_err(|e| e.to_string())
     })
     .await

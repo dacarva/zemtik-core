@@ -1088,3 +1088,66 @@ async fn streaming_passthrough_in_tunnel_mode() {
     );
 }
 
+/// zemtik_mode=document in tunnel mode: the field is stripped and the request is forwarded
+/// via transparent passthrough. Tunnel mode ignores the routing hint but still validates
+/// the value and rejects invalid ones.
+#[tokio::test]
+async fn zemtik_mode_document_in_tunnel_mode_is_ignored() {
+    let (addr, mock_openai) = spawn_tunnel_proxy().await;
+    mount_chat_mock(&mock_openai).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&serde_json::json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "document",
+            "messages": [{"role": "user", "content": "Resume este contrato..."}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Tunnel mode is transparent passthrough — must return 200 even with general_passthrough=false.
+    assert_eq!(
+        resp.status(), 200,
+        "zemtik_mode=document in tunnel mode must not return 400 (tunnel ignores routing hints)"
+    );
+    // zemtik_mode must be stripped before forwarding to OpenAI.
+    let received = mock_openai.received_requests().await.unwrap();
+    let upstream: serde_json::Value =
+        serde_json::from_slice(&received.last().unwrap().body).unwrap();
+    assert!(
+        upstream.get("zemtik_mode").is_none(),
+        "zemtik_mode must be stripped from upstream request in tunnel mode"
+    );
+}
+
+/// zemtik_mode with an invalid value returns 400 in tunnel mode (validation before strip).
+#[tokio::test]
+async fn zemtik_mode_invalid_in_tunnel_mode_returns_400() {
+    let (addr, _mock_openai) = spawn_tunnel_proxy().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("authorization", "Bearer sk-test")
+        .json(&serde_json::json!({
+            "model": "gpt-5.4-nano",
+            "zemtik_mode": "banana",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400, "invalid zemtik_mode must return 400 in tunnel mode");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("invalid_zemtik_mode") || msg.contains("expected 'document' or 'data'"),
+        "error message must describe the validation failure, got: {msg}"
+    );
+}
+

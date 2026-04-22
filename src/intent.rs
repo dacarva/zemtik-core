@@ -144,8 +144,10 @@ fn tables_matching_substrings(prompt_lower: &str, schema: &SchemaConfig) -> Vec<
 ///
 /// Rules:
 /// 1. Truncate prompt to 2000 chars before matching.
-/// 2. If **exactly one** table's key or alias appears as a substring of the prompt (same rules as
-///    `RegexBackend`), use that table with confidence `1.0` and skip embedding/margin checks.
+/// 2. If the prompt is short (≤ `gate_max_chars` chars) and **exactly one** table's key or alias
+///    appears as a substring, use that table with confidence `1.0` and skip embedding/margin
+///    checks. Long prompts skip the gate entirely — document bodies that incidentally contain
+///    table terms should not short-circuit the margin check. See issue #36.
 /// 3. Else call `backend.match_prompt(prompt, 3)`.
 /// 4. If results are empty or `scores[0] < threshold` → `Err(NoTableIdentified)`.
 /// 5. If at least 2 results and `scores[0] - scores[1] < 0.10` → `Err(NoTableIdentified)`
@@ -157,10 +159,12 @@ pub fn extract_intent_with_backend(
     schema: &SchemaConfig,
     backend: &dyn IntentBackend,
     threshold: f32,
+    gate_max_chars: usize,
 ) -> Result<IntentResult, IntentError> {
-    // Truncate long prompts before embedding (truncate at char boundary, not byte boundary)
+    // Truncate long prompts before embedding (truncate at char boundary, not byte boundary).
+    // Use chars().count() — len() counts bytes and truncates UTF-8 multi-byte chars early.
     let truncated;
-    let prompt = if prompt.len() > 2000 {
+    let prompt = if prompt.chars().count() > 2000 {
         truncated = prompt
             .char_indices()
             .nth(2000)
@@ -171,8 +175,18 @@ pub fn extract_intent_with_backend(
         prompt
     };
 
+    // Cache after outer truncation — avoids recomputing O(n) char count below.
+    let prompt_len = prompt.chars().count();
     let prompt_lower = prompt.to_lowercase();
-    let substring_hits = tables_matching_substrings(&prompt_lower, schema);
+
+    // Only run the substring gate for short prompts. Long prompts are almost always
+    // document-processing requests (contracts, reports, letters) where incidental
+    // table-term mentions in the body should not short-circuit the margin check.
+    let substring_hits = if prompt_len <= gate_max_chars {
+        tables_matching_substrings(&prompt_lower, schema)
+    } else {
+        Vec::new()
+    };
 
     // If exactly one table is named by key or alias in the prompt, trust that over
     // embedding cosine ties (e.g. "T&E expenses" vs payroll + travel both scoring high).
@@ -191,7 +205,17 @@ pub fn extract_intent_with_backend(
         });
     }
 
-    let matches = backend.match_prompt(prompt, 3);
+    // For long prompts, only show the backend the instruction head. The regex backend
+    // does substring matching on whatever it receives; the embedding backend applies
+    // its own internal cap on top of this. Both should ignore the document body.
+    let backend_prompt_buf;
+    let backend_prompt = if prompt_len > gate_max_chars {
+        backend_prompt_buf = crate::intent_embed::truncate_chars(prompt, gate_max_chars);
+        backend_prompt_buf
+    } else {
+        prompt
+    };
+    let matches = backend.match_prompt(backend_prompt, 3);
 
     // Check top-1 score against threshold
     let (table, confidence) = match matches.first() {
@@ -207,9 +231,10 @@ pub fn extract_intent_with_backend(
         }
     }
 
-    // Parse time range (uses LazyLock regexes — no per-call compile)
+    // Parse time range from the same instruction window shown to the backend.
+    // Using the full prompt risks document-body dates causing ambiguous matches.
     let time_range =
-        parse_time_range(prompt, schema.fiscal_year_offset_months).map_err(IntentError::from)?;
+        parse_time_range(backend_prompt, schema.fiscal_year_offset_months).map_err(IntentError::from)?;
 
     Ok(IntentResult {
         category_name: table.clone(),
@@ -225,8 +250,10 @@ pub fn extract_intent_with_backend(
 /// Backward-compatible shim using `RegexBackend` with no threshold (matches any table).
 ///
 /// Call sites outside proxy mode (CLI pipeline, tests) continue to work unchanged.
+/// Passes `usize::MAX` as the gate max so the substring gate fires on any prompt length,
+/// preserving the original behavior for non-proxy callers.
 pub fn extract_intent(prompt: &str, schema: &SchemaConfig) -> Result<IntentResult, IntentError> {
     let mut backend = RegexBackend::new();
     backend.index_schema(schema);
-    extract_intent_with_backend(prompt, schema, &backend, 0.0)
+    extract_intent_with_backend(prompt, schema, &backend, 0.0, usize::MAX)
 }

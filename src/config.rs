@@ -360,6 +360,13 @@ pub struct AppConfig {
     pub intent_confidence_threshold: f32,
     /// Intent backend to use: "embed" (default) or "regex" (forced regex fallback).
     pub intent_backend: String,
+    /// Max prompt length (chars) for which the substring gate is trusted.
+    /// Prompts longer than this skip the gate and go to the margin check.
+    /// Default: 300. Env: ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS.
+    pub intent_substring_gate_max_chars: usize,
+    /// Max prompt length (chars) used as embedding-backend input.
+    /// Default: 250. Env: ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS.
+    pub intent_embed_prompt_max_chars: usize,
     /// Path to schema_config.json. Default: ~/.zemtik/schema_config.json.
     #[serde(skip)]
     pub schema_config_path: PathBuf,
@@ -572,6 +579,8 @@ impl Default for AppConfig {
             models_dir: base.join("models"),
             intent_confidence_threshold: 0.65,
             intent_backend: "embed".to_owned(),
+            intent_substring_gate_max_chars: 300,
+            intent_embed_prompt_max_chars: 250,
             schema_config_path: base.join("schema_config.json"),
             schema_config: None,
             schema_config_hash: None,
@@ -744,6 +753,16 @@ pub fn load_from_sources(
     }
     if let Some(v) = env.get("ZEMTIK_INTENT_BACKEND") {
         config.intent_backend = v.clone();
+    }
+    if let Some(v) = env.get("ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS") {
+        let n: usize = v.trim().parse().context("parse ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS")?;
+        anyhow::ensure!(n > 0, "ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS must be > 0, got {}", n);
+        config.intent_substring_gate_max_chars = n;
+    }
+    if let Some(v) = env.get("ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS") {
+        let n: usize = v.trim().parse().context("parse ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS")?;
+        anyhow::ensure!(n > 0, "ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS must be > 0, got {}", n);
+        config.intent_embed_prompt_max_chars = n;
     }
     if let Some(v) = env.get("OPENAI_API_KEY") {
         config.openai_api_key = Some(v.clone());
@@ -1095,6 +1114,20 @@ pub fn load_from_sources(
         config.schema_config = Some(sc);
         config.schema_config_hash = Some(hash);
     }
+
+    // Post-layer validation: catch zero/invalid values that the YAML layer can set
+    // (serde deserializes without range checks; env-layer parsing validates its own inputs,
+    // but a YAML file with intent_substring_gate_max_chars: 0 would pass serde unchanged).
+    anyhow::ensure!(
+        config.intent_substring_gate_max_chars > 0,
+        "intent_substring_gate_max_chars must be > 0, got {} (check config YAML or ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS)",
+        config.intent_substring_gate_max_chars
+    );
+    anyhow::ensure!(
+        config.intent_embed_prompt_max_chars > 0,
+        "intent_embed_prompt_max_chars must be > 0, got {} (check config YAML or ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS)",
+        config.intent_embed_prompt_max_chars
+    );
 
     Ok(config)
 }
