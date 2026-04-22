@@ -964,6 +964,242 @@ async fn health_includes_general_lane_counters() {
     );
 }
 
+/// /health anonymizer block is present and shows disabled when anonymizer is off (default).
+#[tokio::test]
+async fn health_anonymizer_block_disabled_by_default() {
+    let (addr, _mock) = spawn_test_proxy().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let anon = body.get("anonymizer").expect("health must include anonymizer block");
+    assert_eq!(anon["enabled"], false, "anonymizer.enabled must be false by default");
+    assert_eq!(
+        anon["sidecar_status"], "disabled",
+        "anonymizer.sidecar_status must be 'disabled' when anonymizer is off, body: {body}"
+    );
+}
+
+/// /health anonymizer block shows unreachable when enabled but sidecar is not running.
+#[tokio::test]
+async fn health_anonymizer_block_when_enabled_unreachable() {
+    // Use existing regex-fallback helper: anonymizer_enabled=true, sidecar at dead port 1.
+    let (addr, _mock) = spawn_test_proxy_anonymizer_regex_fallback().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    assert_eq!(resp.status(), 200, "/health must return 200 even when sidecar is unreachable");
+    let body: Value = resp.json().await.unwrap();
+    let anon = body.get("anonymizer").expect("health must include anonymizer block");
+    assert_eq!(anon["enabled"], true, "anonymizer.enabled must be true");
+    assert_eq!(
+        anon["sidecar_status"], "unreachable",
+        "sidecar_status must be 'unreachable' when sidecar not running, body: {body}"
+    );
+    assert!(
+        anon.get("probe_latency_ms").is_some(),
+        "probe_latency_ms must be present when enabled, body: {body}"
+    );
+    let latency = anon["probe_latency_ms"].as_u64().unwrap_or(u64::MAX);
+    assert!(latency < 2000, "probe must time out well under 2s, got {latency}ms");
+}
+
+/// /health anonymizer block shows "serving" when the sidecar gRPC health check passes.
+///
+/// Starts a real tonic gRPC health server on an ephemeral port that reports SERVING,
+/// then checks that /health picks it up correctly.
+#[tokio::test]
+async fn health_anonymizer_block_serving() {
+    use tonic_health::server::health_reporter;
+    use tonic_health::ServingStatus;
+    use tonic::transport::Server;
+
+    // Start a real gRPC health server that reports SERVING.
+    let (mut reporter, health_svc) = health_reporter();
+    reporter
+        .set_service_status("", ServingStatus::Serving)
+        .await;
+
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_addr = grpc_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(health_svc)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
+            .await
+            .unwrap();
+    });
+
+    // Build a proxy configured to probe the gRPC health server above.
+    let mock_openai = wiremock::MockServer::start().await;
+    let mut config = zemtik::config::AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = format!("http://{}", grpc_addr);
+    config.anonymizer_fallback_regex = true;
+
+    let app = zemtik::proxy::build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Give the gRPC server a moment to be ready.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/health", proxy_addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let anon = body.get("anonymizer").expect("health must include anonymizer block");
+    assert_eq!(anon["enabled"], true);
+    assert_eq!(
+        anon["sidecar_status"], "serving",
+        "sidecar_status must be 'serving' when gRPC health check passes, body: {body}"
+    );
+    assert!(anon.get("probe_latency_ms").is_some(), "probe_latency_ms must be present");
+    assert!(anon.get("sidecar_addr").is_some(), "sidecar_addr must be present");
+}
+
+/// /health anonymizer block shows "not_serving" when sidecar gRPC reports NOT_SERVING.
+#[tokio::test]
+async fn health_anonymizer_block_not_serving() {
+    use tonic_health::server::health_reporter;
+    use tonic_health::ServingStatus;
+    use tonic::transport::Server;
+
+    let (mut reporter, health_svc) = health_reporter();
+    reporter
+        .set_service_status("", ServingStatus::NotServing)
+        .await;
+
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_addr = grpc_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(health_svc)
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
+            .await
+            .unwrap();
+    });
+
+    let mock_openai = wiremock::MockServer::start().await;
+    let mut config = zemtik::config::AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.openai_api_key = Some("test-key".to_owned());
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.anonymizer_enabled = true;
+    config.anonymizer_sidecar_addr = format!("http://{}", grpc_addr);
+    config.anonymizer_fallback_regex = true;
+
+    let app = zemtik::proxy::build_proxy_router(config).await.expect("build failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/health", proxy_addr))
+        .send()
+        .await
+        .expect("health request failed");
+
+    assert_eq!(resp.status(), 200, "/health stays 200 even when sidecar not_serving");
+    let body: Value = resp.json().await.unwrap();
+    let anon = body.get("anonymizer").expect("health must include anonymizer block");
+    assert_eq!(
+        anon["sidecar_status"], "not_serving",
+        "sidecar_status must be 'not_serving', body: {body}"
+    );
+}
+
+/// /verify/{id} shows the "GENERAL LANE" badge and evidence block for general_lane receipts.
+///
+/// Sends a general_lane request to get a receipt_id, then GETs /verify/{id} and
+/// asserts the rendered HTML contains the correct badge text and evidence fields.
+#[tokio::test]
+async fn verify_page_shows_general_lane_badge() {
+    let (addr, mock_openai) = spawn_test_proxy_with_general_passthrough(0).await;
+    mount_openai_chat_mock(&mock_openai).await;
+    let client = reqwest::Client::new();
+
+    // Fire a general_lane request to create a receipt.
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", addr))
+        .header("Authorization", "Bearer test-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "Explain machine learning."}]
+        }))
+        .send()
+        .await
+        .expect("general_lane request failed");
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let receipt_id = body["zemtik_meta"]["receipt_id"]
+        .as_str()
+        .expect("receipt_id must be present")
+        .to_owned();
+
+    // Fetch the /verify/{id} page.
+    let verify_resp = client
+        .get(format!("http://{}/verify/{}", addr, receipt_id))
+        .send()
+        .await
+        .expect("verify request failed");
+
+    assert_eq!(verify_resp.status(), 200, "/verify/{{id}} must return 200");
+    let html = verify_resp.text().await.unwrap();
+
+    assert!(
+        html.contains("GENERAL LANE"),
+        "/verify page must show GENERAL LANE badge, got html (first 500 chars): {}",
+        &html[..html.len().min(500)]
+    );
+    assert!(
+        html.contains("general_lane"),
+        "/verify page must reference engine general_lane in evidence"
+    );
+    assert!(
+        html.contains("no_table_match") || html.contains("none"),
+        "/verify page must show zk_coverage or reason from evidence_json"
+    );
+}
+
 /// GeneralLane rate limiter: with max_rpm=1, the second rapid request returns 429.
 #[tokio::test]
 async fn general_lane_rpm_budget_exceeded() {

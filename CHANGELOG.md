@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.3] - 2026-04-22
+
+### Added
+- **Sidecar health in `/health`** — `GET /health` now includes an `anonymizer` block with a live gRPC probe to the sidecar on every request (500ms budget). Fields: `enabled`, `sidecar_addr`, `sidecar_status` (`serving` | `not_serving` | `unreachable` | `disabled`), and `probe_latency_ms`. HTTP status code unchanged — sidecar-down does not flip 200→503 since the regex fallback keeps the proxy operational.
+- **GPU auto-detect for GLiNER** — sidecar now calls `torch.cuda.is_available()` at startup and moves the GLiNER model to `cuda` if a GPU is present. CPU inference unchanged when no GPU is found. Build with `INSTALL_CUDA=true docker compose --profile anonymizer build` to include CUDA torch wheels; sidecar Dockerfile accepts a new `INSTALL_CUDA` build arg (default `false`).
+- **Docker Compose sidecar timeout default** — `ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS` now defaults to `5000` ms (from `1500`) in `docker-compose.yml` to accommodate GLiNER CPU inference latency (~1-2s on first call).
+
+### Fixed
+- **`/verify/{id}` badge for general-lane receipts** — receipts with `proof_status=general_lane` were showing an "INVALID" red badge. Now shows "GENERAL LANE" (purple) with a correct subtitle. `general_lane_rate_limited` shows "RATE LIMITED" (amber).
+- **`/verify/{id}` evidence completeness** — general-lane receipts now persist `engine_used`, `zk_coverage`, `reason`, and the full `anonymizer` block to `evidence_json` so the verify page renders routing reason, ZK coverage, PII summary, and query hash.
+
 ## [0.15.2] - 2026-04-21
 
 ### Added

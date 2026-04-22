@@ -1517,6 +1517,23 @@ async fn handle_general_lane(
                 }
                 zemtik_meta["anonymizer"] = anon_block;
             }
+            // Persist general lane metadata to receipt so /verify page is complete.
+            {
+                let mut evidence = serde_json::json!({
+                    "engine_used": "general_lane",
+                    "zk_coverage": "none",
+                    "reason": zemtik_meta.get("reason"),
+                });
+                if let Some(anon) = zemtik_meta.get("anonymizer") {
+                    evidence["anonymizer"] = anon.clone();
+                }
+                if let Ok(json) = serde_json::to_string(&evidence) {
+                    let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Err(e) = receipts::update_evidence_json(&db_guard, &receipt_id, &json) {
+                        eprintln!("[GENERAL_LANE] Warning: failed to update evidence_json {}: {}", receipt_id, e);
+                    }
+                }
+            }
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("zemtik_meta".to_string(), zemtik_meta);
                 serde_json::to_vec(&v).unwrap_or_else(|_| resp_bytes.to_vec())
@@ -2099,7 +2116,15 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
     let (badge_color, status_label) = match r.proof_status.as_str() {
         s if s.starts_with("VALID") => ("#22c55e", "VALID"),
         "FAST_LANE_ATTESTED" => ("#3b82f6", "FAST LANE ATTESTED"),
+        "general_lane" => ("#8b5cf6", "GENERAL LANE"),
+        "general_lane_rate_limited" => ("#f59e0b", "RATE LIMITED"),
         _ => ("#ef4444", "INVALID"),
+    };
+
+    let subtitle = match r.proof_status.as_str() {
+        "general_lane" | "general_lane_rate_limited" =>
+            "Audit evidence — non-data query forwarded directly to LLM; no database records accessed",
+        _ => "Audit evidence — no raw records were transmitted to the LLM",
     };
 
     // Parse evidence_json for richer data (v9+). Fall back to ZK bundle readable inputs.
@@ -2178,6 +2203,22 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
         })
         .unwrap_or_default();
 
+    let reason_row = ev
+        .as_ref()
+        .and_then(|v| v.get("reason"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(r#"<tr><td>Routing Reason</td><td>{}</td></tr>"#, html_escape(s)))
+        .unwrap_or_default();
+
+    let zk_coverage_row = ev
+        .as_ref()
+        .and_then(|v| v.get("zk_coverage"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(r#"<tr><td>ZK Coverage</td><td>{}</td></tr>"#, html_escape(s)))
+        .unwrap_or_default();
+
     let attestation_row = ev
         .as_ref()
         .and_then(|v| v.get("attestation_hash"))
@@ -2199,6 +2240,36 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
     } else {
         String::new()
     };
+
+    let anonymizer_html = ev
+        .as_ref()
+        .and_then(|v| v.get("anonymizer"))
+        .filter(|a| !a.is_null())
+        .map(|a| {
+            let entities_found = a.get("entities_found").and_then(|v| v.as_u64()).unwrap_or(0);
+            let dropped = a.get("dropped_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let types = a.get("entity_types")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|t| t.as_str())
+                    .map(|t| format!("<code>{}</code>", html_escape(t)))
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_else(|| "—".to_owned());
+            format!(
+                r#"<div class="anon-box">
+  <strong>PII Anonymized</strong>
+  <p>{entities_found} entit{plural} detected and stripped before forwarding to LLM ({dropped} token{dp} replaced).</p>
+  <p>Types: {types}</p>
+</div>"#,
+                entities_found = entities_found,
+                plural = if entities_found == 1 { "y" } else { "ies" },
+                dropped = dropped,
+                dp = if dropped == 1 { "" } else { "s" },
+                types = types,
+            )
+        })
+        .unwrap_or_default();
 
     // Pretty-print evidence JSON for the raw block
     let evidence_json_pretty = ev
@@ -2243,17 +2314,21 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
   .footer {{ margin-top: 32px; font-size: 0.8rem; color: #999; }}
   .back-link {{ margin-bottom: 24px; font-size: 0.9rem; }}
   .back-link a {{ color: #3b82f6; text-decoration: none; }}
+  .anon-box {{ background: #fdf4ff; border-left: 3px solid #8b5cf6; padding: 12px 16px; margin-bottom: 20px; border-radius: 0 6px 6px 0; font-size: 0.95rem; }}
+  .anon-box p {{ margin: 6px 0 0; color: #444; }}
+  .anon-box code {{ background: #ede9fe; padding: 1px 4px; border-radius: 3px; font-size: 0.82rem; }}
   @media print {{ .footer, .back-link, .json-block {{ display: none; }} }}
 </style>
 </head>
 <body>
 {back_link}
 <h1>Zemtik Cryptographic Receipt</h1>
-<p class="subtitle">Audit evidence — no raw records were transmitted to the LLM</p>
+<p class="subtitle">{subtitle}</p>
 
 <div class="badge">{status_label}</div>
 
 {human_summary_html}
+{anonymizer_html}
 
 <table>
   <tr><td>Receipt ID</td><td class="mono">{id}</td></tr>
@@ -2261,10 +2336,13 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
   <tr><td>Table</td><td>{table_display}</td></tr>
   <tr><td>Engine</td><td>{engine_label}</td></tr>
   <tr><td>Proof Status</td><td>{proof_status}</td></tr>
+  {reason_row}
+  {zk_coverage_row}
   {attestation_row}
   {proof_row}
   <tr><td>Generated At</td><td>{created_at}</td></tr>
   <tr><td>Raw Rows to LLM</td><td><strong>0</strong></td></tr>
+  <tr><td>Query Hash</td><td class="mono">{prompt_hash}</td></tr>
 </table>
 
 {checks_html}
@@ -2282,14 +2360,19 @@ fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value
         badge_color = badge_color,
         status_label = status_label,
         human_summary_html = human_summary_html,
+        subtitle = subtitle,
         aggregate_display = html_escape(&aggregate_display),
         table_display = html_escape(&table_display),
         engine_label = html_escape(engine_label),
         proof_status = html_escape(&r.proof_status),
+        reason_row = reason_row,
+        zk_coverage_row = zk_coverage_row,
         attestation_row = attestation_row,
         proof_row = proof_row,
         created_at = html_escape(&r.created_at),
+        prompt_hash = html_escape(&r.prompt_hash),
         checks_html = checks_html,
+        anonymizer_html = anonymizer_html,
         evidence_json_pretty = evidence_json_pretty,
     )
 }
@@ -2784,6 +2867,39 @@ async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl IntoRespons
         let intent_failures = receipts::count_intent_failures_today(&db_guard).unwrap_or(0);
         obj.insert("general_queries_today".to_string(), serde_json::json!(general_today));
         obj.insert("intent_failures_today".to_string(), serde_json::json!(intent_failures));
+    }
+
+    // Step 4.5: anonymizer sidecar probe.
+    if let Some(obj) = body.as_object_mut() {
+        let anon_block = if state.config.anonymizer_enabled {
+            let addr = state.config.anonymizer_sidecar_addr.clone();
+            let probe_deadline = std::time::Duration::from_millis(500);
+            let t0 = std::time::Instant::now();
+            let status = match build_channel(&addr) {
+                Ok(channel) => tokio::time::timeout(probe_deadline, check_sidecar_health(channel))
+                    .await
+                    .unwrap_or(SidecarHealth::Unreachable),
+                Err(_) => SidecarHealth::Unreachable,
+            };
+            let latency_ms = t0.elapsed().as_millis() as u64;
+            let status_str = match status {
+                SidecarHealth::Serving => "serving",
+                SidecarHealth::NotServing => "not_serving",
+                SidecarHealth::Unreachable => "unreachable",
+            };
+            serde_json::json!({
+                "enabled": true,
+                "sidecar_addr": addr,
+                "sidecar_status": status_str,
+                "probe_latency_ms": latency_ms,
+            })
+        } else {
+            serde_json::json!({
+                "enabled": false,
+                "sidecar_status": "disabled",
+            })
+        };
+        obj.insert("anonymizer".to_string(), anon_block);
     }
 
     // Step 5: append schema_validation results.

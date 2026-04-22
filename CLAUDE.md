@@ -111,7 +111,7 @@ POST /v1/chat/completions (user prompt)
 | File | Role |
 |------|------|
 | `main.rs` | Pipeline orchestrator; CLI arg parsing; routes to proxy / verify / list / list-tunnel / pipeline |
-| `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception; FastLane + ZK dispatch; tunnel mode routing |
+| `proxy.rs` | Axum HTTP server; `POST /v1/chat/completions` interception; FastLane + ZK dispatch; tunnel mode routing; `GET /health` returns `schema_validation` + `anonymizer` block (`enabled`, `sidecar_addr`, `sidecar_status`, `probe_latency_ms`) |
 | `tunnel.rs` | Tunnel mode handlers: `handle_tunnel` (FORK 1 + FORK 2 dispatch), `handle_audit`, `handle_audit_csv`, `handle_summary`, `handle_tunnel_passthrough`; `TunnelAuditRecord` persistence; diff computation |
 | `intent.rs` | `IntentBackend` trait + `RegexBackend` (fallback); dispatches to embedding or regex backend |
 | `intent_embed.rs` | `EmbeddingBackend` (fastembed + BGE-small-en ONNX, CPU-only); schema index builder; cosine similarity |

@@ -74,12 +74,19 @@ curl -s http://localhost:4000/health | jq .
   "schema_validation": {
     "status": "ok",
     "tables": [{"table_key": "...", "row_count": N, "status": "ok"}]
+  },
+  "anonymizer": {
+    "enabled": false,
+    "sidecar_status": "disabled"
   }
 }
 ```
 
+When `ZEMTIK_ANONYMIZER_ENABLED=true` the `anonymizer` block includes `sidecar_addr`, `sidecar_status` (`"serving"` | `"not_serving"` | `"unreachable"`), and `probe_latency_ms`.
+
 - [ ] `status: "ok"`
 - [ ] `schema_validation.status` is `"ok"` (not `"warnings"`)
+- [ ] `anonymizer.sidecar_status` is `"serving"` when anonymizer is enabled
 
 ---
 
