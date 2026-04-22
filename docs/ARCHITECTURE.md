@@ -304,11 +304,28 @@ Returns a JSON object with proxy status, version, and (v0.9.1+) the startup vali
       { "table_key": "aws_spend", "physical_table": "aws_spend", "status": "ok",   "row_count": 500, "warnings": [] },
       { "table_key": "payroll",   "physical_table": "payroll",   "status": "warn", "row_count": 0,   "warnings": ["table is empty"] }
     ]
+  },
+  "anonymizer": {
+    "enabled": true,
+    "sidecar_addr": "http://sidecar:50051",
+    "sidecar_status": "serving",
+    "probe_latency_ms": 23
   }
 }
 ```
 
 `schema_validation.skipped: true` when `ZEMTIK_SKIP_DB_VALIDATION=1` or the backend is SQLite.
+
+The `anonymizer` block is always present. When `ZEMTIK_ANONYMIZER_ENABLED=false` (the default) it collapses to `{"enabled": false, "sidecar_status": "disabled"}` and no probe is run. When the anonymizer is enabled, a gRPC health check is performed against the sidecar at startup; `sidecar_status` reflects the result:
+
+| `sidecar_status` | Meaning |
+|---|---|
+| `"serving"` | gRPC health check passed; sidecar is ready |
+| `"not_serving"` | Sidecar is running but reports NOT_SERVING (model still loading) |
+| `"unreachable"` | Could not connect or probe timed out (> 500 ms); regex fallback is active |
+| `"disabled"` | `ZEMTIK_ANONYMIZER_ENABLED=false` — no probe was run |
+
+The `/health` HTTP status code is not affected by sidecar state — it stays `200` as long as the database is up. A sidecar in `unreachable` state degrades to regex-only PII detection but does not prevent the proxy from serving requests (provided `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true`, which is the default).
 
 ### 11. The OpenAI Client (`src/openai.rs` and proxy injection)
 

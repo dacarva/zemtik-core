@@ -330,6 +330,49 @@ Mitigation: the system prompt injected by Zemtik instructs the model to treat to
 
 ---
 
+## Operator Monitoring
+
+### Sidecar status via `/health`
+
+`GET /health` always includes an `anonymizer` block. Use it to confirm the sidecar is reachable before sending traffic.
+
+When the anonymizer is disabled (default):
+
+```json
+{
+  "anonymizer": {
+    "enabled": false,
+    "sidecar_status": "disabled"
+  }
+}
+```
+
+When the anonymizer is enabled and the sidecar is ready:
+
+```json
+{
+  "anonymizer": {
+    "enabled": true,
+    "sidecar_addr": "http://sidecar:50051",
+    "sidecar_status": "serving",
+    "probe_latency_ms": 23
+  }
+}
+```
+
+`sidecar_status` values:
+
+| Value | Meaning |
+|---|---|
+| `"serving"` | gRPC health check passed; sidecar is ready |
+| `"not_serving"` | Sidecar is running but reports NOT_SERVING (model still loading) |
+| `"unreachable"` | Could not connect or probe timed out (> 500 ms); regex fallback is active |
+| `"disabled"` | `ZEMTIK_ANONYMIZER_ENABLED=false` — no probe was run |
+
+The HTTP status code of `/health` is not affected by sidecar state — it remains `200` as long as the database is up. An `unreachable` sidecar degrades detection to regex-only mode but does not take the proxy offline.
+
+---
+
 ## Troubleshooting
 
 ### Sidecar won't start
