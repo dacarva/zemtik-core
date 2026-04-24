@@ -528,11 +528,9 @@ async fn handle_chat_completions(
     // for authenticating requests to this proxy. Missing key is a startup error (build_proxy_router),
     // but we defend in-depth here in case the config reaches the handler without the key set.
     if state.config.llm_provider == "anthropic" {
-        let expected = state.config.proxy_api_key.as_deref().unwrap_or_else(|| {
-            // Should be unreachable: startup error prevents this state.
-            // Return an empty string so constant_time_eq always fails below.
-            ""
-        });
+        // Fallback "" is unreachable (startup error prevents None); empty string
+        // ensures constant_time_eq always fails if somehow reached.
+        let expected = state.config.proxy_api_key.as_deref().unwrap_or("");
         if !constant_time_eq(api_key.as_bytes(), expected.as_bytes()) || expected.is_empty() {
             return Ok((
                 StatusCode::UNAUTHORIZED,
@@ -3251,60 +3249,6 @@ pub(crate) async fn stream_openai_passthrough(upstream: reqwest::Response) -> Re
 /// Sets `x-zemtik-stream-format: v2` (S6: opaque format identifier, not provider name).
 /// Note: the SSE event format is Anthropic's (not OpenAI's). Clients must use the
 /// Anthropic SDK or any client that understands Anthropic SSE to parse the stream.
-/// OpenAI SSE translation is deferred to v2.
-pub(crate) async fn stream_anthropic_passthrough(upstream: reqwest::Response) -> Response {
-    use axum::body::Body;
-    use bytes::Bytes;
-    use futures_util::StreamExt;
-    use tokio_stream::wrappers::ReceiverStream;
-
-    let status = upstream.status();
-    let resp_headers = upstream.headers().clone();
-    let (chunk_tx, chunk_rx) =
-        tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1024);
-
-    tokio::spawn(async move {
-        let mut byte_stream = upstream.bytes_stream();
-        loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                byte_stream.next(),
-            )
-            .await
-            {
-                Ok(Some(Ok(chunk))) => {
-                    let _ = chunk_tx.send(Ok(chunk)).await;
-                }
-                Ok(Some(Err(e))) => {
-                    let _ = chunk_tx.send(Err(std::io::Error::other(e.to_string()))).await;
-                    break;
-                }
-                Ok(None) => break,
-                Err(_timeout) => {
-                    eprintln!("[STREAM] Anthropic stream stalled for >60s — terminating");
-                    let _ = chunk_tx
-                        .send(Err(std::io::Error::other("upstream stream timed out after 60s")))
-                        .await;
-                    break;
-                }
-            }
-        }
-    });
-
-    let stream = ReceiverStream::new(chunk_rx);
-    let mut builder = Response::builder().status(status);
-    for (k, v) in resp_headers.iter() {
-        if !is_hop_by_hop(k.as_str()) {
-            builder = builder.header(k, v);
-        }
-    }
-    // S6: opaque stream format identifier — does not reveal the backend provider
-    builder = builder.header("x-zemtik-stream-format", "v2");
-    builder
-        .body(Body::from_stream(stream))
-        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
-}
-
 // ---------------------------------------------------------------------------
 // Error type: typed variants for 500 (Internal) and 504 (Timeout)
 // ---------------------------------------------------------------------------
