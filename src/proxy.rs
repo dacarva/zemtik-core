@@ -15,8 +15,10 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+use constant_time_eq::constant_time_eq;
 use crate::config::{AggFn, AppConfig, RewriterConfig, ZemtikMode};
 use crate::intent::{IntentBackend, IntentError};
+use crate::llm_backend::{AnthropicBackend, LlmBackend, OpenAiBackend};
 use crate::types::{
     AuditRecord, EngineResult, EvidencePack, FastLaneResult, IntentResult, MessageContent,
     OpenAiRequestLog, OpenAiResponseLog, QueryParams, RequestedMode, RewriteMethod, Route,
@@ -49,9 +51,13 @@ pub(crate) struct ProxyState {
     pub(crate) schema_config_hash: String,
     /// Intent matching backend — static after startup, no lock needed.
     pub(crate) intent_backend: Arc<dyn IntentBackend>,
-    /// OpenAI base URL for forwarding requests. Injected from AppConfig so tests
-    /// can point this at a wiremock server instead of api.openai.com.
-    pub(crate) openai_base_url: String,
+    /// Provider-abstracted LLM backend. OpenAiBackend or AnthropicBackend.
+    /// Constructed once at startup from ZEMTIK_LLM_PROVIDER.
+    pub(crate) llm_backend: Arc<dyn LlmBackend>,
+    /// Base URL for the query rewriter's OpenAI calls. Always points at OpenAI regardless
+    /// of ZEMTIK_LLM_PROVIDER — the rewriter is OpenAI-only in v1.
+    /// Renamed from openai_base_url in ProxyState (AppConfig.openai_base_url unchanged).
+    pub(crate) rewriter_base_url: String,
     /// Semaphore for bounding concurrent FORK 2 background tasks (tunnel mode only).
     pub(crate) tunnel_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// Separate SQLite connection for tunnel audit records (tunnel mode only).
@@ -133,9 +139,31 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
     }
 
+    // D8: hard startup error — rewriter calls OpenAI internally; incompatible with Anthropic
+    if config.query_rewriter_enabled && config.llm_provider == "anthropic" {
+        anyhow::bail!(
+            "ZEMTIK_QUERY_REWRITER=1 is incompatible with ZEMTIK_LLM_PROVIDER=anthropic. \
+             The rewriter calls OpenAI internally. \
+             To use Anthropic: set ZEMTIK_QUERY_REWRITER=0. \
+             To keep the rewriter: set ZEMTIK_LLM_PROVIDER=openai."
+        );
+    }
+
+    // S1: hard startup error — Anthropic path requires explicit proxy auth key
+    if config.llm_provider == "anthropic" && config.proxy_api_key.is_none() {
+        anyhow::bail!(
+            "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic.\n\
+             When Anthropic is the backend, Zemtik uses a server-side API key for all outbound\n\
+             Claude calls. Any client that reaches :4000 would otherwise get free API calls\n\
+             billed to your Anthropic account.\n\
+             Set ZEMTIK_PROXY_API_KEY to a strong bearer token and send it from your client\n\
+             as 'Authorization: Bearer <ZEMTIK_PROXY_API_KEY>'."
+        );
+    }
+
     let schema_config_hash = config.schema_config_hash.clone().unwrap_or_default();
     let schema = config.schema_config.clone().unwrap();
-    let openai_base_url = config.openai_base_url.clone();
+    let rewriter_base_url = config.openai_base_url.clone();
 
     // Build intent backend. Use EmbeddingBackend unless ZEMTIK_INTENT_BACKEND=regex
     // or the feature is disabled. Falls back to RegexBackend on model load failure.
@@ -248,7 +276,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             );
         }
         Some(Arc::new(RewriterConfig {
-            base_url: config.openai_base_url.clone(),
+            base_url: rewriter_base_url.clone(),
             model: config.query_rewriter_model.clone(),
             api_key,
             context_window_turns: config.query_rewriter_context_turns,
@@ -268,6 +296,25 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         None
     };
 
+    // Build provider-specific LLM backend (constructed once at startup)
+    let llm_backend: Arc<dyn LlmBackend> = {
+        let http_client = reqwest::Client::new();
+        if config.llm_provider == "anthropic" {
+            let api_key = config.anthropic_api_key.clone().unwrap_or_default();
+            Arc::new(AnthropicBackend::new(
+                http_client,
+                api_key,
+                config.anthropic_model.clone(),
+                config.anthropic_base_url.clone(),
+            )) as Arc<dyn LlmBackend>
+        } else {
+            Arc::new(OpenAiBackend::new(
+                http_client,
+                config.openai_base_url.clone(),
+            )) as Arc<dyn LlmBackend>
+        }
+    };
+
     let state = Arc::new(ProxyState {
         http_client: reqwest::Client::new(),
         pipeline_locks,
@@ -278,7 +325,8 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         signing_key_bytes,
         schema_config_hash,
         intent_backend,
-        openai_base_url,
+        llm_backend,
+        rewriter_base_url,
         tunnel_semaphore,
         tunnel_audit_db,
         backpressure_count: std::sync::atomic::AtomicU64::new(0),
@@ -376,6 +424,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/health", get(handle_health))
             .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(handle_chat_completions))
+            .route("/v1/models", get(handle_models))
             .route("/v1/anonymize/preview", post(handle_anonymize_preview))
             .route("/receipts", get(handle_receipts_list))
             .route("/verify/{id}", get(handle_verify))
@@ -384,6 +433,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/health", get(handle_health))
             .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(crate::tunnel::handle_tunnel))
+            .route("/v1/models", get(handle_models))
             .route("/v1/anonymize/preview", post(handle_anonymize_preview))
             .route("/tunnel/audit", get(crate::tunnel::handle_audit))
             .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
@@ -472,6 +522,27 @@ async fn handle_chat_completions(
                 "No Authorization header, OPENAI_API_KEY env var, or openai_api_key in config.yaml"
             ))
         })?;
+
+    // S1: When provider=anthropic, validate incoming Bearer against ZEMTIK_PROXY_API_KEY.
+    // The server-side Anthropic key is used for outbound calls; the incoming token is purely
+    // for authenticating requests to this proxy. Missing key is a startup error (build_proxy_router).
+    if state.config.llm_provider == "anthropic" {
+        if let Some(ref expected) = state.config.proxy_api_key {
+            if !constant_time_eq(api_key.as_bytes(), expected.as_bytes()) {
+                return Ok((
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": {
+                            "type": "auth_error",
+                            "message": "Invalid or missing Authorization bearer token. \
+                                        Set Authorization: Bearer <ZEMTIK_PROXY_API_KEY>."
+                        }
+                    })),
+                )
+                    .into_response());
+            }
+        }
+    }
 
     // ---------------------------------------------------------------------------
     // zemtik_mode: parse, validate, and strip before hashing / forwarding.
@@ -1240,6 +1311,7 @@ async fn handle_fast_lane(
         None,
         human_summary,
         checks_performed,
+        state.config.llm_provider.clone(),
     );
 
     // Insert receipt — lock synchronously, never hold std::sync::MutexGuard across .await
@@ -1275,6 +1347,7 @@ async fn handle_fast_lane(
                         None
                     }
                 },
+                llm_provider: Some(state.config.llm_provider.clone()),
             },
         ) {
             eprintln!("[WARN] FastLane: failed to write audit receipt {}: {}", receipt_id, e);
@@ -1441,6 +1514,7 @@ async fn handle_general_lane(
                 rewritten_query: None,
                 manifest_key_id: None,
                 evidence_json: None,
+                llm_provider: Some(state.config.llm_provider.clone()),
             }) {
                 eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
             }
@@ -1495,6 +1569,7 @@ async fn handle_general_lane(
             rewritten_query: None,
             manifest_key_id: None,
             evidence_json: None,
+            llm_provider: Some(state.config.llm_provider.clone()),
         })
     };
     if let Err(e) = receipt_write_result {
@@ -1512,20 +1587,19 @@ async fn handle_general_lane(
     });
     let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
 
-    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
-
     if is_streaming {
         // ── Streaming path: SSE passthrough, metadata via header only ──────
         let upstream = state
-            .http_client
-            .post(&openai_url)
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
+            .llm_backend
+            .forward_raw(&body, &api_key)
             .await
-            .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane upstream error: {}", e)))?;
+            .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane streaming error: {}", e)))?;
 
-        let mut resp = stream_openai_passthrough(upstream).await;
+        let mut resp = if state.config.llm_provider == "anthropic" {
+            stream_anthropic_passthrough(upstream).await
+        } else {
+            stream_openai_passthrough(upstream).await
+        };
         resp.headers_mut().insert(
             HeaderName::from_static("x-zemtik-engine"),
             HeaderValue::from_static("general_lane"),
@@ -1537,105 +1611,83 @@ async fn handle_general_lane(
     }
 
     // ── Non-streaming path ──────────────────────────────────────────────────
-    let upstream = state
-        .http_client
-        .post(&openai_url)
-        .bearer_auth(&api_key)
-        .json(&body)
-        .send()
+    let (status_u16, mut resp_body) = state
+        .llm_backend
+        .complete(&body, &api_key)
         .await
         .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane upstream error: {}", e)))?;
 
-    let resp_status = upstream.status();
-    let content_type = upstream
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
+    let resp_status = StatusCode::from_u16(status_u16).unwrap_or(StatusCode::OK);
 
-    let resp_bytes = upstream
-        .bytes()
-        .await
-        .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane read body: {}", e)))?;
-
-    // Inject zemtik_meta into the response body when Content-Type is application/json
-    // and the body is a JSON object (not array). Fall back to header-only for other cases.
-    let final_body: Vec<u8> = if content_type.contains("application/json") {
-        if let Ok(mut v) = serde_json::from_slice::<Value>(&resp_bytes) {
-            // Deanonymize LLM response text before returning to caller
-            if let Some(ref vlt) = vault {
-                if let Some(obj) = v.as_object_mut() {
-                    if let Some(choices) = obj.get_mut("choices").and_then(|c| c.as_array_mut()) {
-                        for choice in choices.iter_mut() {
-                            if let Some(content) = choice.pointer_mut("/message/content").and_then(|c| c.as_str().map(|s| s.to_owned())) {
-                                let deanon = crate::anonymizer::deanonymize(&content, vlt);
-                                choice["message"]["content"] = Value::String(deanon);
-                            }
-                        }
-                    }
-                }
-            }
-            // Augment zemtik_meta with anonymizer stats (entities, dropped tokens)
-            if let Some(ref meta) = anon_meta {
-                let dropped = vault.as_ref().map(|vlt| {
-                    let raw = String::from_utf8_lossy(&resp_bytes);
-                    crate::anonymizer::count_dropped_tokens(&raw, vlt)
-                }).unwrap_or(0);
-                let mut anon_block = serde_json::json!({
-                    "entities_found": meta.entities_found,
-                    "entity_types": meta.entity_types,
-                    "sidecar_used": meta.sidecar_used,
-                    "sidecar_ms": meta.sidecar_ms,
-                    "dropped_tokens": dropped,
-                });
-                // Only emit preview when sidecar ran — regex fallback skips PERSON/ORG/LOCATION,
-                // so partial-anonymized text could expose PII not in entity_types.
-                if state.config.anonymizer_debug_preview && meta.sidecar_used && !prompt.is_empty() {
-                    let preview: String = prompt.chars().take(200).collect();
-                    anon_block["outgoing_preview"] = serde_json::Value::String(preview);
-                }
-                zemtik_meta["anonymizer"] = anon_block;
-            }
-            // Persist general lane metadata to receipt so /verify page is complete.
-            {
-                let mut evidence = serde_json::json!({
-                    "engine_used": "general_lane",
-                    "zk_coverage": "none",
-                    "reason": zemtik_meta.get("reason"),
-                });
-                if let Some(anon) = zemtik_meta.get("anonymizer") {
-                    evidence["anonymizer"] = anon.clone();
-                }
-                if let Ok(json) = serde_json::to_string(&evidence) {
-                    let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Err(e) = receipts::update_evidence_json(&db_guard, &receipt_id, &json) {
-                        eprintln!("[GENERAL_LANE] Warning: failed to update evidence_json {}: {}", receipt_id, e);
-                    }
-                }
-            }
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("zemtik_meta".to_string(), zemtik_meta);
-                serde_json::to_vec(&v).unwrap_or_else(|_| resp_bytes.to_vec())
-            } else {
-                resp_bytes.to_vec()
-            }
-        } else {
-            resp_bytes.to_vec()
+    // Extract _zemtik_resolved_model from AnthropicBackend and inject into zemtik_meta
+    if let Some(obj) = resp_body.as_object_mut() {
+        if let Some(resolved) = obj.remove("_zemtik_resolved_model") {
+            zemtik_meta["resolved_model"] = resolved;
         }
-    } else {
-        resp_bytes.to_vec()
-    };
+    }
 
-    let http_status = StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK);
-    let effective_content_type = if content_type.is_empty() {
-        "application/json"
-    } else {
-        &content_type
-    };
+    // Deanonymize LLM response text before returning to caller
+    if let Some(ref vlt) = vault {
+        if let Some(obj) = resp_body.as_object_mut() {
+            if let Some(choices) = obj.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                for choice in choices.iter_mut() {
+                    if let Some(content) = choice.pointer_mut("/message/content").and_then(|c| c.as_str().map(|s| s.to_owned())) {
+                        let deanon = crate::anonymizer::deanonymize(&content, vlt);
+                        choice["message"]["content"] = Value::String(deanon);
+                    }
+                }
+            }
+        }
+    }
+
+    // Augment zemtik_meta with anonymizer stats (entities, dropped tokens)
+    if let Some(ref meta) = anon_meta {
+        let dropped = vault.as_ref().map(|vlt| {
+            let raw = serde_json::to_string(&resp_body).unwrap_or_default();
+            crate::anonymizer::count_dropped_tokens(&raw, vlt)
+        }).unwrap_or(0);
+        let mut anon_block = serde_json::json!({
+            "entities_found": meta.entities_found,
+            "entity_types": meta.entity_types,
+            "sidecar_used": meta.sidecar_used,
+            "sidecar_ms": meta.sidecar_ms,
+            "dropped_tokens": dropped,
+        });
+        // Only emit preview when sidecar ran — regex fallback skips PERSON/ORG/LOCATION,
+        // so partial-anonymized text could expose PII not in entity_types.
+        if state.config.anonymizer_debug_preview && meta.sidecar_used && !prompt.is_empty() {
+            let preview: String = prompt.chars().take(200).collect();
+            anon_block["outgoing_preview"] = serde_json::Value::String(preview);
+        }
+        zemtik_meta["anonymizer"] = anon_block;
+    }
+
+    // Persist general lane metadata to receipt so /verify page is complete.
+    {
+        let mut evidence = serde_json::json!({
+            "engine_used": "general_lane",
+            "zk_coverage": "none",
+            "reason": zemtik_meta.get("reason"),
+        });
+        if let Some(anon) = zemtik_meta.get("anonymizer") {
+            evidence["anonymizer"] = anon.clone();
+        }
+        if let Ok(json) = serde_json::to_string(&evidence) {
+            let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = receipts::update_evidence_json(&db_guard, &receipt_id, &json) {
+                eprintln!("[GENERAL_LANE] Warning: failed to update evidence_json {}: {}", receipt_id, e);
+            }
+        }
+    }
+
+    if let Some(obj) = resp_body.as_object_mut() {
+        obj.insert("zemtik_meta".to_string(), zemtik_meta);
+    }
+
+    let final_body = serde_json::to_vec(&resp_body).unwrap_or_default();
     let mut response = Response::builder()
-        .status(http_status)
-        .header(axum::http::header::CONTENT_TYPE, effective_content_type)
+        .status(resp_status)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
         .header(HeaderName::from_static("x-zemtik-engine"), "general_lane")
         .body(axum::body::Body::from(final_body))
         .unwrap_or_else(|_| Response::new(axum::body::Body::empty()));
@@ -1704,23 +1756,22 @@ async fn build_fast_lane_response(
         }
     }
 
-    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
-    let openai_resp = state
-        .http_client
-        .post(&openai_url)
-        .bearer_auth(api_key)
-        .json(body)
-        .send()
+    let (status_u16_fl, mut resp_body) = state
+        .llm_backend
+        .complete(body, api_key)
         .await
-        .context("forward FastLane request to OpenAI")
+        .context("forward FastLane request to LLM backend")
         .map_err(ProxyError::Internal)?;
 
-    let resp_status = openai_resp.status();
-    let mut resp_body: Value = openai_resp
-        .json()
-        .await
-        .context("parse OpenAI response")
-        .map_err(ProxyError::Internal)?;
+    // Strip _zemtik_resolved_model from resp_body; inject into zemtik_meta after it exists (D7).
+    // zemtik_meta is created later via entry().or_insert_with(), so save the value now.
+    let fl_resolved_model = if let Some(obj) = resp_body.as_object_mut() {
+        obj.remove("_zemtik_resolved_model")
+    } else {
+        None
+    };
+
+    let resp_status = StatusCode::from_u16(status_u16_fl).unwrap_or(StatusCode::OK);
 
     // Count dropped tokens BEFORE deanonymize replaces them in resp_body.
     let dropped_fast = vault.as_ref().map(|vlt| {
@@ -1757,13 +1808,24 @@ async fn build_fast_lane_response(
         }
     }
 
+    // Inject resolved_model into zemtik_meta for Anthropic path (D7).
+    // zemtik_meta may or may not exist yet (only created above when anon_meta.is_some()).
+    if let Some(resolved) = fl_resolved_model {
+        if let Some(obj) = resp_body.as_object_mut() {
+            obj.entry("zemtik_meta")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .map(|m| m.insert("resolved_model".to_owned(), resolved));
+        }
+    }
+
     let envelope = zemtik_evidence_envelope(ev, intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
     }
 
     let mut response = (
-        StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
+        resp_status,
         Json(resp_body),
     )
         .into_response();
@@ -1898,6 +1960,7 @@ async fn handle_zk_slow_lane(
                 rewritten_query: intent.rewritten_query.clone(),
                 manifest_key_id: Some(state.manifest_key_id.clone()),
                 evidence_json: None, // Populated later via update_evidence_json once the ZK evidence pack is assembled
+                llm_provider: Some(state.config.llm_provider.clone()),
             },
         ) {
             Ok(()) => Some(br),
@@ -1962,29 +2025,21 @@ async fn handle_zk_slow_lane(
         }
     }
 
-    let model = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or(&state.config.openai_model)
-        .to_owned();
-    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
-
-    let openai_resp = state
-        .http_client
-        .post(&openai_url)
-        .bearer_auth(&api_key)
-        .json(&body)
-        .send()
+    let (status_u16_zk, mut resp_body) = state
+        .llm_backend
+        .complete(&body, &api_key)
         .await
-        .context("forward to OpenAI")
+        .context("forward to LLM backend")
         .map_err(ProxyError::Internal)?;
 
-    let resp_status = openai_resp.status();
-    let mut resp_body: Value = openai_resp
-        .json()
-        .await
-        .context("parse OpenAI response")
-        .map_err(ProxyError::Internal)?;
+    // Strip internal Anthropic resolved_model field; inject into zemtik_meta later
+    let zk_resolved_model = if let Some(obj) = resp_body.as_object_mut() {
+        obj.remove("_zemtik_resolved_model")
+    } else {
+        None
+    };
+
+    let resp_status = StatusCode::from_u16(status_u16_zk).unwrap_or(StatusCode::OK);
 
     // Count dropped tokens BEFORE deanonymize replaces them in resp_body.
     let dropped_zk = vault.as_ref().map(|vlt| {
@@ -2048,7 +2103,18 @@ async fn handle_zk_slow_lane(
         Some(zk.actual_row_count),
         human_summary_zk,
         checks_performed_zk,
+        state.config.llm_provider.clone(),
     );
+
+    // Inject resolved_model into zemtik_meta for Anthropic path (D7)
+    if let Some(resolved) = zk_resolved_model {
+        if let Some(obj) = resp_body.as_object_mut() {
+            obj.entry("zemtik_meta")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .map(|m| m.insert("resolved_model".to_owned(), resolved));
+        }
+    }
     let envelope = zemtik_evidence_envelope(&ev_zk, &intent).map_err(|e| ProxyError::Internal(anyhow::Error::new(e)))?;
     if let Some(obj) = resp_body.as_object_mut() {
         obj.insert("evidence".to_string(), envelope);
@@ -2077,7 +2143,7 @@ async fn handle_zk_slow_lane(
     let resp_model = resp_body
         .get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or(&model)
+        .unwrap_or("")
         .to_owned();
     let (prompt_tokens, completion_tokens, total_tokens) = resp_body
         .get("usage")
@@ -2110,7 +2176,7 @@ async fn handle_zk_slow_lane(
         zk.vk_hex,
         zk.fully_verifiable,
         OpenAiRequestLog {
-            model: model.clone(),
+            model: body.get("model").and_then(|m| m.as_str()).unwrap_or("").to_owned(),
             system_prompt: "[forwarded from client]".to_owned(),
             user_message: zk_message,
             max_completion_tokens: 0,
@@ -2137,7 +2203,7 @@ async fn handle_zk_slow_lane(
     );
 
     let mut response = (
-        StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::OK),
+        resp_status,
         Json(resp_body),
     )
         .into_response();
@@ -2887,6 +2953,51 @@ pub(crate) async fn run_avg_pipeline(
     })
 }
 
+/// GET /v1/models — returns the configured model as an OpenAI-compatible model list.
+/// Gated behind ZEMTIK_PROXY_API_KEY when set (S5). Enables SDK client discovery on init.
+async fn handle_models(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // S5: require auth if proxy_api_key is configured
+    if let Some(ref expected) = state.config.proxy_api_key {
+        let incoming = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !constant_time_eq(incoming.as_bytes(), expected.as_bytes()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": {"type": "auth_error", "message": "Unauthorized"}
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let (model_id, owned_by) = if state.config.llm_provider == "anthropic" {
+        (state.config.anthropic_model.clone(), "anthropic")
+    } else {
+        (state.config.openai_model.clone(), "openai")
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "object": "list",
+            "data": [{
+                "id": model_id,
+                "object": "model",
+                "owned_by": owned_by,
+                "created": 0
+            }]
+        })),
+    )
+        .into_response()
+}
+
 /// Health check endpoint. Probes Supabase connectivity when DB_BACKEND=supabase.
 /// For SQLite (local dev), always returns 200 — in-memory DB is always up.
 /// Mode and tunnel telemetry fields are always included regardless of DB backend.
@@ -3115,6 +3226,64 @@ pub(crate) async fn stream_openai_passthrough(upstream: reqwest::Response) -> Re
             builder = builder.header(k, v);
         }
     }
+    builder
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
+}
+
+/// Anthropic SSE passthrough — identical byte-copy behavior to stream_openai_passthrough.
+/// Sets `x-zemtik-stream-format: v2` (S6: opaque format identifier, not provider name).
+/// Note: the SSE event format is Anthropic's (not OpenAI's). Clients must use the
+/// Anthropic SDK or any client that understands Anthropic SSE to parse the stream.
+/// OpenAI SSE translation is deferred to v2.
+pub(crate) async fn stream_anthropic_passthrough(upstream: reqwest::Response) -> Response {
+    use axum::body::Body;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let status = upstream.status();
+    let resp_headers = upstream.headers().clone();
+    let (chunk_tx, chunk_rx) =
+        tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1024);
+
+    tokio::spawn(async move {
+        let mut byte_stream = upstream.bytes_stream();
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                byte_stream.next(),
+            )
+            .await
+            {
+                Ok(Some(Ok(chunk))) => {
+                    let _ = chunk_tx.send(Ok(chunk)).await;
+                }
+                Ok(Some(Err(e))) => {
+                    let _ = chunk_tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
+                Ok(None) => break,
+                Err(_timeout) => {
+                    eprintln!("[STREAM] Anthropic stream stalled for >60s — terminating");
+                    let _ = chunk_tx
+                        .send(Err(std::io::Error::other("upstream stream timed out after 60s")))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(chunk_rx);
+    let mut builder = Response::builder().status(status);
+    for (k, v) in resp_headers.iter() {
+        if !is_hop_by_hop(k.as_str()) {
+            builder = builder.header(k, v);
+        }
+    }
+    // S6: opaque stream format identifier — does not reveal the backend provider
+    builder = builder.header("x-zemtik-stream-format", "v2");
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))

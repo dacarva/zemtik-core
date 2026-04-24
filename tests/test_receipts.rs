@@ -44,6 +44,7 @@ fn sample_receipt(id: &str) -> Receipt {
         rewritten_query: None,
         manifest_key_id: None,
         evidence_json: None,
+        llm_provider: None,
     }
 }
 
