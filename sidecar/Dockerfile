@@ -55,7 +55,7 @@ RUN python -m grpc_tools.protoc \
 
 EXPOSE 50051
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=6 \
-    CMD grpc-health-probe -addr=localhost:50051
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=18 \
+    CMD grpc-health-probe -addr=localhost:50051 -service=zemtik.anonymizer.v1.AnonymizerService
 
 CMD ["python", "server.py"]

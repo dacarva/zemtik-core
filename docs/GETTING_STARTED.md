@@ -957,6 +957,84 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 
 ---
 
+## MCP Attestation Proxy (Claude Desktop)
+
+Zemtik ships an MCP server (`zemtik mcp` / `zemtik mcp-serve`) that wraps every tool call with BabyJubJub EdDSA attestation. This lets Claude Desktop users run audited, SSRF-safe tool execution without routing chat through the Zemtik proxy.
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `zemtik_fetch` | HTTP GET a URL with SSRF guard (blocks private IPs, IMDS, RFC 1918) |
+| `zemtik_read_file` | Read a file with key-file protection and 10 MB cap |
+| `zemtik_analyze` | Tokenize PII before Claude reasons on it (requires `ZEMTIK_ANONYMIZER_ENABLED=1`) |
+
+### Quick start (Docker)
+
+```bash
+# In .env
+ZEMTIK_MCP_API_KEY=$(openssl rand -hex 32)
+ZEMTIK_ANONYMIZER_ENABLED=true   # enables zemtik_analyze tool
+
+# Start MCP server + anonymizer sidecar
+ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up -d
+
+# Verify health
+curl http://localhost:4001/mcp/health
+```
+
+### Claude Desktop integration
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "zemtik-docker": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:4001/mcp"]
+    }
+  }
+}
+```
+
+Fully quit and relaunch Claude Desktop. The tools appear in the composer tool list.
+
+### `zemtik_analyze` — PII soft enforcement
+
+When `ZEMTIK_ANONYMIZER_ENABLED=1`, `zemtik_analyze` is exposed and Claude Desktop is steered via the MCP `instructions` string to call it before reasoning on user-pasted documents.
+
+**What it does:**
+- Accepts raw text (max 100 KB)
+- Runs through the GLiNER/Presidio anonymizer sidecar (regex fallback if sidecar unavailable)
+- Returns `{"anonymized_text": "...", "entities_found": N, "entity_types": [...]}`
+- Attests the transformation (`sha256(raw)` + `sha256(tokenized)`) with BabyJubJub EdDSA
+- Persists an audit record in `mcp_audit.db`
+
+**Constraints:**
+- Tokens (`[[Z:xxxx:n]]`) are stable **within one call only** — vault is discarded after each invocation and never returned to Claude
+- Regex fallback covers structured PII only (emails, IBANs, LATAM IDs) — not PERSON/ORG names
+
+**Test prompt for Claude Desktop:**
+```
+Summarize this contract: "Juan Carlos López (CC 1020304050) from Bogotá
+agrees to pay $5,200,000 COP starting March 1, 2024."
+```
+Expected: Claude calls `zemtik_analyze` first, then summarizes using only `[[Z:...:n]]` tokens.
+
+**Verify the audit trail:**
+```bash
+curl -s -H "Authorization: Bearer $ZEMTIK_MCP_API_KEY" http://localhost:4001/mcp/audit
+```
+
+### Why Claude Desktop chat is NOT anonymized
+
+Claude Desktop sends chat directly to `api.anthropic.com` — it bypasses the Zemtik proxy entirely. `zemtik_analyze` is soft enforcement: Claude follows the instruction but a user can type a normal message to bypass it.
+
+For hard enforcement (all traffic anonymized), use a web client (e.g. Open WebUI) pointed at the Zemtik proxy on `localhost:4000` with `ZEMTIK_ANONYMIZER_ENABLED=true`.
+
+---
+
 ## What's next
 
 - **Configure your own tables** — [How to Add a Table](HOW_TO_ADD_TABLE.md)
