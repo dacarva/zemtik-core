@@ -1949,25 +1949,11 @@ async fn test_anthropic_empty_messages_400() {
 }
 
 /// Anthropic streaming (stream=true): SSE bytes pass through and the response carries
-/// x-zemtik-stream-format: v2 (S6 opaque identifier).
+/// Anthropic streaming returns 501 — SSE translation deferred to a future release.
+/// Clients must set stream: false when llm_provider=anthropic.
 #[tokio::test]
-async fn test_anthropic_streaming_passthrough() {
-    let (addr, _mock_openai, mock_anthropic) = spawn_test_proxy_anthropic().await;
-
-    // Non-data prompt → general lane (passthrough enabled in spawn_test_proxy_anthropic)
-    // which calls llm_backend.forward_raw() → AnthropicBackend → /v1/messages with stream:true
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(
-                    b"data: {\"type\":\"message_start\"}\n\ndata: [DONE]\n\n",
-                    "text/event-stream",
-                ),
-        )
-        .mount(&mock_anthropic)
-        .await;
+async fn test_anthropic_streaming_returns_501() {
+    let (addr, _mock_openai, _mock_anthropic) = spawn_test_proxy_anthropic().await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -1983,11 +1969,16 @@ async fn test_anthropic_streaming_passthrough() {
         .expect("request failed");
 
     assert_eq!(
-        resp.headers()
-            .get("x-zemtik-stream-format")
-            .and_then(|v| v.to_str().ok()),
-        Some("v2"),
-        "Anthropic streaming must set x-zemtik-stream-format: v2"
+        resp.status().as_u16(),
+        501,
+        "Anthropic streaming must return 501 until SSE translation is implemented"
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some("AnthropicStreamingUnsupported"),
+        "error code must be AnthropicStreamingUnsupported"
     );
 }
 

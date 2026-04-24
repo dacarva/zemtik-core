@@ -525,22 +525,26 @@ async fn handle_chat_completions(
 
     // S1: When provider=anthropic, validate incoming Bearer against ZEMTIK_PROXY_API_KEY.
     // The server-side Anthropic key is used for outbound calls; the incoming token is purely
-    // for authenticating requests to this proxy. Missing key is a startup error (build_proxy_router).
+    // for authenticating requests to this proxy. Missing key is a startup error (build_proxy_router),
+    // but we defend in-depth here in case the config reaches the handler without the key set.
     if state.config.llm_provider == "anthropic" {
-        if let Some(ref expected) = state.config.proxy_api_key {
-            if !constant_time_eq(api_key.as_bytes(), expected.as_bytes()) {
-                return Ok((
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": {
-                            "type": "auth_error",
-                            "message": "Invalid or missing Authorization bearer token. \
-                                        Set Authorization: Bearer <ZEMTIK_PROXY_API_KEY>."
-                        }
-                    })),
-                )
-                    .into_response());
-            }
+        let expected = state.config.proxy_api_key.as_deref().unwrap_or_else(|| {
+            // Should be unreachable: startup error prevents this state.
+            // Return an empty string so constant_time_eq always fails below.
+            ""
+        });
+        if !constant_time_eq(api_key.as_bytes(), expected.as_bytes()) || expected.is_empty() {
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "auth_error",
+                        "message": "Invalid or missing Authorization bearer token. \
+                                    Set Authorization: Bearer <ZEMTIK_PROXY_API_KEY>."
+                    }
+                })),
+            )
+                .into_response());
         }
     }
 
@@ -1588,18 +1592,30 @@ async fn handle_general_lane(
     let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
 
     if is_streaming {
-        // ── Streaming path: SSE passthrough, metadata via header only ──────
+        // Anthropic SSE uses a different event schema than OpenAI SSE.
+        // Translation is deferred to a future release; return 501 so clients
+        // get a clear error instead of unparseable chunks.
+        if state.config.llm_provider == "anthropic" {
+            return Ok((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(serde_json::json!({
+                    "error": {
+                        "type": "streaming_not_supported",
+                        "code": "AnthropicStreamingUnsupported",
+                        "message": "Streaming is not supported with llm_provider=anthropic in this version. Set stream: false."
+                    }
+                })),
+            ).into_response());
+        }
+
+        // ── OpenAI streaming path: SSE passthrough, metadata via header only ──
         let upstream = state
             .llm_backend
             .forward_raw(&body, &api_key)
             .await
             .map_err(|e| ProxyError::Internal(anyhow::anyhow!("GeneralLane streaming error: {}", e)))?;
 
-        let mut resp = if state.config.llm_provider == "anthropic" {
-            stream_anthropic_passthrough(upstream).await
-        } else {
-            stream_openai_passthrough(upstream).await
-        };
+        let mut resp = stream_openai_passthrough(upstream).await;
         resp.headers_mut().insert(
             HeaderName::from_static("x-zemtik-engine"),
             HeaderValue::from_static("general_lane"),
