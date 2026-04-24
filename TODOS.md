@@ -840,3 +840,6 @@ Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy
 - **Cons:** Rewriter would need to use `LlmBackend` trait internally, adding complexity. The rewriter's context window turns and timeout config is OpenAI-specific.
 - **Context:** `src/rewriter.rs:299` hardcodes `POST /v1/chat/completions` with Bearer auth. `RewriterConfig` in `proxy.rs:638` is built from `config.openai_base_url`. Both need to be provider-aware.
 - **Depends on:** feat/multi-model-support merged. `LlmBackend` trait available.
+
+## Pre-existing (found during QA 2026-04-24)
+- [ ] `integration_anonymizer::anonymizer_e2e_cedula_tokenized_and_deanonymized` fails: dropped_tokens=1 when 0 expected; LLM drops anonymized cedula token in round-trip test. Pre-dates feat/multi-model-support branch.
