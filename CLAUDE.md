@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication style
+
+If the `caveman` skill is listed in available skills, invoke it with the Skill tool at
+the start of EVERY session before doing anything else. Caveman mode must stay active for
+the entire session.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
@@ -185,3 +191,42 @@ Two GitHub Actions workflows:
 - **Intent false-positive fix (v0.15.4+, issue #36):** The substring gate is skipped for prompts longer than `ZEMTIK_INTENT_SUBSTRING_GATE_MAX_CHARS` (default 300). Both the substring gate and backend prompt are capped to prevent document bodies from matching table terms. The EmbeddingBackend further caps its input at `ZEMTIK_INTENT_EMBED_PROMPT_MAX_CHARS` (default 250). The `extract_intent` CLI shim passes `usize::MAX` so backward-compat non-proxy callers are unaffected.
 - **Testing model:** All curl examples, test payloads, and end-to-end tests use `gpt-5.4-nano` (the current default in `src/openai.rs`). `gpt-5.4-nano` is a real OpenAI model (the latest as of 2026-04). Do NOT use `gpt-4o` or other model names in test commands — they won't match the proxy fallback and will pass through unmodified. The model name is configurable via `ZEMTIK_OPENAI_MODEL` env var (see `src/openai.rs`).
 - **Tunnel mode (`ZEMTIK_MODE=tunnel`):** `ZEMTIK_TUNNEL_API_KEY` is a **hard startup error** if unset — proxy refuses to start. This is intentional: verification calls must be billed to zemtik's account, not the pilot customer's. `TunnelMatchStatus` has six variants: `Matched`, `Diverged` (diff outside tolerance), `Unmatched`, `Error`, `Timeout`, `Backpressure`. The `Diverged` variant was added in v0.9.0 — it distinguishes "verification ran but values don't agree" from "verification couldn't run at all". See `src/types.rs:TunnelMatchStatus`.
+
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
+the codebase.** The graph is faster, cheaper (fewer tokens), and gives
+you structural context (callers, dependents, test coverage) that file
+scanning cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
+- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
+- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
+- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview` + `list_communities`
+
+Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+
+### Key Tools
+
+| Tool | Use when |
+|------|----------|
+| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context` | Need source snippets for review — token-efficient |
+| `get_impact_radius` | Understanding blast radius of a change |
+| `get_affected_flows` | Finding which execution paths are impacted |
+| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes` | Finding functions/classes by name or keyword |
+| `get_architecture_overview` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes` for code review.
+3. Use `get_affected_flows` to understand impact.
+4. Use `query_graph` pattern="tests_for" to check coverage.

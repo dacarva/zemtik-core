@@ -25,6 +25,12 @@ audit/
 .agents/
 .claude/
 .claude/worktrees/*
+.cursor/
+.cursorrules
+.kiro/
+.mcp.json
+.opencode.json
+.windsurfrules
 
 # Debugging
 *.log
@@ -44,3 +50,5 @@ tmp/
 zemtik-course/
 skills-lock.json
 out/
+# Added by code-review-graph
+.code-review-graph/
