@@ -94,7 +94,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build anonymizer sidecar (smoke test)
-        run: DOCKER_BUILDKIT=1 docker build -f sidecar/Dockerfile -t zemtik-sidecar:ci . --quiet
+        run: DOCKER_BUILDKIT=1 docker build -f sidecar/Dockerfile -t zemtik-sidecar:ci .
 
   clippy:
     name: Clippy
@@ -121,9 +121,6 @@ jobs:
 
       - name: Clippy (regex-only)
         run: cargo clippy --no-default-features --features regex-only -- -D warnings
-
-      - name: Check embed feature compiles
-        run: cargo check --features embed
 
       - name: Clippy (embed)
         run: cargo clippy --features embed -- -D warnings

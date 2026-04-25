@@ -55,7 +55,7 @@ ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
 | Anonymizer — CPU (pre-built) | `ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up` | ~900 MB sidecar | Pulls `ghcr.io/dacarva/zemtik-sidecar:latest` automatically. `linux/amd64` only. CPU inference ~2–4s. |
 | Anonymizer — GPU (local build) | `INSTALL_CUDA=true DOCKER_BUILDKIT=1 docker compose --profile anonymizer build && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up` | ~900 MB sidecar | CUDA 12.4, driver ≥ 550, `nvidia-container-toolkit` required. GPU inference ~50–100ms. Set `HF_TOKEN` for authenticated model CDN. |
 | MCP attestation server | `export ZEMTIK_MCP_API_KEY=<secret> && docker compose --profile mcp up` | no extra image | Reuses proxy image; exposes port 4001; `ZEMTIK_MCP_API_KEY` required |
-| Everything | `ZEMTIK_ANONYMIZER_ENABLED=true export ZEMTIK_MCP_API_KEY=<secret> && docker compose --profile anonymizer --profile mcp up` | ~150 MB proxy + ~900 MB sidecar | Proxy (4000) + GLiNER sidecar (pre-built CPU) + MCP server (4001). For GPU sidecar add `INSTALL_CUDA=true docker compose --profile anonymizer build` first. |
+| Everything | `export ZEMTIK_MCP_API_KEY=<secret> && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up` | ~150 MB proxy + ~900 MB sidecar | Proxy (4000) + GLiNER sidecar (pre-built CPU) + MCP server (4001). For GPU sidecar add `INSTALL_CUDA=true docker compose --profile anonymizer build` first. |
 
 > **POC status (v0.16.1):** working proof-of-concept, not a production product. ZK circuit capped at 500 transactions; FastLane supports SQLite (default) and Supabase; signing key is file-based. See [Known Limitations](#known-limitations-poc).
 
