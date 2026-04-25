@@ -74,7 +74,7 @@ async fn spawn_anon_proxy(mock_openai: &MockServer, entity_types: &str) -> Socke
 /// The mock verifies the token arrives at OpenAI, then returns it; we assert the original
 /// value is restored before the response reaches the caller.
 #[tokio::test]
-#[ignore = "token hash 5b46 only valid with live sidecar; regex fallback produces a different hash — run with docker compose --profile anonymizer up"]
+#[ignore = "wiremock body_string_contains matcher requires the tokenized cedula to reach OpenAI mock; CO_CEDULA→5b46 is confirmed in entity_hashes.rs and the regex should match 79.123.456 — needs end-to-end test run to verify full proxy pipeline (deanonymize in response) before removing this guard"]
 async fn anonymizer_e2e_cedula_tokenized_and_deanonymized() {
     let mock_openai = MockServer::start().await;
 

@@ -1176,6 +1176,33 @@ pub fn load_from_sources(
         config.schema_config_hash = Some(hash);
     }
 
+    // Post-merge normalization: reject whitespace-only secrets and invalid provider values
+    // that may arrive from YAML (serde deserializes freely; env-layer validates its own inputs).
+    config.llm_provider = config.llm_provider.trim().to_lowercase();
+    match config.llm_provider.as_str() {
+        "openai" | "anthropic" => {}
+        other => anyhow::bail!(
+            "llm_provider: unrecognized value {:?}; accepted: openai, anthropic",
+            other
+        ),
+    }
+    if let Some(ref k) = config.proxy_api_key.clone() {
+        if k.trim().is_empty() {
+            config.proxy_api_key = None;
+        }
+    }
+    if let Some(ref k) = config.mcp_api_key.clone() {
+        if k.trim().is_empty() {
+            config.mcp_api_key = None;
+        }
+    }
+    if let Some(url) = config.public_url.take() {
+        let normalized = url.trim().trim_end_matches('/').to_owned();
+        if !normalized.is_empty() {
+            config.public_url = Some(normalized);
+        }
+    }
+
     // Post-layer validation: Anthropic requires both API key and proxy auth key.
     if config.llm_provider == "anthropic" {
         anyhow::ensure!(

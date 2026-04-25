@@ -68,7 +68,7 @@ Verify at startup: the validation block shows `llm_provider: anthropic` and `llm
 curl -X POST http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" \
-  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
 ```
 
 A successful response includes `"llm_provider": "anthropic"` and `"data_exfiltrated": 0` in the `evidence` block.

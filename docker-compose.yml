@@ -7,6 +7,7 @@
 #
 # Quick start — proxy only (Anthropic, no OpenAI key needed):
 #   export ZEMTIK_ANTHROPIC_API_KEY=sk-ant-...
+#   export ZEMTIK_PROXY_API_KEY=sk-...   # clients send this as Bearer token (required)
 #   ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
 #
 # MCP attestation server only (no LLM API key needed — use with Claude Desktop):

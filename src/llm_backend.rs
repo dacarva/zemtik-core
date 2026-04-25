@@ -136,8 +136,11 @@ impl AnthropicBackend {
         for msg in &messages {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             if role == "system" {
-                if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                    system_parts.push(content.to_owned());
+                if let Some(content) = msg.get("content") {
+                    let text = content_to_text(content);
+                    if !text.is_empty() {
+                        system_parts.push(text);
+                    }
                 }
             } else {
                 non_system.push(msg.clone());
@@ -421,6 +424,41 @@ mod tests {
         assert_eq!(
             merged[0].get("content").and_then(|c| c.as_str()),
             Some("first\n\nsecond")
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_multimodal_content() {
+        // Image-url parts must not be JSON-stringified; the message must pass through unchanged.
+        let msgs = vec![
+            json!({"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+                {"type": "text", "text": "describe this"}
+            ]}),
+            json!({"role": "assistant", "content": "a cat"}),
+        ];
+        let merged = merge_consecutive_same_role(msgs);
+        assert_eq!(merged.len(), 2);
+        // Multimodal content must remain as an array, not a string.
+        assert!(
+            merged[0].get("content").and_then(|c| c.as_array()).is_some(),
+            "multimodal content must be preserved as an array"
+        );
+    }
+
+    #[test]
+    fn test_merge_all_text_parts_arrays() {
+        // Two consecutive user messages with all-text content-parts arrays should merge.
+        let msgs = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "first"}]}),
+            json!({"role": "user", "content": [{"type": "text", "text": "second"}]}),
+        ];
+        let merged = merge_consecutive_same_role(msgs);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].get("content").and_then(|c| c.as_str()),
+            Some("first\n\nsecond"),
+            "all-text parts arrays must merge into a single string"
         );
     }
 

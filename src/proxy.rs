@@ -441,7 +441,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             .route("/health", get(handle_health))
             .route("/public-key", get(handle_public_key))
             .route("/v1/chat/completions", post(crate::tunnel::handle_tunnel))
-            .route("/v1/models", get(handle_models))
+            .route("/v1/models", any(crate::tunnel::handle_tunnel_passthrough))
             .route("/v1/anonymize/preview", post(handle_anonymize_preview))
             .route("/tunnel/audit", get(crate::tunnel::handle_audit))
             .route("/tunnel/audit/csv", get(crate::tunnel::handle_audit_csv))
@@ -3018,7 +3018,7 @@ async fn handle_models(
                 "id": model_id,
                 "object": "model",
                 "owned_by": owned_by,
-                "created": 0
+                "created": Utc::now().timestamp()
             }]
         })),
     )

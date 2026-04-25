@@ -683,34 +683,12 @@ impl ZemtikMcpHandler {
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // Attest the transformation: hash of raw input + hash of tokenized output.
-        // In debug mode, also store plaintext previews in the audit record.
-        let input_json = if self.state.anonymizer_debug_preview {
-            serde_json::json!({
-                "input_hash": sha256_hex(text.as_bytes()),
-                "byte_len": text.len(),
-                "preview": truncate(&text, PREVIEW_LEN),
-            }).to_string()
-        } else {
-            serde_json::json!({
-                "input_hash": sha256_hex(text.as_bytes()),
-                "byte_len": text.len(),
-            }).to_string()
-        };
-        let output_json = if self.state.anonymizer_debug_preview {
-            serde_json::json!({
-                "output_hash": sha256_hex(anonymized_text.as_bytes()),
-                "entities_found": meta.entities_found,
-                "preview": truncate(&anonymized_text, PREVIEW_LEN),
-            }).to_string()
-        } else {
-            serde_json::json!({
-                "output_hash": sha256_hex(anonymized_text.as_bytes()),
-                "entities_found": meta.entities_found,
-            }).to_string()
-        };
+        // Compute raw content hashes for signing — these are the values attested to.
+        // The JSON metadata wrappers below are for audit/debug storage only and are NOT signed.
+        let raw_input_hash = sha256_hex(text.as_bytes());
+        let raw_output_hash = sha256_hex(anonymized_text.as_bytes());
 
-        self.attest_for_mode("zemtik_analyze".to_string(), input_json, output_json, duration_ms).await?;
+        self.attest_for_mode("zemtik_analyze".to_string(), raw_input_hash, raw_output_hash, duration_ms).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -914,18 +892,17 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
 }
 
 /// Sign the tool call and write audit record to SQLite. Runs in spawn_blocking.
+/// `input_hash` and `output_hash` are pre-computed SHA256 digests of the raw tool
+/// input and output (not JSON wrappers) — used directly in the signed message.
 fn sign_and_write(
     state: &McpHandlerState,
     tool_name: String,
-    input_json: String,
-    output_json: String,
+    input_hash: String,
+    output_hash: String,
     duration_ms: u64,
 ) -> anyhow::Result<()> {
     let ts = Utc::now().to_rfc3339();
     let receipt_id = Uuid::new_v4().to_string();
-
-    let input_hash = sha256_hex(input_json.as_bytes());
-    let output_hash = sha256_hex(output_json.as_bytes());
 
     // Sign: message = tool_name + input_hash + output_hash + ts
     let message = format!("{}{}{}{}", tool_name, input_hash, output_hash, ts);
@@ -946,14 +923,16 @@ fn sign_and_write(
     // sig_hex: r_b8.x and s as decimal strings joined with ":"
     let sig_hex = format!("{}:{}", sig.r_b8.x, sig.s);
 
+    let preview_in = truncate(&input_hash, PREVIEW_LEN);
+    let preview_out = truncate(&output_hash, PREVIEW_LEN);
     let record = McpAuditRecord {
         receipt_id,
         ts,
         tool_name,
         input_hash,
         output_hash,
-        preview_input: truncate(&input_json, PREVIEW_LEN),
-        preview_output: truncate(&output_json, PREVIEW_LEN),
+        preview_input: preview_in,
+        preview_output: preview_out,
         attestation_sig: sig_hex,
         public_key_hex: state.public_key_hex.clone(),
         duration_ms,
