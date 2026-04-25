@@ -142,6 +142,7 @@ pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_
         .map(|a| {
             let entities_found = a.get("entities_found").and_then(|v| v.as_u64()).unwrap_or(0);
             let dropped = a.get("dropped_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let injected = a.get("tokens_injected").and_then(|v| v.as_u64()).unwrap_or(0);
             let types = a.get("entity_types")
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter()
@@ -153,13 +154,16 @@ pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_
             format!(
                 r#"<div class="anon-box">
   <strong>PII Anonymized</strong>
-  <p>{entities_found} entit{plural} detected and stripped before forwarding to LLM ({dropped} token{dp} replaced).</p>
+  <p>{injected} token{ip} injected from input; {dropped} token{dp} not echoed by LLM.</p>
+  <p>{entities_found} entit{plural} detected and stripped before forwarding to LLM.</p>
   <p>Types: {types}</p>
 </div>"#,
-                entities_found = entities_found,
-                plural = if entities_found == 1 { "y" } else { "ies" },
+                injected = injected,
+                ip = if injected == 1 { "" } else { "s" },
                 dropped = dropped,
                 dp = if dropped == 1 { "" } else { "s" },
+                entities_found = entities_found,
+                plural = if entities_found == 1 { "y" } else { "ies" },
                 types = types,
             )
         })
