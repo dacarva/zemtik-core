@@ -1,5 +1,5 @@
 use zemtik::anonymizer::{
-    deanonymize, make_token, regex_anonymize, count_dropped_tokens,
+    deanonymize, make_token, regex_anonymize, count_dropped_tokens, count_tokens_injected,
     Vault, VaultEntry, AuditMeta, SYSTEM_PROMPT_INJECT,
 };
 use zemtik::entity_hashes::type_hash;
@@ -368,4 +368,107 @@ fn audit_meta_default_values() {
     assert!(m.entity_types.is_empty());
     assert!(!m.sidecar_used);
     assert_eq!(m.sidecar_ms, 0);
+}
+
+// ─── count_tokens_injected ───────────────────────────────────────────────────
+
+#[test]
+fn count_tokens_injected_equals_vault_len() {
+    let vault: Vault = vec![
+        VaultEntry { token: "[[Z:e47f:1]]".to_string(), original: "Alice".to_string(), entity_type: "PERSON".to_string() },
+        VaultEntry { token: "[[Z:ed2f:2]]".to_string(), original: "$2,500,000 COP".to_string(), entity_type: "MONEY".to_string() },
+    ];
+    assert_eq!(count_tokens_injected(&vault), 2);
+}
+
+#[test]
+fn count_tokens_injected_empty_vault() {
+    let vault: Vault = vec![];
+    assert_eq!(count_tokens_injected(&vault), 0);
+}
+
+// ─── MONEY regex: comma-thousands + ISO prefix ───────────────────────────────
+
+#[test]
+fn regex_anonymize_money_comma_thousands() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "El precio de la transacción fue de $2,500,000,000 COP.";
+    let result = regex_anonymize(text, &["MONEY"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "comma-thousands MONEY must be detected");
+    assert_eq!(vault[0].entity_type, "MONEY");
+    assert!(!result.contains("$2,500,000,000"), "amount must be tokenized");
+}
+
+#[test]
+fn regex_anonymize_money_iso_prefix() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "Se pagaron COP 2.500.000 por los servicios.";
+    let result = regex_anonymize(text, &["MONEY"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "ISO-prefix MONEY must be detected");
+    assert_eq!(vault[0].entity_type, "MONEY");
+    assert!(!result.contains("COP 2.500.000"), "amount must be tokenized");
+}
+
+#[test]
+fn regex_anonymize_money_iso_prefix_no_match_embedded_word() {
+    // "OPEN 100" must not be tokenized as MONEY via embedded "PEN 100" — \b prevents it.
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "OPEN 100 tickets for review.";
+    regex_anonymize(text, &["MONEY"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 0, "PEN embedded in OPEN must not be detected as MONEY");
+}
+
+#[test]
+fn regex_anonymize_money_dot_thousands_unchanged() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "Monto: $120.000.000 USD.";
+    regex_anonymize(text, &["MONEY"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "existing dot-thousands MONEY must still be detected");
+    assert_eq!(vault[0].entity_type, "MONEY");
+}
+
+// ─── New LatAm national IDs ───────────────────────────────────────────────────
+
+#[test]
+fn regex_anonymize_ec_ruc_company() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "RUC de la empresa ecuatoriana: 1790012345001.";
+    regex_anonymize(text, &["EC_RUC"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "EC_RUC company format must be detected");
+    assert_eq!(vault[0].entity_type, "EC_RUC");
+}
+
+#[test]
+fn regex_anonymize_pe_ruc() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "SUNAT RUC: 20123456789.";
+    regex_anonymize(text, &["PE_RUC"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "PE_RUC must be detected");
+    assert_eq!(vault[0].entity_type, "PE_RUC");
+}
+
+#[test]
+fn regex_anonymize_ve_ci() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "Cédula venezolana V-12345678.";
+    regex_anonymize(text, &["VE_CI"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "VE_CI must be detected");
+    assert_eq!(vault[0].entity_type, "VE_CI");
+}
+
+#[test]
+fn regex_anonymize_uy_ci_dash() {
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "CI uruguaya: 1234567-8.";
+    regex_anonymize(text, &["UY_CI"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "UY_CI dash format must be detected");
+    assert_eq!(vault[0].entity_type, "UY_CI");
 }

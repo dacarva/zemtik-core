@@ -44,11 +44,18 @@ PATTERNS = {
         r"\bCarrera\s+\d+[A-Za-z]?\s*(?:#|No\.)\s*\d+[-" + "\u2013" + r"]\d+[A-Za-z]?(?:,\s*[A-ZÁÉÍÓÚÑ][A-Za-záéíóúñÁÉÍÓÚÑ\s]+)?"
     ),
     "MONEY_LATAM": r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?\b",
+    "MONEY_LATAM_DOT": r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?\b",
+    "MONEY_LATAM_COMMA": r"\$\d{1,3}(?:,\d{3})+(?:\s*[A-Z]{3})?\b",
+    "MONEY_ISO_PREFIX": r"(?:USD|COP|EUR|BRL|ARS|CLP|MXN|PEN|UYU|VES|BOB)\s*\d[\d.,]*\b",
     "DATE_ES_TEXT": (
         r"\b\d{1,2} de (?:enero|febrero|marzo|abril|mayo|junio|julio|agosto"
         r"|septiembre|octubre|noviembre|diciembre) de \d{4}\b"
     ),
     "DATE_QUARTER": r"\bQ[1-4]\s+\d{4}\b",
+    "EC_RUC_COMPANY": r"\b\d{10}001\b",
+    "PE_RUC": r"\b(?:10|15|17|20)\d{9}\b",
+    "UY_CI_DASH": r"\b\d{7,8}-\d\b",
+    "VE_CI": r"\b[VEJG]-?\d{7,8}\b",
 }
 
 
@@ -345,3 +352,72 @@ def test_money_no_partial_consumption_of_longer_currency_token():
     m = re.search(PATTERNS["MONEY_LATAM"], "$1.500.000 USDT")
     assert m is not None
     assert m.group(0) == "$1.500.000", f"expected '$1.500.000', got '{m.group(0)}'"
+
+
+# ─── MONEY: comma-thousands (Gap 1) ──────────────────────────────────────────
+
+def test_money_comma_thousands_matches():
+    assert _match("MONEY_LATAM_COMMA", "$2,500,000,000 COP")
+    assert _match("MONEY_LATAM_COMMA", "$1,000")
+    assert _match("MONEY_LATAM_COMMA", "$50,000 USD")
+
+
+def test_money_comma_thousands_no_match_bare_dollar():
+    assert not _match("MONEY_LATAM_COMMA", "$5")
+
+
+def test_money_iso_prefix_cop():
+    assert _match("MONEY_ISO_PREFIX", "COP 2.500.000")
+    assert _match("MONEY_ISO_PREFIX", "USD 1,000")
+    assert _match("MONEY_ISO_PREFIX", "BRL 50000")
+
+
+def test_money_iso_prefix_no_match_unknown_code():
+    assert not _match("MONEY_ISO_PREFIX", "XYZ 1000")
+
+
+# ─── New LatAm national IDs (Gap 3) ──────────────────────────────────────────
+
+def test_ec_ruc_company_matches():
+    assert _match("EC_RUC_COMPANY", "1790012345001")
+    assert _match("EC_RUC_COMPANY", "0190012345001")
+
+
+def test_ec_ruc_company_no_match_wrong_length():
+    assert not _match("EC_RUC_COMPANY", "179001234001")  # 12 digits
+    assert not _match("EC_RUC_COMPANY", "17900123450010")  # 14 digits
+
+
+def test_ec_ruc_company_no_match_wrong_suffix():
+    assert not _match("EC_RUC_COMPANY", "1790012345002")
+
+
+def test_pe_ruc_matches():
+    assert _match("PE_RUC", "20123456789")
+    assert _match("PE_RUC", "10987654321")
+
+
+def test_pe_ruc_no_match_invalid_prefix():
+    assert not _match("PE_RUC", "99123456789")
+    assert not _match("PE_RUC", "11123456789")
+
+
+def test_uy_ci_dash_matches():
+    assert _match("UY_CI_DASH", "1234567-8")
+    assert _match("UY_CI_DASH", "12345678-9")
+
+
+def test_uy_ci_dash_no_match_no_dash():
+    assert not _match("UY_CI_DASH", "12345678")
+
+
+def test_ve_ci_matches():
+    assert _match("VE_CI", "V-12345678")
+    assert _match("VE_CI", "E-12345678")
+    assert _match("VE_CI", "J12345678")
+    assert _match("VE_CI", "G-1234567")
+
+
+def test_ve_ci_no_match_wrong_prefix():
+    assert not _match("VE_CI", "A-12345678")
+    assert not _match("VE_CI", "12345678")
