@@ -36,7 +36,7 @@
       ]
     },
     "payroll": {
-      "sensitivity": "low",
+      "sensitivity": "critical",
       "aliases": ["salary", "wages", "compensation", "HR spend", "people cost", "workforce cost", "headcount cost"],
       "description": "Employee salary, wages, compensation, benefits, bonuses, headcount costs, and HR spend.",
       "physical_table": "transactions",
@@ -85,7 +85,7 @@
     },
     "travel": {
       "sensitivity": "low",
-      "aliases": ["travel", "T&E"],
+      "aliases": ["travel", "T&E", "expenses"],
       "description": "Employee travel and expense reimbursements, including trips, lodging, meals, client entertainment, and expense reports.",
       "physical_table": "transactions",
       "value_column": "amount",
