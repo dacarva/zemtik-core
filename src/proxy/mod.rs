@@ -246,8 +246,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
             (pk.x.to_string(), pk.y.to_string())
         }
         Err(e) => {
-            eprintln!("[STARTUP] Warning: failed to derive BabyJubJub public key: {}", e);
-            ("error".to_owned(), "error".to_owned())
+            anyhow::bail!("[STARTUP] Failed to derive BabyJubJub public key: {}", e);
         }
     };
 
@@ -2541,6 +2540,8 @@ pub(crate) async fn run_avg_pipeline(
         "AVG: no matching transactions in the queried period (COUNT=0)"
     );
 
+    // Integer division is intentional: ZK circuits operate over finite field integers,
+    // not floating-point. The truncated quotient is what the circuit commits to.
     let avg = sum_result.aggregate / count_result.aggregate;
     println!(
         "[ZK] AVG composite: sum={}, count={}, avg={}",
@@ -2992,7 +2993,11 @@ async fn handle_anonymize_preview(
         .and_then(|v| v.to_str().ok())
     {
         Some(s) => {
-            if uuid::Uuid::parse_str(s).is_err() {
+            let is_v4 = uuid::Uuid::parse_str(s)
+                .ok()
+                .filter(|u| u.get_version() == Some(uuid::Version::Random))
+                .is_some();
+            if !is_v4 {
                 return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
