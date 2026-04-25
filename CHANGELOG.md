@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.1] - 2026-04-25
+
+### Added
+- **Five new LatAm national ID types** — `EC_RUC` (Ecuador), `PE_RUC` (Peru), `BO_NIT` (Bolivia), `UY_CI` (Uruguay), `VE_CI` (Venezuela) added to both the Rust regex fallback and the Presidio sidecar recognizers. All five are included in `ZEMTIK_ANONYMIZER_ENTITY_TYPES` default set (now 20 types enabled by default; 22 total in the registry including `PHONE_NUMBER` and `EMAIL_ADDRESS`).
+- **`tokens_injected` field** in `zemtik_meta.anonymizer` — counts how many vault entries were created from input redaction (distinct from `dropped_tokens`, which counts tokens the LLM failed to echo back). Available in all three proxy lanes (GeneralLane, FastLane, ZK SlowLane).
+
+### Fixed
+- **MONEY comma-thousands detection** — `$2,500,000,000 COP` and similar US/EU comma-separator amounts were not matched by the regex fallback or Presidio. Added a second `MONEY` pattern shape covering comma-thousands (`\$\d{1,3}(?:,\d{3})+`).
+- **MONEY ISO currency-code prefix** — amounts like `COP 2.500.000` or `USD 1,000` (code before number) were not detected. Added `\b(?:USD|COP|EUR|BRL|ARS|CLP|MXN|PEN|UYU|VES|BOB)\s*\d...` pattern. The `\b` boundary prevents matching currency codes embedded in longer words (e.g. `OPEN 100` no longer matches as `PEN 100`).
+- **ORG span suffix truncation** — `GLiNER` / `Presidio` often stopped ORG spans before trailing corporate legal suffixes (`S.A.S.`, `Ltda.`, `S.R.L.`, etc.), causing the suffix to leak to the LLM as plain text. Sidecar now runs a post-processing pass that extends each ORG span to include any immediately following legal suffix, then re-merges overlapping spans to prevent garbled tokens.
+
+### Changed
+- `ZEMTIK_ANONYMIZER_ENTITY_TYPES` default now lists all 20 enabled types explicitly in `CLAUDE.md` (was listed as 17 before EC/PE/BO/UY/VE addition).
+
 ## [0.16.0] - 2026-04-24
 
 ### Added
