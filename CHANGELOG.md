@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2026-04-25
+
+### Added
+- **Open-Core Module Architecture** — `proxy.rs` (3151 lines) split into a module subtree (`proxy/lanes/`, `proxy/handlers/`, `proxy/state/`, `proxy/ui/`) and `config.rs` (1251 lines) split into `config/{mod, schema, env}.rs`. Internal structure only — no behavior changes.
+- **Stable library API in `lib.rs`** — `build_proxy_router` and `run_proxy` now callable from downstream Rust crates via typed entry points returning `ZemtikError`. All internal modules are `#[doc(hidden)]`; public surface is `config::{AppConfig, ZemtikMode, SchemaConfig, TableConfig, AggFn}`, `types::{EvidencePack, IntentResult, Route, …}`, and `error::ZemtikError`.
+- **`ZemtikError` typed error boundary** — wraps `anyhow::Error` at the public API surface so library consumers do not take a direct `anyhow` dependency.
+- **`#[non_exhaustive]` on `AppConfig`** — adding new config fields in future minor releases will not break downstream crates that construct `AppConfig` via `load_from_sources()`.
+- **`ARCHITECTURE.md`** — documents the stable API surface, semver policy, security boundaries, and full module tree for library consumers and contributors.
+
+### Fixed
+- `read_public_inputs_from_bundle` moved to `tokio::task::spawn_blocking` — avoids blocking the async executor on synchronous zip I/O.
+- `/health` Supabase probe wrapped in `tokio::time::timeout(3s)` — endpoint cannot hang on an unresponsive database.
+- `GeneralLane` rate-limit path: `window` `MutexGuard` released before acquiring `receipts_db` lock, eliminating potential lock-ordering serialization.
+- `GeneralLane` `x-zemtik-meta` header now encoded after all `zemtik_meta` mutations (`resolved_model`, `anonymizer`) are applied — header was previously stale on Anthropic responses.
+- `fast.rs` bare `unwrap()` on `supabase_url`/`supabase_service_key` replaced with `expect()` carrying invariant messages.
+
 ## [0.16.1] - 2026-04-25
 
 ### Added
