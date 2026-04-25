@@ -3245,10 +3245,6 @@ pub(crate) async fn stream_openai_passthrough(upstream: reqwest::Response) -> Re
         .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
 }
 
-/// Anthropic SSE passthrough — identical byte-copy behavior to stream_openai_passthrough.
-/// Sets `x-zemtik-stream-format: v2` (S6: opaque format identifier, not provider name).
-/// Note: the SSE event format is Anthropic's (not OpenAI's). Clients must use the
-/// Anthropic SDK or any client that understands Anthropic SSE to parse the stream.
 // ---------------------------------------------------------------------------
 // Error type: typed variants for 500 (Internal) and 504 (Timeout)
 // ---------------------------------------------------------------------------
