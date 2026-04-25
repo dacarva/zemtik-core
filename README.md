@@ -942,6 +942,60 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 
 ---
 
+## Using zemtik-core as a Library
+
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+zemtik = { git = "https://github.com/dacarva/zemtik-core", tag = "v0.16.0" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+```
+
+Minimal proxy startup:
+
+```rust
+use zemtik::{AppConfig, build_proxy_router, ZemtikError};
+
+#[tokio::main]
+async fn main() -> Result<(), ZemtikError> {
+    // Load config from ~/.zemtik/config.yaml + env vars
+    let config = AppConfig::load(&Default::default())
+        .map_err(ZemtikError::from)?;
+
+    let router = build_proxy_router(config.clone()).await?;
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr)
+        .await
+        .map_err(|e| ZemtikError::from(anyhow::Error::from(e)))?;
+    axum::serve(listener, router).await
+        .map_err(|e| ZemtikError::from(anyhow::Error::from(e)))?;
+    Ok(())
+}
+```
+
+Or use the one-shot helper that binds and serves:
+
+```rust
+use zemtik::{AppConfig, run_proxy, ZemtikError};
+
+#[tokio::main]
+async fn main() -> Result<(), ZemtikError> {
+    let config = AppConfig::load(&Default::default())
+        .map_err(ZemtikError::from)?;
+    run_proxy(config).await
+}
+```
+
+**Stable surface** — `AppConfig`, `ZemtikMode`, `SchemaConfig`, `TableConfig`, `AggFn`,
+`load_from_sources`, `build_proxy_router`, `run_proxy`, `ZemtikError`, and the types in
+`zemtik::types` (`EvidencePack`, `EngineResult`, `FastLaneResult`, …) are stable across
+patch and minor releases. All other items are `#[doc(hidden)]` internal modules.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full stable API reference and semver policy.
+
+---
+
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 Zemtik Contributors

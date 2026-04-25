@@ -22,6 +22,11 @@ pub enum ZemtikMode {
 // ---------------------------------------------------------------------------
 
 /// Application-wide configuration resolved from defaults → YAML → env vars → CLI flags.
+///
+/// Marked `#[non_exhaustive]` so new fields added in future versions are
+/// non-breaking changes for downstream crates that construct this via
+/// [`load_from_sources`] or [`AppConfig::default`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
