@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut backend: Box<dyn zemtik::intent::IntentBackend> = if use_embed {
         let models_dir = home.join(".zemtik").join("models");
-        match zemtik::intent_embed::try_new_embedding_backend(&models_dir) {
+        match zemtik::intent_embed::try_new_embedding_backend(&models_dir, 250) {
             Some(b) => b,
             None => {
                 eprintln!("WARN: embedding backend unavailable, falling back to regex");
@@ -101,6 +101,7 @@ fn main() -> anyhow::Result<()> {
             &schema,
             backend.as_ref(),
             threshold,
+            300, // intent_substring_gate_max_chars default
         );
 
         match &entry.expected_table {
