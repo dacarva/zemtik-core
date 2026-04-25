@@ -101,6 +101,8 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ZEMTIK_ANTHROPIC_API_KEY=${ZEMTIK_ANTHROPIC_API_KEY:-}
       - ZEMTIK_ANTHROPIC_MODEL=${ZEMTIK_ANTHROPIC_MODEL:-}
+      # Required when ZEMTIK_LLM_PROVIDER=anthropic: clients must send this as Bearer token.
+      - ZEMTIK_PROXY_API_KEY=${ZEMTIK_PROXY_API_KEY:-}
       # Anonymizer v1: enabled only when running with --profile anonymizer.
       # The sidecar address uses the Docker Compose service name as the hostname.
       - ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://sidecar:50051

@@ -21,7 +21,7 @@ All notable changes to this project will be documented in this file.
 - `ZEMTIK_LLM_PROVIDER` — `openai` (default) or `anthropic`. Selects the LLM backend.
 - `ZEMTIK_ANTHROPIC_API_KEY` — Anthropic API key (required when `ZEMTIK_LLM_PROVIDER=anthropic`).
 - `ZEMTIK_PROXY_API_KEY` — Proxy bearer token clients must send (required when `ZEMTIK_LLM_PROVIDER=anthropic`; hard startup error if missing).
-- `ZEMTIK_ANTHROPIC_MODEL` — Claude model to use (default: `claude-opus-4-7`).
+- `ZEMTIK_ANTHROPIC_MODEL` — Claude model to use (default: `claude-sonnet-4-6`).
 - `ZEMTIK_ANTHROPIC_BASE_URL` — Override Anthropic API base URL (default: `https://api.anthropic.com`).
 
 ### Known limitations

@@ -361,14 +361,19 @@ impl ServerHandler for ZemtikMcpHandler {
         )
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_server_info(Implementation::from_build_env())
-        .with_instructions(
-            "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
-             Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs. \
-             Before reasoning on user-supplied document text that may contain PII \
-             (names, emails, IDs, phone numbers, addresses), FIRST call zemtik_analyze \
-             on the raw text and reason only on the returned tokenized form. \
-             Preserve any [[Z:xxxx:n]] tokens verbatim — they are opaque privacy identifiers.",
-        )
+        .with_instructions({
+            let base = "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
+                        Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.";
+            let analyze_hint = if self.state.anonymizer_enabled {
+                " Before reasoning on user-supplied document text that may contain PII \
+                 (names, emails, IDs, phone numbers, addresses), FIRST call zemtik_analyze \
+                 on the raw text and reason only on the returned tokenized form. \
+                 Preserve any [[Z:xxxx:n]] tokens verbatim — they are opaque privacy identifiers."
+            } else {
+                ""
+            };
+            format!("{}{}", base, analyze_hint)
+        })
     }
 
     async fn list_tools(

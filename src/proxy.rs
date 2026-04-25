@@ -510,28 +510,19 @@ async fn handle_chat_completions(
 ) -> Result<Response, ProxyError> {
     let total_start = Instant::now();
 
-    let api_key = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_owned())
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .or_else(|| state.config.openai_api_key.clone())
-        .ok_or_else(|| {
-            ProxyError::Internal(anyhow::anyhow!(
-                "No Authorization header, OPENAI_API_KEY env var, or openai_api_key in config.yaml"
-            ))
-        })?;
-
-    // S1: When provider=anthropic, validate incoming Bearer against ZEMTIK_PROXY_API_KEY.
-    // The server-side Anthropic key is used for outbound calls; the incoming token is purely
-    // for authenticating requests to this proxy. Missing key is a startup error (build_proxy_router),
-    // but we defend in-depth here in case the config reaches the handler without the key set.
-    if state.config.llm_provider == "anthropic" {
-        // Fallback "" is unreachable (startup error prevents None); empty string
-        // ensures constant_time_eq always fails if somehow reached.
+    // S1: When provider=anthropic, require an explicit Authorization bearer — do NOT fall back to
+    // OPENAI_API_KEY or config.openai_api_key. The server-side Anthropic key is used for all
+    // outbound calls; the incoming bearer is purely to authenticate requests to this proxy.
+    // Missing key is a startup error (build_proxy_router), but we defend in-depth here.
+    let api_key = if state.config.llm_provider == "anthropic" {
+        let bearer = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|s| s.to_owned());
         let expected = state.config.proxy_api_key.as_deref().unwrap_or("");
-        if !constant_time_eq(api_key.as_bytes(), expected.as_bytes()) || expected.is_empty() {
+        let incoming = bearer.as_deref().unwrap_or("");
+        if expected.is_empty() || !constant_time_eq(incoming.as_bytes(), expected.as_bytes()) {
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({
@@ -544,7 +535,21 @@ async fn handle_chat_completions(
             )
                 .into_response());
         }
-    }
+        incoming.to_owned()
+    } else {
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|s| s.to_owned())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or_else(|| state.config.openai_api_key.clone())
+            .ok_or_else(|| {
+                ProxyError::Internal(anyhow::anyhow!(
+                    "No Authorization header, OPENAI_API_KEY env var, or openai_api_key in config.yaml"
+                ))
+            })?
+    };
 
     // ---------------------------------------------------------------------------
     // zemtik_mode: parse, validate, and strip before hashing / forwarding.
@@ -2973,14 +2978,14 @@ async fn handle_models(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // S5: require auth if proxy_api_key is configured
+    // S5: require auth if proxy_api_key is configured (treat empty key as unset — always reject)
     if let Some(ref expected) = state.config.proxy_api_key {
         let incoming = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if !constant_time_eq(incoming.as_bytes(), expected.as_bytes()) {
+        if expected.is_empty() || !constant_time_eq(incoming.as_bytes(), expected.as_bytes()) {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({

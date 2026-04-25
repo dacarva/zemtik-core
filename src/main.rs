@@ -340,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
                         rewritten_query: None,
                         manifest_key_id: None,     // CLI pipeline: no ed25519 key fingerprint
                         evidence_json: None,       // CLI pipeline: evidence in audit/ JSON file
-                        llm_provider: None,        // CLI pipeline: always OpenAI
+                        llm_provider: Some("openai".to_owned()),
                     },
                 )?;
                 Some(br)

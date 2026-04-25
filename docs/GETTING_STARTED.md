@@ -285,7 +285,7 @@ Open `.env` and set your OpenAI API key:
 OPENAI_API_KEY=sk-...your-key-here...
 ```
 
-> **Model:** The CLI pipeline uses `gpt-5.4-nano` (current OpenAI model). To use a different model, set `ZEMTIK_OPENAI_MODEL` before running: `ZEMTIK_OPENAI_MODEL=gpt-4o-mini cargo run`.
+> **Model:** The CLI pipeline uses `gpt-5.4-nano` (current OpenAI model). To use a different model, set `ZEMTIK_OPENAI_MODEL` before running: `ZEMTIK_OPENAI_MODEL=gpt-5.4-nano cargo run`.
 
 All other `.env` values have safe defaults for local development.
 
@@ -1016,7 +1016,7 @@ When `ZEMTIK_ANONYMIZER_ENABLED=1`, `zemtik_analyze` is exposed and Claude Deskt
 - Regex fallback covers structured PII only (emails, IBANs, LATAM IDs) — not PERSON/ORG names
 
 **Test prompt for Claude Desktop:**
-```
+```text
 Summarize this contract: "Juan Carlos López (CC 1020304050) from Bogotá
 agrees to pay $5,200,000 COP starting March 1, 2024."
 ```

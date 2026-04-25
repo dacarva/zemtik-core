@@ -965,9 +965,11 @@ pub(crate) async fn handle_tunnel_passthrough(
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
-    // S7: Anthropic tunnel only supports /v1/chat/completions (mapped to /v1/messages).
-    // Non-chat paths (embeddings, fine-tunes, etc.) have no Anthropic equivalent.
-    if state.config.llm_provider == "anthropic" && !path_and_query.starts_with("/v1/chat/completions") {
+    // S7: Anthropic tunnel only supports POST /v1/chat/completions (mapped to /v1/messages).
+    // Non-chat paths and non-POST methods have no Anthropic equivalent.
+    if state.config.llm_provider == "anthropic"
+        && !(uri.path() == "/v1/chat/completions" && method == Method::POST)
+    {
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(serde_json::json!({

@@ -165,7 +165,7 @@ impl AnthropicBackend {
         let max_tokens = body
             .get("max_tokens")
             .and_then(|v| v.as_u64())
-            .unwrap_or(4096);
+            .unwrap_or(8192);
 
         let mut anthropic_body = serde_json::json!({
             "model": resolved_model,
@@ -268,10 +268,14 @@ impl LlmBackend for AnthropicBackend {
                         "role": "assistant",
                         "content": content_text,
                     },
-                    "finish_reason": resp_body
+                    "finish_reason": match resp_body
                         .get("stop_reason")
                         .and_then(|r| r.as_str())
-                        .unwrap_or("stop"),
+                        .unwrap_or("stop")
+                    {
+                        "max_tokens" => "length",
+                        other => other,
+                    },
                 }],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
@@ -315,8 +319,32 @@ impl LlmBackend for AnthropicBackend {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Extract plain text from an OpenAI message content value.
+/// String content is returned as-is. Content-part arrays are joined (text parts only).
+/// Other structured values are skipped (produce empty string).
+fn content_to_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| {
+                if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    p.get("text").and_then(|t| t.as_str()).map(|s| s.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
 /// Merge consecutive messages with the same role, joining content with "\n\n".
 /// Anthropic rejects consecutive user or assistant messages.
+/// Only merges when both adjacent messages have plain string content after extraction;
+/// structured content (e.g. image_url parts) is pushed through unchanged so the
+/// caller sees a 501 rather than silently receiving garbled JSON blobs.
 fn merge_consecutive_same_role(messages: Vec<Value>) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
     for msg in messages {
@@ -325,29 +353,35 @@ fn merge_consecutive_same_role(messages: Vec<Value>) -> Vec<Value> {
             .and_then(|r| r.as_str())
             .unwrap_or("")
             .to_owned();
-        let content = match msg.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => serde_json::to_string(other).unwrap_or_default(),
-            None => String::new(),
-        };
 
-        if let Some(last) = result.last_mut() {
-            let last_role = last
-                .get("role")
-                .and_then(|r| r.as_str())
-                .unwrap_or("")
-                .to_owned();
-            if last_role == role {
-                if let Some(last_content) = last.get_mut("content") {
-                    if let Some(existing) = last_content.as_str() {
-                        *last_content =
-                            Value::String(format!("{}\n\n{}", existing, content));
-                        continue;
+        // Only attempt merge when the incoming content is string or text-part array.
+        let content_val = msg.get("content");
+        let is_plain = matches!(content_val, Some(Value::String(_)))
+            || matches!(content_val, Some(Value::Array(_)));
+
+        if is_plain {
+            let content = content_to_text(content_val.unwrap());
+            if let Some(last) = result.last_mut() {
+                let last_role = last
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                if last_role == role {
+                    if let Some(last_content) = last.get_mut("content") {
+                        if let Some(existing) = last_content.as_str() {
+                            *last_content =
+                                Value::String(format!("{}\n\n{}", existing, content));
+                            continue;
+                        }
                     }
                 }
             }
+            result.push(serde_json::json!({"role": role, "content": content}));
+        } else {
+            // Structured (non-text) content: push through unchanged, skip merge.
+            result.push(msg);
         }
-        result.push(serde_json::json!({"role": role, "content": content}));
     }
     result
 }

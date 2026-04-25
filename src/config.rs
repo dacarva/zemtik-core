@@ -552,26 +552,21 @@ pub struct AppConfig {
     // --- Multi-model LLM backend (v0.16.0+) ---
 
     /// Active LLM provider. Default: "openai". Env: ZEMTIK_LLM_PROVIDER=openai|anthropic.
-    #[serde(skip)]
     pub llm_provider: String,
     /// Anthropic API key (operator-configured, server-side). Env: ZEMTIK_ANTHROPIC_API_KEY.
     /// Hard startup error when ZEMTIK_LLM_PROVIDER=anthropic and this is unset.
-    #[serde(skip)]
     pub anthropic_api_key: Option<String>,
     /// Claude model identifier. Default: "claude-sonnet-4-6". Env: ZEMTIK_ANTHROPIC_MODEL.
-    #[serde(skip)]
     pub anthropic_model: String,
     /// Anthropic API base URL. Default: "https://api.anthropic.com". Env: ZEMTIK_ANTHROPIC_BASE_URL.
     /// Override in tests to point at a mock server.
     // TODO: If per-request provider override (x-zemtik-provider header) ever ships in v2,
     // this URL selection becomes user-controlled and requires ssrf_block_reason + ssrf_dns_guard
     // treatment (matching zemtik_fetch in mcp_proxy.rs).
-    #[serde(skip)]
     pub anthropic_base_url: String,
     /// Proxy bearer key for inbound requests when provider=anthropic.
     /// Required hard startup error when ZEMTIK_LLM_PROVIDER=anthropic. Env: ZEMTIK_PROXY_API_KEY.
     /// Also gates GET /v1/models when set.
-    #[serde(skip)]
     pub proxy_api_key: Option<String>,
 }
 
