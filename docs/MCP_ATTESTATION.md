@@ -1,11 +1,62 @@
-# MCP Attestation — Audit Records
+# MCP Attestation — Integration Guide
 
-Zemtik MCP attests every tool call Claude makes on your data. For each call, Zemtik:
+Zemtik ships an MCP server that makes Claude Desktop safe for regulated industries. Every tool call is attested with a BabyJubJub EdDSA signature and logged to a tamper-evident audit database. In v0.16.0, the `zemtik_analyze` tool adds PII tokenization: Claude calls it before reasoning on sensitive documents, so raw names, tax IDs, and financial identifiers never appear in Claude's context.
+
+## How attestation works
+
+For each tool call, Zemtik:
 
 1. Executes the tool (FORK 1) and returns the result to Claude with zero added latency.
 2. Simultaneously (FORK 2, async, 1-second timeout): signs the call with a BabyJubJub EdDSA key and writes a signed audit record to `~/.zemtik/mcp_audit.db`.
 
-The result is a tamper-evident chain of every file read and HTTP fetch the AI performed, who authorized it, and when.
+The result is a tamper-evident chain of every file read, HTTP fetch, and PII anonymization Claude performed, who authorized it, and when.
+
+---
+
+## `zemtik_analyze` — PII Tokenization Tool (v0.16.0+)
+
+`zemtik_analyze` exposes the same anonymizer pipeline used by the proxy directly to Claude Desktop. When enabled, Claude is instructed (via the MCP `instructions` string) to call `zemtik_analyze` before reasoning on any user-pasted sensitive document.
+
+### Requirements
+
+- `ZEMTIK_ANONYMIZER_ENABLED=true`
+- Anonymizer sidecar running (GLiNER/Presidio gRPC on port 50051) — or `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true` for structured PII only
+
+The tool is **hidden** from Claude when `ZEMTIK_ANONYMIZER_ENABLED=false`.
+
+### What it does
+
+1. Accepts raw text (max 100 KB)
+2. Runs the text through the GLiNER/Presidio sidecar (regex fallback if sidecar unavailable)
+3. Returns `{"anonymized_text": "...", "entities_found": N, "entity_types": [...]}`
+4. Attests the transformation — `sha256(raw_input)` + `sha256(anonymized_output)` — with BabyJubJub EdDSA
+5. Persists an audit record in `mcp_audit.db` with `tool_name: "zemtik_analyze"`
+
+### Constraints
+
+- Vault tokens (`[[Z:xxxx:n]]`) are stable within one `zemtik_analyze` call only. The vault is discarded after each invocation and never returned to Claude. Claude works with tokens as opaque strings.
+- Regex fallback covers structured PII only (emails, IBANs, LATAM IDs). PERSON, ORG, and LOCATION detection requires the sidecar.
+- Soft enforcement: Claude follows the `instructions` directive but a user can type a message directly to bypass `zemtik_analyze`. For hard enforcement, route all traffic through the Zemtik proxy on `localhost:4000` with `ZEMTIK_ANONYMIZER_ENABLED=true`.
+
+### Quick start
+
+```bash
+# Start MCP server with anonymizer
+export ZEMTIK_MCP_API_KEY=$(openssl rand -hex 32)
+ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up -d
+
+# Verify
+curl http://localhost:4001/mcp/health
+```
+
+### Test prompt for Claude Desktop
+
+```text
+Summarize this contract: "Juan Carlos López (CC 1020304050) from Bogotá
+agrees to pay $5,200,000 COP starting March 1, 2024."
+```
+
+Expected behavior: Claude calls `zemtik_analyze` first, then summarizes using only `[[Z:...:n]]` tokens.
 
 ---
 
@@ -17,7 +68,7 @@ Each record in `mcp_audit.db` (and in `GET /mcp/audit` JSON output) contains:
 |-------|------|-------------|
 | `receipt_id` | string (UUID v4) | Unique ID for this call |
 | `ts` | string (ISO 8601 UTC) | When the call was executed |
-| `tool_name` | string | Tool called: `zemtik_read_file`, `zemtik_fetch`, or `zemtik_fetch_bypass` |
+| `tool_name` | string | Tool called: `zemtik_read_file`, `zemtik_fetch`, `zemtik_analyze`, or `zemtik_fetch_bypass` |
 | `input_hash` | string (`sha256:<hex>`) | SHA-256 of the JSON-serialized tool arguments |
 | `output_hash` | string (`sha256:<hex>`) | SHA-256 of the JSON-serialized tool result |
 | `preview_input` | string (≤500 chars) | First 500 characters of the tool input (URL or file path) |
@@ -30,8 +81,8 @@ Each record in `mcp_audit.db` (and in `GET /mcp/audit` JSON output) contains:
 ### Special records: bypass events
 
 When `zemtik_fetch` is called with a domain not in `ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`:
-- In **SSE mode**: the request is blocked. A record is written with `tool_name = "zemtik_fetch_bypass"`, `mode = "bypass_blocked"`, and empty `attestation_sig` (no signature — the tool was not executed, so there is no output to sign).
-- In **STDIO mode**: the request executes (local trust model), with `mode = "bypass_stdio"` and empty `attestation_sig`.
+- In **HTTP server mode**: the request is blocked. A record is written with `tool_name = "zemtik_fetch_bypass"`, `mode = "bypass_blocked"`, and empty `attestation_sig` (no signature — the tool was not executed, so there is no output to sign).
+- In **stdio mode**: the request executes (local trust model), with `mode = "bypass_stdio"` and empty `attestation_sig`.
 
 These bypass records are audit artifacts only — they document that an out-of-policy request was attempted.
 
@@ -39,13 +90,13 @@ These bypass records are audit artifacts only — they document that an out-of-p
 
 ## Viewing Audit Records
 
-**STDIO mode (no HTTP listener):**
+**stdio mode (no HTTP listener):**
 ```bash
 zemtik list-mcp               # Last 20 records, table format
 zemtik list-mcp --limit 100   # Last 100 records
 ```
 
-**SSE mode (`zemtik mcp-serve`):**
+**HTTP server mode (`zemtik mcp-serve`):**
 ```bash
 # JSON (all records)
 curl -H "Authorization: Bearer $ZEMTIK_MCP_API_KEY" http://127.0.0.1:4001/mcp/audit
@@ -135,6 +186,7 @@ def verify_record(record: dict, pub_key_x: int, pub_key_y: int) -> bool:
 | FORK 1 response to Claude | Tool result only | Tool result + attestation sidecar |
 | FORK 2 audit record | Always written (async) | Always written (async) |
 | Claude Desktop user sees | No change to tool output | `_zemtik_attestation` field in every response |
+| `zemtik_analyze` available | Yes (when anonymizer enabled) | Yes (when anonymizer enabled) |
 | Default | Yes (`ZEMTIK_MCP_MODE=tunnel`) | No |
 | When to use | Pilot (zero Claude impact) | Production compliance requirement |
 
@@ -146,9 +198,9 @@ Set mode via `ZEMTIK_MCP_MODE=governed` in `config.yaml` or environment.
 
 Audit records are stored in `~/.zemtik/mcp_audit.db` (SQLite). There is no automatic expiry or rotation.
 
-**STDIO mode durability:** Best-effort. FORK 2 writes are async with a 1-second timeout. If the process exits before FORK 2 completes, the in-flight record may not be written. For compliance requirements needing guaranteed durability, use SSE mode (`zemtik mcp-serve`) with a persistent host process.
+**stdio mode durability:** Best-effort. FORK 2 writes are async with a 1-second timeout. If the process exits before FORK 2 completes, the in-flight record may not be written. For compliance requirements needing guaranteed durability, use HTTP server mode (`zemtik mcp-serve`) with a persistent host process.
 
-**SSE mode durability:** The host process is long-lived. FORK 2 failures are logged to stderr (`[MCP] FORK 2 error: ...`) but do not affect FORK 1 responses.
+**HTTP server mode durability:** The host process is long-lived. FORK 2 failures are logged to stderr (`[MCP] FORK 2 error: ...`) but do not affect FORK 1 responses.
 
 ---
 
@@ -171,7 +223,7 @@ The signing key is **hardcoded-denied** in `zemtik_read_file` — Claude cannot 
 | Claude reads signing key via `zemtik_read_file` | Hardcoded deny for all paths under `~/.zemtik/`. Cannot be overridden by config. |
 | Symlink pointing into `~/.zemtik/` | `canonicalize()` resolves symlinks before the deny check. |
 | SSRF via `zemtik_fetch` | Two-stage guard: (1) `ssrf_block_reason` (sync) — rejects non-HTTPS, literal private IPs, `file://`, malformed URLs; (2) `ssrf_dns_guard` (async) — resolves hostname via `tokio::net::lookup_host`, rejects if any returned IP is private/loopback (RFC 1918, loopback, 0.0.0.0/8, 169.254/16 IMDS, 100.64/10 CGNAT, broadcast, IPv4-mapped IPv6). Vetted IPs pinned via `resolve_to_addrs` to prevent TOCTOU rebinding. Domain allowlist (`ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`) applied as an additional layer in `mcp-serve` mode. |
-| Path traversal via `zemtik_read_file` | SSE mode: requires explicit `ZEMTIK_MCP_ALLOWED_PATHS`. Empty list = deny all. |
+| Path traversal via `zemtik_read_file` | HTTP server mode: requires explicit `ZEMTIK_MCP_ALLOWED_PATHS`. Empty list = deny all. |
 | Bearer token timing attack | `constant_time_eq` comparison on `/mcp/audit` and `/mcp/summary`. |
 | Unauthenticated tool calls from LAN | Default bind is `127.0.0.1:4001`. Startup warning if non-loopback. |
 | Audit record tampering | Each record is independently signed with BabyJubJub EdDSA. Verify with the `public_key_hex` field. |

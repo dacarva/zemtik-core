@@ -12,6 +12,8 @@ Zemtik solves this at the infrastructure layer: **compute the answer locally ins
 
 The fastest way to run Zemtik. No Rust toolchain or ZK tools required.
 
+**OpenAI (default):**
+
 ```bash
 # 1. Set your OpenAI API key
 export OPENAI_API_KEY=sk-...
@@ -28,6 +30,23 @@ curl -X POST http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
     "model": "gpt-5.4-nano",
+    "messages": [{"role": "user", "content": "What was our total AWS spend for Q1 2024?"}]
+  }'
+```
+
+**Anthropic Claude (v0.16.0+):**
+
+```bash
+# No OpenAI key needed — Zemtik uses your Anthropic key server-side
+export ZEMTIK_ANTHROPIC_API_KEY=sk-ant-...
+export ZEMTIK_PROXY_API_KEY=your-strong-random-secret   # clients send this as Bearer
+ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
+
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" \
+  -d '{
+    "model": "claude-sonnet-4-6",
     "messages": [{"role": "user", "content": "What was our total AWS spend for Q1 2024?"}]
   }'
 ```
@@ -58,7 +77,7 @@ docker build --build-arg BUILD_FEATURES=embed \
 
 The ubuntu:24.04 base is required for embed because the ONNX Runtime C++ layer needs glibc 2.38+ (Debian Bookworm ships 2.36).
 
-> **POC status (v0.14.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; FastLane supports `DB_BACKEND=sqlite` (default, in-memory) and `DB_BACKEND=supabase` (Supabase integration enabled only when explicitly set — raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
+> **POC status (v0.16.0):** This is a working proof-of-concept, not a production product. Current hard limits: ZK circuit is fixed at 500 transactions per query; FastLane supports `DB_BACKEND=sqlite` (default, in-memory) and `DB_BACKEND=supabase` (Supabase integration enabled only when explicitly set — raw Postgres connector planned for v2); the signing key is file-based at `~/.zemtik/keys/bank_sk` (HSM integration planned for v2). See [Known Limitations](#known-limitations-poc) before evaluating for production use.
 
 ---
 
@@ -99,11 +118,11 @@ flowchart TD
         Intent -->|"zemtik_mode: document\nor ZEMTIK_GENERAL_PASSTHROUGH"| General
     end
 
-    FL3 -->|"aggregate + attestation_hash\ndata_exfiltrated: 0"| OpenAI
-    ZK3 -->|"aggregate + proof_hash\ndata_exfiltrated: 0"| OpenAI
-    GL1 -->|"tokenized prompt\nno raw data"| OpenAI
+    FL3 -->|"aggregate + attestation_hash\ndata_exfiltrated: 0"| LLM
+    ZK3 -->|"aggregate + proof_hash\ndata_exfiltrated: 0"| LLM
+    GL1 -->|"tokenized prompt\nno raw data"| LLM
 
-    OpenAI["OpenAI API\n{ aggregate, provenance:\nZEMTIK_FAST_LANE or ZEMTIK_ZK }"]
+    LLM["LLM API\nOpenAI (default) or Anthropic Claude\n(ZEMTIK_LLM_PROVIDER)\n{ aggregate, provenance:\nZEMTIK_FAST_LANE or ZEMTIK_ZK }"]
 ```
 
 In all paths, raw transaction rows **never leave the Zemtik process**. The anonymizer (if enabled) tokenizes PII before any path runs. Which data path executes is determined by the `sensitivity` field in `schema_config.json` or by the `zemtik_mode` field in the request. See [Two Lanes: FastLane vs ZK SlowLane](#two-lanes-fastlane-vs-zk-slowlane) and [PII-Safe Document Processing](#pii-safe-document-processing-v0154) below.
@@ -193,6 +212,68 @@ General lane responses include:
 `zk_coverage: "none"` confirms no ZK verification was applied — and none was needed, since no raw data was queried. The `/health` endpoint exposes `general_queries_today` and `intent_failures_today` counters. Rate-limit breaches return HTTP 429 with error code `GeneralLaneBudgetExceeded`.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#general-passthrough-v0110) for full configuration reference and streaming notes.
+
+---
+
+## Multi-Provider LLM Backend (v0.16.0+)
+
+Zemtik v0.16.0 introduces a `LlmBackend` trait that decouples the proxy from any single LLM provider. Two backends ship out of the box:
+
+| Backend | `ZEMTIK_LLM_PROVIDER` | Auth model | Use case |
+|---|---|---|---|
+| `OpenAiBackend` | `openai` (default) | BYOK — client Bearer forwarded to OpenAI | Existing deployments, no change required |
+| `AnthropicBackend` | `anthropic` | Operator-key — `ZEMTIK_ANTHROPIC_API_KEY` used server-side; client sends `ZEMTIK_PROXY_API_KEY` | Regulated industries requiring Claude; no API key exposure to clients |
+
+All three lanes (ZK SlowLane, FastLane, GeneralLane) route through whichever backend is configured. The client request format is identical in both cases — OpenAI-compatible `POST /v1/chat/completions`.
+
+### Switching to Anthropic
+
+```bash
+# .env additions
+ZEMTIK_LLM_PROVIDER=anthropic
+ZEMTIK_ANTHROPIC_API_KEY=sk-ant-...
+ZEMTIK_ANTHROPIC_MODEL=claude-sonnet-4-6      # default; override as needed
+ZEMTIK_PROXY_API_KEY=your-strong-random-secret
+```
+
+Start:
+
+```bash
+cargo run -- proxy
+# or: ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
+```
+
+Send a request — the proxy accepts any model name and substitutes `ZEMTIK_ANTHROPIC_MODEL`:
+
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
+```
+
+The response `zemtik_meta` block includes `"resolved_model": "claude-sonnet-4-6"` confirming which model handled the request. The `evidence.llm_provider` field records `"anthropic"` in the receipts database (v10 migration).
+
+### Discover configured model
+
+```bash
+# Protected by ZEMTIK_PROXY_API_KEY when set
+curl -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" http://localhost:4000/v1/models
+# → {"object":"list","data":[{"id":"claude-sonnet-4-6","owned_by":"anthropic",...}]}
+```
+
+### Security: key separation
+
+When `llm_provider=anthropic`, the client's `Authorization: Bearer` header is validated against `ZEMTIK_PROXY_API_KEY` and **never forwarded to Anthropic**. All outbound Claude calls use the server-side `ZEMTIK_ANTHROPIC_API_KEY`. Client code never sees the operator's Anthropic credentials.
+
+`ZEMTIK_PROXY_API_KEY` is a hard startup error when `llm_provider=anthropic` — the proxy refuses to start without it.
+
+### Known limitations (v0.16.0)
+
+- `stream: true` with `llm_provider=anthropic` returns HTTP 501 (`AnthropicStreamingUnsupported`). Set `stream: false`. OpenAI streaming is unchanged.
+- Multi-modal / vision content (content arrays with `image_url` blocks) not supported with the Anthropic backend.
+
+See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#switching-to-anthropic-claude) for the full quickstart and guidance on adding future providers.
 
 ---
 
@@ -386,30 +467,71 @@ Requires `ZEMTIK_ANONYMIZER_ENABLED=true`. Returns the tokenized messages array 
 
 ---
 
-## MCP Attestation Proxy (v0.13.0+)
+## MCP + Claude Desktop — Production-Grade PII Protection (v0.16.0+)
 
-Zemtik can act as an **MCP (Model Context Protocol) attestation proxy** that wraps every tool call made by Claude or another MCP client with a ZK-backed attestation record. This lets you prove — cryptographically — that no raw data was exfiltrated through tool calls even when Claude is operating as an autonomous agent.
+Zemtik ships an **MCP (Model Context Protocol) server** that makes Claude Desktop safe for regulated industries. In v0.16.0, Claude Desktop integration is production-grade: the new `zemtik_analyze` tool tokenizes PII before Claude ever reasons on sensitive documents, and every tool call is attested with a BabyJubJub EdDSA signature.
 
-Two transports are supported:
+### What changed in v0.16.0
+
+Previously, the MCP server provided attestation only — it logged what Claude accessed, but did not intercept or anonymize content. The `zemtik_analyze` tool closes this gap: when a user pastes a contract, HR document, or medical record into Claude Desktop, Claude calls `zemtik_analyze` first, which routes the text through the same GLiNER/Presidio sidecar as the proxy. Claude receives only `[[Z:xxxx:n]]` tokens — never the raw PII.
+
+### Available MCP tools
+
+| Tool | Description | Requires |
+|------|-------------|---------|
+| `zemtik_fetch` | HTTPS fetch with SSRF guard (blocks RFC 1918, IMDS, loopback) | Always available |
+| `zemtik_read_file` | File read with key-file protection and 10 MB cap | Always available |
+| `zemtik_analyze` | Tokenize PII in arbitrary text before Claude reasons on it | `ZEMTIK_ANONYMIZER_ENABLED=true` |
+
+### Quick start (Claude Desktop + Docker)
+
+```bash
+# Generate a strong API key
+export ZEMTIK_MCP_API_KEY=$(openssl rand -hex 32)
+
+# Start MCP server + anonymizer sidecar
+ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up -d
+
+# Verify health
+curl http://localhost:4001/mcp/health
+```
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "zemtik": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:4001/mcp"]
+    }
+  }
+}
+```
+
+Fully quit and relaunch Claude Desktop. The `zemtik_analyze`, `zemtik_fetch`, and `zemtik_read_file` tools appear in the composer.
+
+**Test:** Paste a document with names and tax IDs and ask Claude to summarize it. Claude calls `zemtik_analyze` first and works exclusively with `[[Z:xxxx:n]]` tokens.
+
+### Transports
 
 | Command | Transport | Use case |
 |---------|-----------|---------|
-| `zemtik mcp` | stdio | Claude Desktop integration — add to `claude_desktop_config.json` |
-| `zemtik mcp-serve` | Streamable HTTP on `:4001` | IDE plugins, CI pipelines, or any HTTP MCP client |
+| `zemtik mcp` | stdio | Claude Desktop (local binary) |
+| `zemtik mcp-serve` | Streamable HTTP on `:4001` | Docker, IDE plugins, CI pipelines |
+
+### Enforcement modes
+
+`ZEMTIK_MCP_MODE=tunnel` (default) — logs all tool calls, never blocks. `ZEMTIK_MCP_MODE=governed` — blocks tool calls whose attestation fails.
 
 ```bash
-# stdio mode (Claude Desktop)
-export ZEMTIK_MCP_API_KEY=secret
-zemtik mcp
-
-# HTTP server mode
-zemtik mcp-serve   # binds to 127.0.0.1:4001
-
 # Review audit records
 zemtik list-mcp
+# or via HTTP API:
+curl -H "Authorization: Bearer $ZEMTIK_MCP_API_KEY" http://localhost:4001/mcp/audit
 ```
 
-Two enforcement modes: `ZEMTIK_MCP_MODE=tunnel` (default — logs all tool calls, never blocks) and `ZEMTIK_MCP_MODE=governed` (blocks tool calls whose attestation fails). See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for the full integration guide.
+See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for the full audit record schema, signature verification, and security boundary reference. See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#mcp-attestation-proxy-claude-desktop) for the end-to-end setup guide including `zemtik_analyze` behavior and known constraints.
 
 ---
 
@@ -644,15 +766,16 @@ zemtik-core/
 │   ├── evidence.rs       # EvidencePack builder for both engine paths
 │   ├── db.rs             # DB backend (SQLite / Supabase) + BabyJubJub KMS + aggregate_table
 │   ├── prover.rs         # nargo / bb subprocess pipeline
-│   ├── openai.rs         # OpenAI Chat Completions client (CLI mode)
+│   ├── openai.rs         # OpenAI Chat Completions client (CLI pipeline mode; proxy uses LlmBackend trait)
 │   ├── audit.rs          # Audit record writer
-│   ├── receipts.rs       # Receipts ledger (CRUD + migrations: v9 evidence_json; v8 manifest_key_id; v5 actual_row_count; v4 signing_version; v3 outgoing_prompt_hash; v2 engine_used, intent_confidence); count_receipts(), update_evidence_json()
+│   ├── receipts.rs       # Receipts ledger (CRUD + migrations: v10 llm_provider; v9 evidence_json; v8 manifest_key_id; v5 actual_row_count; v4 signing_version; v3 outgoing_prompt_hash; v2 engine_used, intent_confidence); count_receipts(), update_evidence_json()
 │   ├── keys.rs           # BabyJubJub key generation + persistence
 │   ├── config.rs         # Layered config + SchemaConfig / TableConfig loading; AggFn enum (SUM/COUNT/AVG)
 │   ├── startup.rs        # Startup validation: Postgres checks, ZK tools detection, JSONL event log
-│   ├── mcp_proxy.rs      # MCP attestation proxy: stdio + HTTP server; McpAuditRecord persistence; list_mcp_audit_records
+│   ├── llm_backend.rs    # LlmBackend trait; OpenAiBackend (BYOK); AnthropicBackend (operator-key); build_llm_backend() factory
+│   ├── mcp_proxy.rs      # MCP attestation proxy: stdio + HTTP server; McpAuditRecord persistence; list_mcp_audit_records; zemtik_analyze tool (v0.16.0)
 │   ├── mcp_auth.rs       # MCP bearer key validation; startup error enforcement for mcp-serve mode
-│   ├── mcp_tools.rs      # Built-in MCP tools (zemtik_fetch, zemtik_read_file); dynamic tool registration; path/domain allowlists
+│   ├── mcp_tools.rs      # Built-in MCP tools (zemtik_fetch, zemtik_read_file, zemtik_analyze); dynamic tool registration; path/domain allowlists
 │   ├── anonymizer.rs     # PII tokenization pipeline; VaultStore (session vault + TTL eviction); anonymize_conversation(); AuditMeta; gRPC + regex fallback paths
 │   ├── entity_hashes.rs  # Entity-type hash table (CRC-based 4-char codes); type_hash(); ENTITY_HASHES const; matches sidecar/entity_hashes.py
 │   ├── lib.rs            # Library crate root (for eval harness and integration tests)
@@ -766,7 +889,8 @@ docker compose logs -f
 | Signature scheme | BabyJubJub EdDSA + Poseidon | BN254 |
 | Proxy / orchestrator | Rust + Axum | 1.70+ / 0.8 |
 | Database | SQLite (in-memory) or Supabase (PostgREST) | — |
-| AI inference | OpenAI gpt-5.4-nano | Chat Completions API |
+| LLM inference (default) | OpenAI `gpt-5.4-nano` | Chat Completions API |
+| LLM inference (optional) | Anthropic Claude `claude-sonnet-4-6` | Messages API (v0.16.0+) |
 
 ---
 
@@ -813,7 +937,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [How to Add a Table](docs/HOW_TO_ADD_TABLE.md) — Step-by-step guide to adding a new table
 - [ZK Circuits](docs/ZK_CIRCUITS.md) — Circuit internals: Poseidon Merkle tree, mini-circuit architecture, public input layout, developer constraints (500-tx cap, sentinel padding, category hash rules), bundle format, offline verification, threat model
 - [Scaling](docs/SCALING.md) — Recursive proofs vs aggregation; why remote proving breaks the privacy guarantee
-- [MCP Attestation](docs/MCP_ATTESTATION.md) — MCP attestation proxy: Claude Desktop integration, `zemtik mcp` / `zemtik mcp-serve`, audit record schema, governed mode
+- [MCP Attestation](docs/MCP_ATTESTATION.md) — MCP attestation proxy: Claude Desktop integration, `zemtik_analyze` PII tool (v0.16.0), `zemtik mcp` / `zemtik mcp-serve`, audit record schema, governed mode
 - [Anonymizer Sidecar](sidecar/README.md) — GLiNER + Presidio gRPC sidecar: quick start, byte-offset invariant, Docker build, entity types
 
 ---
