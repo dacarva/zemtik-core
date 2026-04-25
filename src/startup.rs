@@ -45,12 +45,34 @@ pub async fn run_startup_validation(
         );
     }
 
+    // D11: Tunnel + Anthropic cross-provider warning.
+    if config.mode == ZemtikMode::Tunnel && config.llm_provider == "anthropic" {
+        eprintln!(
+            "[WARN] Tunnel mode FORK 2 verification uses OpenAI (rewriter_base_url) regardless of\n\
+             \x20     ZEMTIK_LLM_PROVIDER. FORK 1 forwards to Anthropic, FORK 2 verifies via OpenAI.\n\
+             \x20     Audit comparisons will be cross-provider in v1. Anthropic FORK 2 support deferred to v2."
+        );
+    }
+
+    let llm_extra = vec![
+        format!("llm_provider: {}", config.llm_provider),
+        format!(
+            "llm_model: {}",
+            if config.llm_provider == "anthropic" {
+                &config.anthropic_model
+            } else {
+                &config.openai_model
+            }
+        ),
+    ];
+
     if skip_db || !is_supabase {
         if skip_db {
             println!("[ZEMTIK] Schema validation skipped (ZEMTIK_SKIP_DB_VALIDATION=1)");
         } else {
             println!("[ZEMTIK] Schema validation skipped (SQLite backend — demo mode)");
         }
+        print_llm_info(&llm_extra);
         return SchemaValidationResult {
             tables: vec![],
             zk_tools,
@@ -101,6 +123,7 @@ pub async fn run_startup_validation(
             warnings: vec!["DATABASE_URL not set — column validation unavailable".to_owned()],
         }).collect();
         print_validation_block(&tables, &zk_tools);
+        print_llm_info(&llm_extra);
         return SchemaValidationResult { tables, zk_tools, skipped: false };
     }
 
@@ -114,6 +137,7 @@ pub async fn run_startup_validation(
     }
 
     print_validation_block(&table_results, &zk_tools);
+    print_llm_info(&llm_extra);
     write_startup_events(&table_results);
 
     SchemaValidationResult {
@@ -328,4 +352,11 @@ fn which(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Print LLM backend info lines as a follow-on block after the validation table.
+fn print_llm_info(lines: &[String]) {
+    for line in lines {
+        println!("  └ {}", line);
+    }
 }

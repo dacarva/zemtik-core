@@ -1762,3 +1762,223 @@ async fn zemtik_mode_data_falls_through_to_normal_routing() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Anthropic backend integration tests
+// ---------------------------------------------------------------------------
+
+/// Spawn a proxy configured for ZEMTIK_LLM_PROVIDER=anthropic with a wiremock Anthropic server.
+/// General passthrough is enabled so streaming tests can use non-data prompts (general lane).
+/// Returns (proxy_addr, _mock_openai_unused, mock_anthropic).
+async fn spawn_test_proxy_anthropic() -> (SocketAddr, MockServer, MockServer) {
+    let mock_openai = MockServer::start().await; // kept alive; not used for Anthropic calls
+    let mock_anthropic = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.openai_base_url = mock_openai.uri();
+    config.openai_model = "gpt-5.4-nano".to_owned();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+
+    // Anthropic provider settings (S1: proxy_api_key required)
+    config.llm_provider = "anthropic".to_owned();
+    config.anthropic_api_key = Some("test-ant-key".to_owned());
+    config.anthropic_model = "claude-sonnet-4-6".to_owned();
+    config.anthropic_base_url = mock_anthropic.uri();
+    config.proxy_api_key = Some("proxy-key".to_owned());
+
+    let app = build_proxy_router(config)
+        .await
+        .expect("build_proxy_router failed");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum serve failed");
+    });
+
+    (addr, mock_openai, mock_anthropic)
+}
+
+/// Minimal valid Anthropic /v1/messages response body.
+fn anthropic_messages_response(text: &str) -> serde_json::Value {
+    json!({
+        "id": "msg_test123",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 5}
+    })
+}
+
+/// Basic Anthropic chat: data query routes to FastLane, AnthropicBackend forwards to
+/// /v1/messages, response is normalized to OpenAI shape before returning to the client.
+#[tokio::test]
+async fn test_anthropic_complete_basic() {
+    let (addr, _mock_openai, mock_anthropic) = spawn_test_proxy_anthropic().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            anthropic_messages_response("Hello from Claude!"),
+        ))
+        .mount(&mock_anthropic)
+        .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("Authorization", "Bearer proxy-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "What was our total AWS spend?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 200, "expected 200, got {}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    // Response must be OpenAI-shape
+    assert_eq!(
+        body["choices"][0]["message"]["content"], "Hello from Claude!",
+        "content mismatch: {body}"
+    );
+    assert_eq!(body["object"], "chat.completion", "object field: {body}");
+    // Internal field must be stripped before delivery to client
+    assert!(
+        body.get("_zemtik_resolved_model").is_none(),
+        "_zemtik_resolved_model leaked to client: {body}"
+    );
+}
+
+/// S1 auth rejection: wrong bearer on Anthropic path → 401 auth_error.
+#[tokio::test]
+async fn test_anthropic_auth_rejection() {
+    let (addr, _mock_openai, _mock_anthropic) = spawn_test_proxy_anthropic().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("Authorization", "Bearer wrong-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [{"role": "user", "content": "What was our AWS spend?"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 401, "expected 401, got {}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "auth_error", "error type mismatch: {body}");
+}
+
+/// System message extraction: system role must appear as top-level "system" field in
+/// the Anthropic request, not inside messages[].
+#[tokio::test]
+async fn test_anthropic_system_messages_extracted() {
+    let (addr, _mock_openai, mock_anthropic) = spawn_test_proxy_anthropic().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            anthropic_messages_response("Done."),
+        ))
+        .mount(&mock_anthropic)
+        .await;
+
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("Authorization", "Bearer proxy-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What was our total AWS spend?"}
+            ]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    let received = mock_anthropic.received_requests().await.unwrap();
+    assert!(!received.is_empty(), "no request reached Anthropic mock");
+    let upstream: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream["system"], "You are a helpful assistant.",
+        "system not extracted to top level: {upstream}"
+    );
+    let msgs = upstream["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter().all(|m| m["role"] != "system"),
+        "system role must not appear in messages[]: {upstream}"
+    );
+}
+
+/// Empty messages[] → translate_to_anthropic returns Err → proxy returns an error status.
+#[tokio::test]
+async fn test_anthropic_empty_messages_400() {
+    let (addr, _mock_openai, _mock_anthropic) = spawn_test_proxy_anthropic().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("Authorization", "Bearer proxy-key")
+        .json(&json!({"model": "gpt-5.4-nano", "messages": []}))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert!(
+        resp.status().is_client_error() || resp.status().is_server_error(),
+        "expected error status for empty messages, got {}",
+        resp.status()
+    );
+}
+
+/// Anthropic streaming (stream=true): SSE bytes pass through and the response carries
+/// Anthropic streaming returns 501 — SSE translation deferred to a future release.
+/// Clients must set stream: false when llm_provider=anthropic.
+#[tokio::test]
+async fn test_anthropic_streaming_returns_501() {
+    let (addr, _mock_openai, _mock_anthropic) = spawn_test_proxy_anthropic().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("Authorization", "Bearer proxy-key")
+        .json(&json!({
+            "model": "gpt-5.4-nano",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Tell me a joke"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        501,
+        "Anthropic streaming must return 501 until SSE translation is implemented"
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some("AnthropicStreamingUnsupported"),
+        "error code must be AnthropicStreamingUnsupported"
+    );
+}
+

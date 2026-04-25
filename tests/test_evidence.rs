@@ -19,6 +19,7 @@ fn make_ev(hash: Option<String>) -> EvidencePack {
         None,
         human_summary,
         checks_performed,
+        "openai".to_owned(),
     )
 }
 

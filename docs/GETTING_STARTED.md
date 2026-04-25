@@ -44,6 +44,172 @@ The response includes `evidence.data_exfiltrated: 0` — a cryptographic receipt
 
 ---
 
+## Switching to Anthropic (Claude)
+
+If your deployment requires Anthropic Claude instead of OpenAI, update three env vars and restart. No client code changes required — Zemtik translates OpenAI-format requests to Anthropic format internally.
+
+**In your `.env` file:**
+
+```bash
+ZEMTIK_LLM_PROVIDER=anthropic
+ZEMTIK_ANTHROPIC_API_KEY=sk-ant-...your-key-here...
+ZEMTIK_ANTHROPIC_MODEL=claude-sonnet-4-6   # or your required version
+
+# Required when using Anthropic — protects the proxy from unauthorized use.
+# Any client reaching :4000 would otherwise get free API calls billed to your account.
+ZEMTIK_PROXY_API_KEY=your-strong-random-secret
+```
+
+Verify at startup: the validation block shows `llm_provider: anthropic` and `llm_model: claude-sonnet-4-6`.
+
+**Send a request:**
+
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
+```
+
+A successful response includes `"llm_provider": "anthropic"` and `"data_exfiltrated": 0` in the `evidence` block.
+
+**Model substitution:** Zemtik replaces any non-Claude model name in your request (e.g. `gpt-5.4-nano`) with the value of `ZEMTIK_ANTHROPIC_MODEL`. Your client code does not need to change. The actual model used is recorded in `zemtik_meta.resolved_model` in every response.
+
+**Auth asymmetry:** When using Anthropic, Zemtik uses `ZEMTIK_ANTHROPIC_API_KEY` for all outbound Claude calls. The `Authorization: Bearer` header your client sends to Zemtik is validated against `ZEMTIK_PROXY_API_KEY` — it is **not** forwarded to Anthropic. This is expected behavior.
+
+**Check the configured model:**
+
+```bash
+curl -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" http://localhost:4000/v1/models
+# → {"object":"list","data":[{"id":"claude-sonnet-4-6","owned_by":"anthropic",...}]}
+```
+
+---
+
+## Adding a Future Provider (e.g., Gemini)
+
+Zemtik uses the `LlmBackend` trait (`src/llm_backend.rs`) to isolate provider-specific logic from the proxy. Adding a new provider — Gemini, Mistral, Bedrock, or any OpenAI-compatible endpoint — requires four steps and touches three files.
+
+### Step 1 — Implement `LlmBackend`
+
+Create `src/llm_backend_gemini.rs` (or add a struct to `llm_backend.rs`) and implement the trait:
+
+```rust
+use crate::llm_backend::LlmBackend;
+
+pub struct GeminiBackend {
+    client: reqwest::Client,
+    api_key: String,      // from ZEMTIK_GEMINI_API_KEY
+    model: String,        // from ZEMTIK_GEMINI_MODEL
+    base_url: String,     // e.g. https://generativelanguage.googleapis.com
+}
+
+impl LlmBackend for GeminiBackend {
+    fn complete<'a>(
+        &'a self,
+        body: &'a serde_json::Value,
+        _api_key: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<(u16, serde_json::Value)>> {
+        Box::pin(async move {
+            // 1. Translate OpenAI message format → Gemini generateContent format
+            let gemini_body = translate_to_gemini(body)?;
+
+            // 2. Call Gemini API (key goes in query param or x-goog-api-key header)
+            let url = format!(
+                "{}/v1beta/models/{}:generateContent?key={}",
+                self.base_url, self.model, self.api_key
+            );
+            let resp = self.client.post(&url).json(&gemini_body).send().await?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| {
+                    serde_json::json!({"error": {"type": "upstream_error"}})
+                });
+                return Ok((status.as_u16(), body));
+            }
+
+            let resp_body: serde_json::Value = resp.json().await?;
+
+            // 3. Normalize to OpenAI response shape (same pattern as AnthropicBackend)
+            let text = extract_gemini_text(&resp_body)?;
+            let normalized = serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "object": "chat.completion",
+                "model": self.model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "_zemtik_resolved_model": self.model,
+            });
+            Ok((200, normalized))
+        })
+    }
+    // Optionally implement forward_raw() for streaming
+}
+```
+
+Key invariants to follow (same as `AnthropicBackend`):
+
+- Use `self.api_key` (operator key) for outbound calls — **never** the incoming `_api_key` argument.
+- Return `_zemtik_resolved_model` in the normalized body; the proxy strips and injects it into `zemtik_meta.resolved_model`.
+- Check `!status.is_success()` before parsing the body to handle non-JSON error payloads from the upstream (gateways sometimes return HTML 502).
+- Return `(501, ...)` for any Gemini-specific capability (e.g., function calling, grounding) not yet supported instead of silently returning a 500.
+
+### Step 2 — Wire into `config.rs`
+
+Add new config fields alongside the existing Anthropic fields:
+
+```rust
+// src/config.rs
+pub gemini_api_key: Option<String>,   // ZEMTIK_GEMINI_API_KEY
+pub gemini_model: String,             // ZEMTIK_GEMINI_MODEL (default: gemini-2.0-flash)
+pub gemini_base_url: String,          // ZEMTIK_GEMINI_BASE_URL
+```
+
+Populate them from env vars in the config loading block, following the same pattern as `anthropic_api_key`.
+
+### Step 3 — Add the match arm in `proxy.rs`
+
+In `build_llm_backend()` (or equivalent factory function in `proxy.rs`), add a match arm:
+
+```rust
+"gemini" => {
+    let api_key = config.gemini_api_key.clone()
+        .ok_or_else(|| anyhow!("ZEMTIK_GEMINI_API_KEY required when llm_provider=gemini"))?;
+    Box::new(GeminiBackend::new(client, api_key, config.gemini_model.clone(), config.gemini_base_url.clone()))
+}
+```
+
+At startup, follow the same hard-error pattern as Anthropic: if `llm_provider=gemini` and `ZEMTIK_GEMINI_API_KEY` is unset, refuse to start with a clear error. Do not silently fall back.
+
+### Step 4 — Add env vars to `.env.example` and `CLAUDE.md`
+
+Add to `.env.example`:
+
+```bash
+# Gemini backend (set ZEMTIK_LLM_PROVIDER=gemini to activate)
+# ZEMTIK_GEMINI_API_KEY=AIza...
+# ZEMTIK_GEMINI_MODEL=gemini-2.0-flash
+# ZEMTIK_GEMINI_BASE_URL=https://generativelanguage.googleapis.com
+```
+
+Add to the env vars table in `CLAUDE.md` so future maintainers know the keys exist.
+
+### OpenAI-compatible endpoints (simpler path)
+
+If the provider exposes an OpenAI-compatible API (Together AI, Groq, Fireworks, local Ollama, etc.), no new backend struct is needed. Just use `OpenAiBackend` with a custom base URL:
+
+```bash
+ZEMTIK_LLM_PROVIDER=openai
+ZEMTIK_OPENAI_BASE_URL=https://api.together.xyz
+ZEMTIK_OPENAI_MODEL=meta-llama/Llama-3-70b-chat-hf
+# Client's Bearer token is forwarded as-is (BYOK model)
+```
+
+This works because `OpenAiBackend` does not translate formats — it forwards the request verbatim to `${ZEMTIK_OPENAI_BASE_URL}/v1/chat/completions`.
+
+---
+
 ## Option B — Build from Source
 
 By the end of this section you will have:
@@ -119,7 +285,7 @@ Open `.env` and set your OpenAI API key:
 OPENAI_API_KEY=sk-...your-key-here...
 ```
 
-> **Model:** The CLI pipeline uses `gpt-5.4-nano` (current OpenAI model). To use a different model, set `ZEMTIK_OPENAI_MODEL` before running: `ZEMTIK_OPENAI_MODEL=gpt-4o-mini cargo run`.
+> **Model:** The CLI pipeline uses `gpt-5.4-nano` (current OpenAI model). To use a different model, set `ZEMTIK_OPENAI_MODEL` before running: `ZEMTIK_OPENAI_MODEL=gpt-5.4-nano cargo run`.
 
 All other `.env` values have safe defaults for local development.
 
@@ -788,6 +954,84 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 | ZK tools absent | nargo/bb not on PATH | Set `ZEMTIK_SKIP_CIRCUIT_VALIDATION=1` or `INSTALL_ZK_TOOLS=true` |
 | Column not found | `physical_table` or `value_column` name mismatch | Fix in schema_config.json, check DB schema |
 | DB connection refused | Wrong `SUPABASE_URL` or `DATABASE_URL` | Verify credentials, test connectivity |
+
+---
+
+## MCP Attestation Proxy (Claude Desktop)
+
+Zemtik ships an MCP server (`zemtik mcp` / `zemtik mcp-serve`) that wraps every tool call with BabyJubJub EdDSA attestation. This lets Claude Desktop users run audited, SSRF-safe tool execution without routing chat through the Zemtik proxy.
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `zemtik_fetch` | HTTP GET a URL with SSRF guard (blocks private IPs, IMDS, RFC 1918) |
+| `zemtik_read_file` | Read a file with key-file protection and 10 MB cap |
+| `zemtik_analyze` | Tokenize PII before Claude reasons on it (requires `ZEMTIK_ANONYMIZER_ENABLED=1`) |
+
+### Quick start (Docker)
+
+```bash
+# In .env
+ZEMTIK_MCP_API_KEY=$(openssl rand -hex 32)
+ZEMTIK_ANONYMIZER_ENABLED=true   # enables zemtik_analyze tool
+
+# Start MCP server + anonymizer sidecar
+ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up -d
+
+# Verify health
+curl http://localhost:4001/mcp/health
+```
+
+### Claude Desktop integration
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "zemtik-docker": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:4001/mcp"]
+    }
+  }
+}
+```
+
+Fully quit and relaunch Claude Desktop. The tools appear in the composer tool list.
+
+### `zemtik_analyze` — PII soft enforcement
+
+When `ZEMTIK_ANONYMIZER_ENABLED=1`, `zemtik_analyze` is exposed and Claude Desktop is steered via the MCP `instructions` string to call it before reasoning on user-pasted documents.
+
+**What it does:**
+- Accepts raw text (max 100 KB)
+- Runs through the GLiNER/Presidio anonymizer sidecar (regex fallback if sidecar unavailable)
+- Returns `{"anonymized_text": "...", "entities_found": N, "entity_types": [...]}`
+- Attests the transformation (`sha256(raw)` + `sha256(tokenized)`) with BabyJubJub EdDSA
+- Persists an audit record in `mcp_audit.db`
+
+**Constraints:**
+- Tokens (`[[Z:xxxx:n]]`) are stable **within one call only** — vault is discarded after each invocation and never returned to Claude
+- Regex fallback covers structured PII only (emails, IBANs, LATAM IDs) — not PERSON/ORG names
+
+**Test prompt for Claude Desktop:**
+```text
+Summarize this contract: "Juan Carlos López (CC 1020304050) from Bogotá
+agrees to pay $5,200,000 COP starting March 1, 2024."
+```
+Expected: Claude calls `zemtik_analyze` first, then summarizes using only `[[Z:...:n]]` tokens.
+
+**Verify the audit trail:**
+```bash
+curl -s -H "Authorization: Bearer $ZEMTIK_MCP_API_KEY" http://localhost:4001/mcp/audit
+```
+
+### Why Claude Desktop chat is NOT anonymized
+
+Claude Desktop sends chat directly to `api.anthropic.com` — it bypasses the Zemtik proxy entirely. `zemtik_analyze` is soft enforcement: Claude follows the instruction but a user can type a normal message to bypass it.
+
+For hard enforcement (all traffic anonymized), use a web client (e.g. Open WebUI) pointed at the Zemtik proxy on `localhost:4000` with `ZEMTIK_ANONYMIZER_ENABLED=true`.
 
 ---
 

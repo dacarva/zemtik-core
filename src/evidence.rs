@@ -110,6 +110,7 @@ pub fn build_evidence_pack(
     actual_row_count: Option<usize>,
     human_summary: String,
     checks_performed: Vec<String>,
+    llm_provider: String,
 ) -> EvidencePack {
     EvidencePack {
         engine_used: engine_used.to_owned(),
@@ -128,5 +129,6 @@ pub fn build_evidence_pack(
         actual_row_count,
         human_summary,
         checks_performed,
+        llm_provider,
     }
 }

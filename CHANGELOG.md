@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-04-24
+
+### Added
+- **Multi-provider LLM backend** — new `LlmBackend` trait (`src/llm_backend.rs`) with two implementations: `OpenAiBackend` (BYOK — forwards client bearer to OpenAI, zero config change for existing users) and `AnthropicBackend` (operator-key model — uses `ZEMTIK_ANTHROPIC_API_KEY` server-side, validates client bearer against `ZEMTIK_PROXY_API_KEY`). Switch via `ZEMTIK_LLM_PROVIDER=anthropic` (default: `openai`).
+- **Anthropic Claude support** — proxy can now route all lanes (ZK SlowLane, FastLane, GeneralLane) through Claude models. Responses translated from Anthropic's `messages` format to OpenAI-compatible `chat.completions` format. System messages are extracted from the messages array and sent in the dedicated Anthropic `system` field. Consecutive same-role message merging handled automatically (Anthropic rejects adjacent same-role turns).
+- **`zemtik_meta.resolved_model`** — both backends populate `resolved_model` in the `zemtik_meta` response block with the actual model name returned by the upstream LLM.
+- **`GET /v1/models` endpoint** — returns the configured model name for SDK client discovery. Protected by `ZEMTIK_PROXY_API_KEY` when set.
+- **MCP anonymizer integration** — `zemtik_analyze` tool added to the MCP HTTP server. Tokenizes PII in arbitrary text using the same gRPC sidecar + regex fallback pipeline as the proxy. Hidden when `ZEMTIK_ANONYMIZER_ENABLED=false`, visible and callable when enabled. Writes an audit record per call.
+- **MCP HTTP serve router extraction** — `build_mcp_router` extracted from `run_mcp_serve` for testability. 20 new integration tests in `tests/integration_mcp_serve.rs` covering analyze tool, auth, audit endpoints, and HTML rendering.
+- **SQLite receipts v10 migration** — adds `llm_provider TEXT DEFAULT NULL` column. Existing rows read back as `COALESCE(llm_provider, 'openai')`.
+
+### Security
+- **Anthropic auth gate defense-in-depth** — S1 auth check now fails fast if `proxy_api_key` is `None` at handler time (complementing the existing hard startup error), preventing any hypothetical future code path from bypassing auth.
+- **Anthropic streaming returns 501** — `stream: true` with `llm_provider=anthropic` returns HTTP 501 (`AnthropicStreamingUnsupported`) instead of forwarding raw Anthropic SSE that OpenAI clients cannot parse. Translation deferred to a future release.
+
+### Configuration
+- `ZEMTIK_LLM_PROVIDER` — `openai` (default) or `anthropic`. Selects the LLM backend.
+- `ZEMTIK_ANTHROPIC_API_KEY` — Anthropic API key (required when `ZEMTIK_LLM_PROVIDER=anthropic`).
+- `ZEMTIK_PROXY_API_KEY` — Proxy bearer token clients must send (required when `ZEMTIK_LLM_PROVIDER=anthropic`; hard startup error if missing).
+- `ZEMTIK_ANTHROPIC_MODEL` — Claude model to use (default: `claude-sonnet-4-6`).
+- `ZEMTIK_ANTHROPIC_BASE_URL` — Override Anthropic API base URL (default: `https://api.anthropic.com`).
+
+### Known limitations
+- Anthropic streaming not supported in v0.16.0 — set `stream: false`. OpenAI streaming unchanged.
+- Multi-modal / vision content (content arrays with `image_url` blocks) not supported with Anthropic backend in v0.16.0.
+
 ## [0.15.4] - 2026-04-22
 
 ### Added

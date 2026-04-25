@@ -65,6 +65,9 @@ static BN254_FIELD_ORDER: LazyLock<BigInt> = LazyLock::new(|| {
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::anonymizer::{
+    anonymize_conversation, build_channel, AnonymizerGrpcClient, AuditMeta,
+};
 use crate::config::AppConfig;
 use crate::keys::load_or_generate_key;
 use crate::mcp_auth::check_mcp_auth;
@@ -72,6 +75,8 @@ use crate::types::{McpAuditRecord, McpMode};
 
 // File size cap: 10MB
 const FILE_SIZE_CAP: u64 = 10 * 1024 * 1024;
+// zemtik_analyze input cap: 100KB
+const ANALYZE_INPUT_CAP: usize = 100 * 1024;
 // Max preview chars
 const PREVIEW_LEN: usize = 500;
 // FORK 2 timeout
@@ -234,6 +239,16 @@ pub struct McpHandlerState {
     pub api_key: Option<String>,
     /// Pending FORK 2 JoinHandles (STDIO mode drain on shutdown).
     pub pending_fork2: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Whether PII anonymization is active (gates zemtik_analyze tool).
+    pub anonymizer_enabled: bool,
+    pub anonymizer_sidecar_addr: String,
+    pub anonymizer_sidecar_timeout_ms: u64,
+    pub anonymizer_fallback_regex: bool,
+    pub anonymizer_entity_types: String,
+    /// Lazy gRPC channel — cloned per zemtik_analyze call (cheap; reuses TCP via connect_lazy).
+    pub anonymizer_client: Option<AnonymizerGrpcClient>,
+    /// Store raw input + tokenized output in audit previews. Disable in production.
+    pub anonymizer_debug_preview: bool,
 }
 
 impl McpHandlerState {
@@ -275,6 +290,15 @@ impl McpHandlerState {
             McpMode::Tunnel
         };
 
+        let anonymizer_client = if config.anonymizer_enabled {
+            Some(AnonymizerGrpcClient::new(
+                build_channel(&config.anonymizer_sidecar_addr)
+                    .context("build anonymizer gRPC channel for MCP handler")?,
+            ))
+        } else {
+            None
+        };
+
         Ok(McpHandlerState {
             key_seed: Arc::new(seed),
             public_key_hex,
@@ -301,6 +325,13 @@ impl McpHandlerState {
             zemtik_home,
             api_key: config.mcp_api_key.clone(),
             pending_fork2: Arc::new(std::sync::Mutex::new(Vec::new())),
+            anonymizer_enabled: config.anonymizer_enabled,
+            anonymizer_sidecar_addr: config.anonymizer_sidecar_addr.clone(),
+            anonymizer_sidecar_timeout_ms: config.anonymizer_sidecar_timeout_ms,
+            anonymizer_fallback_regex: config.anonymizer_fallback_regex,
+            anonymizer_entity_types: config.anonymizer_entity_types.clone(),
+            anonymizer_client,
+            anonymizer_debug_preview: config.anonymizer_debug_preview,
         })
     }
 }
@@ -330,10 +361,19 @@ impl ServerHandler for ZemtikMcpHandler {
         )
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_server_info(Implementation::from_build_env())
-        .with_instructions(
-            "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
-             Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.",
-        )
+        .with_instructions({
+            let base = "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
+                        Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.";
+            let analyze_hint = if self.state.anonymizer_enabled {
+                " Before reasoning on user-supplied document text that may contain PII \
+                 (names, emails, IDs, phone numbers, addresses), FIRST call zemtik_analyze \
+                 on the raw text and reason only on the returned tokenized form. \
+                 Preserve any [[Z:xxxx:n]] tokens verbatim — they are opaque privacy identifiers."
+            } else {
+                ""
+            };
+            format!("{}{}", base, analyze_hint)
+        })
     }
 
     async fn list_tools(
@@ -341,7 +381,7 @@ impl ServerHandler for ZemtikMcpHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let tools = builtin_tools();
+        let tools = builtin_tools(self.state.anonymizer_enabled);
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
@@ -358,6 +398,7 @@ impl ServerHandler for ZemtikMcpHandler {
         match tool_name {
             "zemtik_read_file" => self.handle_read_file(request).await,
             "zemtik_fetch" => self.handle_fetch(request).await,
+            "zemtik_analyze" => self.handle_analyze(request).await,
             _ => Err(rmcp::ErrorData::new(
                 rmcp::model::ErrorCode(-32601),
                 format!("Unknown tool: {}", tool_name),
@@ -562,6 +603,96 @@ impl ZemtikMcpHandler {
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
 
+    // ---------------------------------------------------------------------------
+    // Tool: zemtik_analyze
+    // ---------------------------------------------------------------------------
+
+    async fn handle_analyze(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let start = Instant::now();
+
+        // Defense-in-depth: tool is hidden from list_tools when disabled, but reject direct calls too.
+        if !self.state.anonymizer_enabled {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32601),
+                "zemtik_analyze is disabled: set ZEMTIK_ANONYMIZER_ENABLED=1".to_string(),
+                None,
+            ));
+        }
+
+        let text = request.arguments.as_ref()
+            .and_then(|a| a.get("text"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32602),
+                "Missing required argument: text".to_string(),
+                None,
+            ))?
+            .to_string();
+
+        if text.len() > ANALYZE_INPUT_CAP {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32003),
+                format!("input_too_large: {} bytes exceeds 100KB cap", text.len()),
+                None,
+            ));
+        }
+
+        // Fresh session_id per call — no cross-call vault (tokens stable within one call only).
+        let session_id = Uuid::new_v4().to_string();
+        let messages = vec![serde_json::json!({"role": "user", "content": text.clone()})];
+        let mut grpc = self.state.anonymizer_client.clone();
+
+        let anon_result = anonymize_conversation(
+            &messages,
+            &session_id,
+            grpc.as_mut(),
+            &self.state.anonymizer_entity_types,
+            self.state.anonymizer_sidecar_timeout_ms,
+            self.state.anonymizer_fallback_regex,
+            &self.state.anonymizer_sidecar_addr,
+        ).await;
+
+        let (anonymized_text, meta): (String, AuditMeta) = match anon_result {
+            Ok((msgs, _vault, m)) => {
+                // Discard vault — never return original values to the LLM.
+                let t = msgs.first()
+                    .and_then(|msg| msg.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (t, m)
+            }
+            Err(e) => {
+                return Err(rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode(-32000),
+                    format!("anonymizer_failed: {}", e),
+                    None,
+                ));
+            }
+        };
+
+        let result_val = serde_json::json!({
+            "anonymized_text": anonymized_text,
+            "entities_found": meta.entities_found,
+            "entity_types": meta.entity_types,
+        });
+        let result_json = serde_json::to_string(&result_val).unwrap_or_default();
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Compute raw content hashes for signing — these are the values attested to.
+        // The JSON metadata wrappers below are for audit/debug storage only and are NOT signed.
+        let raw_input_hash = sha256_hex(text.as_bytes());
+        let raw_output_hash = sha256_hex(anonymized_text.as_bytes());
+
+        self.attest_for_mode("zemtik_analyze".to_string(), raw_input_hash, raw_output_hash, duration_ms).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(result_json)]))
+    }
+
     /// Attest based on operating mode.
     /// Tunnel: fire-and-forget FORK 2 (zero latency added).
     /// Governed: await signing synchronously — return Err to caller if attestation fails.
@@ -761,18 +892,17 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
 }
 
 /// Sign the tool call and write audit record to SQLite. Runs in spawn_blocking.
+/// `input_hash` and `output_hash` are pre-computed SHA256 digests of the raw tool
+/// input and output (not JSON wrappers) — used directly in the signed message.
 fn sign_and_write(
     state: &McpHandlerState,
     tool_name: String,
-    input_json: String,
-    output_json: String,
+    input_hash: String,
+    output_hash: String,
     duration_ms: u64,
 ) -> anyhow::Result<()> {
     let ts = Utc::now().to_rfc3339();
     let receipt_id = Uuid::new_v4().to_string();
-
-    let input_hash = sha256_hex(input_json.as_bytes());
-    let output_hash = sha256_hex(output_json.as_bytes());
 
     // Sign: message = tool_name + input_hash + output_hash + ts
     let message = format!("{}{}{}{}", tool_name, input_hash, output_hash, ts);
@@ -793,14 +923,16 @@ fn sign_and_write(
     // sig_hex: r_b8.x and s as decimal strings joined with ":"
     let sig_hex = format!("{}:{}", sig.r_b8.x, sig.s);
 
+    let preview_in = truncate(&input_hash, PREVIEW_LEN);
+    let preview_out = truncate(&output_hash, PREVIEW_LEN);
     let record = McpAuditRecord {
         receipt_id,
         ts,
         tool_name,
         input_hash,
         output_hash,
-        preview_input: truncate(&input_json, PREVIEW_LEN),
-        preview_output: truncate(&output_json, PREVIEW_LEN),
+        preview_input: preview_in,
+        preview_output: preview_out,
         attestation_sig: sig_hex,
         public_key_hex: state.public_key_hex.clone(),
         duration_ms,
@@ -990,6 +1122,31 @@ pub async fn run_mcp_stdio(config: AppConfig) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Run the MCP server in SSE/HTTP mode on ZEMTIK_MCP_BIND_ADDR.
+/// Build the MCP HTTP router. Extracted for testability — `run_mcp_serve` calls this
+/// then binds and serves; integration tests call it directly on an ephemeral port.
+pub fn build_mcp_router(
+    config: &AppConfig,
+    ct: CancellationToken,
+) -> anyhow::Result<(Router, Arc<McpHandlerState>)> {
+    let state = Arc::new(McpHandlerState::from_config(config, false)?);
+    let state_clone = Arc::clone(&state);
+
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(ZemtikMcpHandler::new(Arc::clone(&state_clone))),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+    );
+
+    let router = Router::new()
+        .route("/mcp/health", get(health_handler))
+        .route("/mcp/audit", get(audit_handler))
+        .route("/mcp/summary", get(summary_handler))
+        .nest_service("/mcp", mcp_service)
+        .with_state(Arc::clone(&state));
+
+    Ok((router, state))
+}
+
 pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
     // Hard startup error: ZEMTIK_MCP_API_KEY required in SSE mode (blank counts as absent)
     if config.mcp_api_key.as_ref().is_none_or(|k| k.trim().is_empty()) {
@@ -998,8 +1155,6 @@ pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
              Generate a key: openssl rand -hex 32"
         );
     }
-
-    let state = Arc::new(McpHandlerState::from_config(&config, false)?);
 
     eprintln!("[MCP] Starting HTTP server on {} (mode: {})", config.mcp_bind_addr, config.mcp_mode);
     eprintln!("[MCP] Audit DB: {}", config.mcp_audit_db_path.display());
@@ -1021,21 +1176,8 @@ pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
         );
     }
 
-    let state_clone = Arc::clone(&state);
     let ct = CancellationToken::new();
-
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(ZemtikMcpHandler::new(Arc::clone(&state_clone))),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
-    );
-
-    let router = Router::new()
-        .route("/mcp/health", get(health_handler))
-        .route("/mcp/audit", get(audit_handler))
-        .route("/mcp/summary", get(summary_handler))
-        .nest_service("/mcp", mcp_service)
-        .with_state(state);
+    let (router, _state) = build_mcp_router(&config, ct.clone())?;
 
     let listener = tokio::net::TcpListener::bind(&config.mcp_bind_addr)
         .await
@@ -1149,14 +1291,36 @@ fn escape_html(s: &str) -> String {
 
 fn render_audit_html(records: &[McpAuditRecord]) -> String {
     let rows: String = records.iter().map(|r| {
+        // Try to extract preview text from preview_input/preview_output JSON fields.
+        // Falls back to showing the raw JSON when no "preview" key is present (hash-only mode).
+        let input_preview = serde_json::from_str::<serde_json::Value>(&r.preview_input)
+            .ok()
+            .and_then(|v| v.get("preview").and_then(|p| p.as_str()).map(String::from))
+            .unwrap_or_else(|| r.preview_input.clone());
+        let output_preview = serde_json::from_str::<serde_json::Value>(&r.preview_output)
+            .ok()
+            .and_then(|v| v.get("preview").and_then(|p| p.as_str()).map(String::from))
+            .unwrap_or_else(|| r.preview_output.clone());
+
         format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}ms</td><td>{}</td></tr>",
-            escape_html(&r.ts),
-            escape_html(&r.tool_name),
-            escape_html(&r.input_hash),
-            escape_html(&r.output_hash),
-            r.duration_ms,
-            escape_html(&r.mode),
+            "<tr>\
+              <td>{ts}</td>\
+              <td><strong>{tool}</strong></td>\
+              <td class=\"preview\">{input}</td>\
+              <td class=\"preview\">{output}</td>\
+              <td class=\"hash\">{ih}</td>\
+              <td class=\"hash\">{oh}</td>\
+              <td>{dur}ms</td>\
+              <td>{mode}</td>\
+            </tr>",
+            ts   = escape_html(&r.ts),
+            tool = escape_html(&r.tool_name),
+            input  = escape_html(&input_preview),
+            output = escape_html(&output_preview),
+            ih   = escape_html(&r.input_hash),
+            oh   = escape_html(&r.output_hash),
+            dur  = r.duration_ms,
+            mode = escape_html(&r.mode),
         )
     }).collect();
 
@@ -1164,25 +1328,43 @@ fn render_audit_html(records: &[McpAuditRecord]) -> String {
         r#"<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <title>Zemtik MCP Audit Log</title>
 <style>
-body {{ font-family: monospace; padding: 2em; }}
-table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ border: 1px solid #ccc; padding: 6px 12px; text-align: left; }}
-th {{ background: #f0f0f0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace; padding: 2em; background: #fafafa; color: #222; }}
+  h1 {{ font-size: 1.4em; margin-bottom: 0.25em; }}
+  p.meta {{ color: #666; font-size: 0.9em; margin-top: 0; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.85em; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+  th, td {{ border: 1px solid #e0e0e0; padding: 8px 12px; text-align: left; vertical-align: top; }}
+  th {{ background: #f5f5f5; font-weight: 600; white-space: nowrap; }}
+  tr:hover {{ background: #f9f9f9; }}
+  td.preview {{ max-width: 300px; word-break: break-word; font-family: monospace; font-size: 0.8em; color: #333; }}
+  td.hash {{ font-family: monospace; font-size: 0.75em; color: #888; max-width: 180px; word-break: break-all; }}
+  .badge {{ display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 0.75em; background: #e8f4fd; color: #0070c0; }}
 </style>
 </head>
 <body>
 <h1>Zemtik MCP Audit Log</h1>
-<p>{} tool call(s)</p>
+<p class="meta">{count} tool call(s) &nbsp;|&nbsp; <a href="?token=" style="color:#888">refresh</a></p>
 <table>
-<thead><tr><th>Timestamp</th><th>Tool</th><th>Input Hash</th><th>Output Hash</th><th>Duration</th><th>Mode</th></tr></thead>
-<tbody>{}</tbody>
+<thead>
+  <tr>
+    <th>Timestamp</th>
+    <th>Tool</th>
+    <th>Input Preview</th>
+    <th>Output Preview</th>
+    <th>Input Hash</th>
+    <th>Output Hash</th>
+    <th>Duration</th>
+    <th>Mode</th>
+  </tr>
+</thead>
+<tbody>{rows}</tbody>
 </table>
 </body>
 </html>"#,
-        records.len(),
-        rows
+        count = records.len(),
+        rows  = rows,
     )
 }
 
@@ -1190,8 +1372,8 @@ th {{ background: #f0f0f0; }}
 // Built-in tool definitions
 // ---------------------------------------------------------------------------
 
-fn builtin_tools() -> Vec<Tool> {
-    vec![
+fn builtin_tools(anonymizer_enabled: bool) -> Vec<Tool> {
+    let mut tools = vec![
         Tool::new(
             "zemtik_read_file",
             "Read a file and return its content hash + preview. Zemtik attests the read.",
@@ -1224,7 +1406,33 @@ fn builtin_tools() -> Vec<Tool> {
                 m
             },
         ),
-    ]
+    ];
+
+    if anonymizer_enabled {
+        tools.push(Tool::new(
+            "zemtik_analyze",
+            "Tokenize PII in user-supplied text before reasoning on it. Returns anonymized \
+             text with [[Z:xxxx:n]] tokens replacing names, emails, IDs, phone numbers, \
+             addresses, and other personal data. Call this BEFORE analyzing any document \
+             content the user pastes or loads. Zemtik attests the transformation with \
+             BabyJubJub EdDSA. Tokens are stable within one call; a fresh session is issued \
+             per invocation — do not assume token mapping persists across calls.",
+            {
+                let mut m = serde_json::Map::new();
+                m.insert("type".to_string(), serde_json::json!("object"));
+                m.insert("properties".to_string(), serde_json::json!({
+                    "text": {
+                        "type": "string",
+                        "description": "Raw text to tokenize (max 100 KB)"
+                    }
+                }));
+                m.insert("required".to_string(), serde_json::json!(["text"]));
+                m
+            },
+        ));
+    }
+
+    tools
 }
 
 // ---------------------------------------------------------------------------

@@ -345,8 +345,12 @@ pub enum EngineResult {
     SignError(String),
 }
 
+fn default_llm_provider() -> String {
+    "openai".to_owned()
+}
+
 /// Evidence pack produced by both engines — serialized into the LLM response.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct EvidencePack {
     pub engine_used: String,
     /// ZK path: SHA-256(ultraHonk_proof_bytes)
@@ -384,6 +388,10 @@ pub struct EvidencePack {
     /// Empty vec for pre-v3 packs deserialized from historical JSON.
     #[serde(default)]
     pub checks_performed: Vec<String>,
+    /// LLM provider used for this request. "openai" or "anthropic".
+    /// Defaults to "openai" for legacy rows deserialized from historical JSON.
+    #[serde(default = "default_llm_provider")]
+    pub llm_provider: String,
 }
 
 // ---------------------------------------------------------------------------

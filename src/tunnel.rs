@@ -233,7 +233,7 @@ async fn forward_non_streaming(
     body: Bytes,
     start: Instant,
 ) -> (Response, Option<OriginalResponseData>) {
-    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
+    let openai_url = format!("{}/v1/chat/completions", state.rewriter_base_url);
 
     let resp = state.http_client
         .post(&openai_url)
@@ -302,7 +302,7 @@ async fn forward_streaming(
     start: Instant,
     fork2_tx: oneshot::Sender<Option<OriginalResponseData>>,
 ) -> Response {
-    let openai_url = format!("{}/v1/chat/completions", state.openai_base_url);
+    let openai_url = format!("{}/v1/chat/completions", state.rewriter_base_url);
 
     let resp = match state.http_client
         .post(&openai_url)
@@ -964,7 +964,25 @@ pub(crate) async fn handle_tunnel_passthrough(
     let path_and_query = uri.path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let target_url = format!("{}{}", state.openai_base_url, path_and_query);
+
+    // S7: Anthropic tunnel only supports POST /v1/chat/completions (mapped to /v1/messages).
+    // Non-chat paths and non-POST methods have no Anthropic equivalent.
+    if state.config.llm_provider == "anthropic"
+        && !(uri.path() == "/v1/chat/completions" && method == Method::POST)
+    {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "Tunnel mode with ZEMTIK_LLM_PROVIDER=anthropic only supports /v1/chat/completions. Other OpenAI endpoints have no Anthropic equivalent.",
+                    "type": "not_implemented",
+                    "code": "anthropic_tunnel_chat_only"
+                }
+            })),
+        ).into_response();
+    }
+
+    let target_url = format!("{}{}", state.rewriter_base_url, path_and_query);
 
     let mut req_builder = state.http_client.request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),

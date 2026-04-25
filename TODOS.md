@@ -813,3 +813,33 @@ Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy
 - **Why:** Hard startup error is acceptable (matches ZEMTIK_TUNNEL_API_KEY pattern), but panic is not. Use `hk.expand(...)?.` and propagate as startup error.
 - **Context:** HKDF expand can only fail if the output length exceeds 255 * HashLen. For SHA-256 with 32-byte output this will never fail in practice — but the guard is cheap and the Aztec engineer will check error handling.
 - **Effort:** XS (CC: ~2 min)
+
+---
+
+### Unify stream_openai_passthrough + stream_anthropic_passthrough (P3, v2)
+- **What:** Merge `stream_openai_passthrough` and `stream_anthropic_passthrough` (added in feat/multi-model-support) into a single `stream_passthrough(upstream, stream_format: Option<&str>)` in `proxy.rs`. When `stream_format` is `Some("v2")`, set `x-zemtik-stream-format: v2` (S6: opaque identifier, not provider name); otherwise set nothing (OpenAI path).
+- **Why:** Both functions are byte-passthrough with a 60-second per-chunk stall timeout. Any change to that logic (timeout value, backpressure handling) must be applied to both. Copy-paste duplication is a maintenance liability.
+- **Context:** Added as a known tech debt item during /plan-ceo-review of feat/multi-model-support (2026-04-24). The copy was intentional for v1 (simplicity); unification is v2 housekeeping.
+- **Effort:** XS (CC: ~10min)
+- **Depends on:** feat/multi-model-support merged.
+
+### ~~Tunnel mode + Anthropic provider warning at startup~~ **Moved to v1 scope (2026-04-24, /plan-devex-review D11)**
+- **Resolved:** Startup warning added to `feat/multi-model-support` baseline scope during DX review (D11). Will ship with v1, not post-merge. See plan `2026-04-24-multi-model-support.md` DX Review section.
+
+### docs/SECURITY.md LiteLLM supply chain positioning (P2, post-feat/multi-model-support merge)
+- **What:** Add a `docs/SECURITY.md` paragraph: Zemtik internalizes its LLM adapter as a Rust library inside the binary. No Python process, no PyPI dependency, no external gateway in the critical path. Reference: LiteLLM supply chain attack, March 2026 (PyPI versions 1.82.7/1.82.8, credential exfiltration). The architecture choice to internalize is provably correct — not a design preference.
+- **Why:** Enterprise security teams ask about third-party LLM gateway risk. This is a differentiated answer. Ships as a docs-only commit after the code PR merges to avoid mixing competitive positioning with code review.
+- **Context:** Decision from /plan-ceo-review scope table (D4 DEFERRED, 2026-04-24). Post-merge separate PR.
+- **Effort:** XS (CC: ~5min doc writing)
+- **Depends on:** feat/multi-model-support merged.
+
+### Query rewriter Anthropic support (ZEMTIK_QUERY_REWRITER_PROVIDER)
+- **What:** Add `ZEMTIK_QUERY_REWRITER_PROVIDER=openai|anthropic` config. Currently the rewriter always calls OpenAI, making `ZEMTIK_QUERY_REWRITER=1` incompatible with `ZEMTIK_LLM_PROVIDER=anthropic` (hard startup error added in feat/multi-model-support).
+- **Why:** Anthropic-only deployments (CDO with OpenAI ban) cannot use the query rewriter. This limits multi-turn conversation quality for Anthropic deployments.
+- **Pros:** Completes the rewriter story for Anthropic deployments. Uses `LlmBackend` internally (consistent with the multi-model abstraction).
+- **Cons:** Rewriter would need to use `LlmBackend` trait internally, adding complexity. The rewriter's context window turns and timeout config is OpenAI-specific.
+- **Context:** `src/rewriter.rs:299` hardcodes `POST /v1/chat/completions` with Bearer auth. `RewriterConfig` in `proxy.rs:638` is built from `config.openai_base_url`. Both need to be provider-aware.
+- **Depends on:** feat/multi-model-support merged. `LlmBackend` trait available.
+
+## Pre-existing (found during QA 2026-04-24)
+- [ ] `integration_anonymizer::anonymizer_e2e_cedula_tokenized_and_deanonymized` fails: dropped_tokens=1 when 0 expected; LLM drops anonymized cedula token in round-trip test. Pre-dates feat/multi-model-support branch.

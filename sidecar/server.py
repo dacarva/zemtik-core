@@ -125,7 +125,7 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                 return anon_pb2.AnonymizeResponse(messages=[])
             if gliner_types and self._gliner is not None:
                 try:
-                    raw_entities = self._gliner.predict_entities(text, gliner_types, threshold=0.5)
+                    raw_entities = self._gliner.predict_entities(text, gliner_types, threshold=0.35)
                     entities = [
                         e for e in raw_entities
                         if (e["end"] - e["start"]) >= MIN_ENTITY_CHARS
@@ -154,7 +154,9 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
             # ORG and LOCATION are included here too so custom PatternRecognizers supplement
             # GLiNER for street addresses and bank names it misses. Duplicates are deduplicated
             # below by dropping Presidio spans that overlap existing GLiNER spans.
-            GLINER_ONLY = {"PERSON"}
+            # PERSON: GLiNER is primary; Presidio SpacyRecognizer supplements as fallback.
+            # Deduplication below merges overlapping spans so names detected by both are not double-tokenized.
+            GLINER_ONLY: set[str] = set()
             presidio_types = [t for t in entity_types if t not in GLINER_ONLY]
             if presidio_types and self._presidio is None:
                 logger.error("Presidio model not ready — aborting request (fail-closed)")

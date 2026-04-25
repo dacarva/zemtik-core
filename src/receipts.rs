@@ -59,6 +59,9 @@ pub struct Receipt {
     /// Used by /verify/{id} to render aggregate, table, attestation_hash, human_summary,
     /// checks_performed, and the raw JSON block without requiring a ZK bundle.
     pub evidence_json: Option<String>,
+    /// LLM provider used for this request. "openai" | "anthropic". Added in v10.
+    /// NULL rows from before v10 are read as "openai" via COALESCE.
+    pub llm_provider: Option<String>,
 }
 
 /// Open (or create) the file-based receipts SQLite database at `db_path`.
@@ -205,6 +208,16 @@ pub fn run_migration(conn: &Connection) -> anyhow::Result<()> {
         .context("apply migration v9")?;
     }
 
+    if version < 10 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE receipts ADD COLUMN llm_provider TEXT DEFAULT NULL;
+             PRAGMA user_version = 10;
+             COMMIT;",
+        )
+        .context("apply migration v10")?;
+    }
+
     Ok(())
 }
 
@@ -216,8 +229,8 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
              prompt_hash, request_hash, created_at, engine_used, proof_hash,
              data_exfiltrated, intent_confidence, outgoing_prompt_hash, signing_version,
              actual_row_count, rewrite_method, rewritten_query, manifest_key_id,
-             evidence_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             evidence_json, llm_provider)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         rusqlite::params![
             r.id,
             r.bundle_path,
@@ -238,6 +251,7 @@ pub fn insert_receipt(conn: &Connection, r: &Receipt) -> anyhow::Result<()> {
             r.rewritten_query,
             r.manifest_key_id,
             r.evidence_json,
+            r.llm_provider,
         ],
     )
     .with_context(|| format!("insert receipt {}", r.id))?;
@@ -323,7 +337,8 @@ pub fn list_receipts(conn: &Connection, limit: usize) -> anyhow::Result<Vec<Rece
                     rewrite_method,
                     rewritten_query,
                     manifest_key_id,
-                    evidence_json
+                    evidence_json,
+                    COALESCE(llm_provider, 'openai')
              FROM receipts ORDER BY created_at DESC LIMIT ?1",
         )
         .context("prepare list_receipts")?;
@@ -352,6 +367,7 @@ pub fn list_receipts(conn: &Connection, limit: usize) -> anyhow::Result<Vec<Rece
                 rewritten_query: row.get(16)?,
                 manifest_key_id: row.get(17)?,
                 evidence_json: row.get(18)?,
+                llm_provider: row.get(19)?,
             })
         })
         .context("query receipts")?;
@@ -376,7 +392,8 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                     rewrite_method,
                     rewritten_query,
                     manifest_key_id,
-                    evidence_json
+                    evidence_json,
+                    COALESCE(llm_provider, 'openai')
              FROM receipts WHERE receipt_id = ?1",
         )
         .context("prepare get_receipt")?;
@@ -405,6 +422,7 @@ pub fn get_receipt(conn: &Connection, id: &str) -> anyhow::Result<Option<Receipt
                 rewritten_query: row.get(16)?,
                 manifest_key_id: row.get(17)?,
                 evidence_json: row.get(18)?,
+                llm_provider: row.get(19)?,
             })
         })
         .context("query receipt")?;

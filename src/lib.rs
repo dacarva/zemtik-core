@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod llm_backend;
 pub mod bundle;
 pub mod config;
 pub mod db;

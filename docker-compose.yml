@@ -1,18 +1,29 @@
 # Zemtik Proxy — Demo Deployment
 # Pin this tag during pilot. Update manually for upgrades.
 #
-# Quick start (no anonymizer):
+# Quick start — proxy only (OpenAI):
 #   export OPENAI_API_KEY=sk-...
 #   docker compose up --build
 #
+# Quick start — proxy only (Anthropic, no OpenAI key needed):
+#   export ZEMTIK_ANTHROPIC_API_KEY=sk-ant-...
+#   export ZEMTIK_PROXY_API_KEY=sk-...   # clients send this as Bearer token (required)
+#   ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
+#
+# MCP attestation server only (no LLM API key needed — use with Claude Desktop):
+#   export ZEMTIK_MCP_API_KEY=<secret>
+#   docker compose --profile mcp up
+#
 # With Anonymizer v1 (PII tokenization via GLiNER sidecar):
-#   export OPENAI_API_KEY=sk-...
-#   export HF_TOKEN=hf_...   # optional: authenticated HF CDN (faster + cache-stable)
+#   export OPENAI_API_KEY=sk-...   # or ZEMTIK_ANTHROPIC_API_KEY
+#   export HF_TOKEN=hf_...         # optional: authenticated HF CDN (faster + cache-stable)
 #   DOCKER_BUILDKIT=1 docker compose --profile anonymizer build --secret id=hf_token,env=HF_TOKEN
 #   ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up
 #
 # The proxy listens on http://localhost:4000 and intercepts POST /v1/chat/completions.
 # Point your existing OpenAI client at localhost:4000 — no code changes needed.
+# OPENAI_API_KEY is only required when ZEMTIK_LLM_PROVIDER=openai (the default).
+# It is not needed when using Anthropic or when running only the MCP server.
 
 services:
   # Anonymizer sidecar (GLiNER + Presidio gRPC server on port 50051).
@@ -40,11 +51,11 @@ services:
     #           count: 1
     #           capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "grpc-health-probe", "-addr=localhost:50051"]
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50051", "-service=zemtik.anonymizer.v1.AnonymizerService"]
       interval: 10s
       timeout: 5s
-      retries: 6
-      start_period: 60s
+      retries: 18
+      start_period: 30s
     restart: unless-stopped
 
   zemtik:
@@ -83,8 +94,16 @@ services:
       # Skip nargo/bb circuit validation — FastLane works without ZK tools.
       # Remove this line to enable ZK SlowLane (requires nargo+bb in the image).
       - ZEMTIK_SKIP_CIRCUIT_VALIDATION=1
-      # Required: your OpenAI API key.
-      - OPENAI_API_KEY=${OPENAI_API_KEY:?Set OPENAI_API_KEY before running docker compose up}
+      # LLM provider: openai (default) or anthropic.
+      # Set ZEMTIK_LLM_PROVIDER=anthropic and ZEMTIK_ANTHROPIC_API_KEY to use Anthropic instead.
+      # OPENAI_API_KEY is only required when ZEMTIK_LLM_PROVIDER=openai.
+      # Neither key is needed when running only --profile mcp (Claude Desktop usage).
+      - ZEMTIK_LLM_PROVIDER=${ZEMTIK_LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ZEMTIK_ANTHROPIC_API_KEY=${ZEMTIK_ANTHROPIC_API_KEY:-}
+      - ZEMTIK_ANTHROPIC_MODEL=${ZEMTIK_ANTHROPIC_MODEL:-}
+      # Required when ZEMTIK_LLM_PROVIDER=anthropic: clients must send this as Bearer token.
+      - ZEMTIK_PROXY_API_KEY=${ZEMTIK_PROXY_API_KEY:-}
       # Anonymizer v1: enabled only when running with --profile anonymizer.
       # The sidecar address uses the Docker Compose service name as the hostname.
       - ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://sidecar:50051
@@ -133,6 +152,51 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # MCP attestation HTTP server on port 4001.
+  # Start with: ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up
+  # Or standalone: docker compose --profile mcp up
+  mcp:
+    profiles: ["mcp"]
+    image: zemtik-core:${ZEMTIK_VARIANT:-fastlane}
+    command: ["mcp-serve"]
+    depends_on:
+      zemtik:
+        condition: service_healthy
+        required: false
+      sidecar:
+        condition: service_healthy
+        required: false
+    ports:
+      - "4001:4001"
+    environment:
+      - ZEMTIK_MCP_BIND_ADDR=0.0.0.0:4001
+      - ZEMTIK_MCP_API_KEY=${ZEMTIK_MCP_API_KEY:?Set ZEMTIK_MCP_API_KEY before running with --profile mcp}
+      - ZEMTIK_MCP_MODE=${ZEMTIK_MCP_MODE:-tunnel}
+      - ZEMTIK_MCP_FETCH_TIMEOUT_SECS=${ZEMTIK_MCP_FETCH_TIMEOUT_SECS:-30}
+      - ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS=${ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS:-}
+      - ZEMTIK_MCP_ALLOWED_PATHS=${ZEMTIK_MCP_ALLOWED_PATHS:-}
+      - ZEMTIK_SKIP_CIRCUIT_VALIDATION=1
+      - ZEMTIK_SKIP_DB_VALIDATION=1
+      # Anonymizer: enables zemtik_analyze tool. Requires --profile anonymizer (sidecar on port 50051).
+      - ZEMTIK_ANONYMIZER_ENABLED=${ZEMTIK_ANONYMIZER_ENABLED:-false}
+      - ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://sidecar:50051
+      # MCP gets a longer timeout than proxy: full legal documents need 8-15s on CPU GLiNER.
+      - ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS=${ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS:-60000}
+      - ZEMTIK_ANONYMIZER_FALLBACK_REGEX=${ZEMTIK_ANONYMIZER_FALLBACK_REGEX:-true}
+      - ZEMTIK_ANONYMIZER_ENTITY_TYPES=${ZEMTIK_ANONYMIZER_ENTITY_TYPES:-PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY}
+      # Debug: store plaintext input/output in mcp_audit.db previews. Disable in production.
+      - ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=${ZEMTIK_ANONYMIZER_DEBUG_PREVIEW:-false}
+    volumes:
+      - zemtik_keys:/home/zemtik/.zemtik/keys
+      - zemtik_mcp_audit:/home/zemtik/.zemtik
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4001/mcp/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
 secrets:
   hf_token:
     environment: HF_TOKEN   # pulled from host env; omit or leave unset to build unauthenticated
@@ -141,5 +205,6 @@ volumes:
   zemtik_keys:
   zemtik_receipts:
   zemtik_models:
+  zemtik_mcp_audit:
   # Uncomment when INSTALL_ZK_TOOLS=true to persist the bb SRS cache (~1GB).
   # zemtik_srs:
