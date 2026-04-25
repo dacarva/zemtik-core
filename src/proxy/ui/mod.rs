@@ -1,5 +1,25 @@
 use crate::receipts;
 
+/// Format a signed integer as a dollar amount with thousands separators.
+///
+/// Examples: `1234567` → `"$1,234,567"`, `-500` → `"-$500"`.
+fn format_currency(n: i64) -> String {
+    let s = n.unsigned_abs().to_string();
+    let formatted: String = s.chars().rev().enumerate()
+        .flat_map(|(i, c)| if i > 0 && i % 3 == 0 { vec![',', c] } else { vec![c] })
+        .collect::<String>().chars().rev().collect();
+    if n < 0 { format!("-${}", formatted) } else { format!("${}", formatted) }
+}
+
+/// Extract the table key from a human_summary string like `"Aggregated N rows from 'table_key' into..."`.
+fn extract_table_from_summary(s: &str) -> Option<String> {
+    let start = s.find("from '")?;
+    let rest = &s[start + 6..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_owned())
+}
+
+/// Render the receipt detail page for a single audit record.
 pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value>) -> String {
     let (badge_color, status_label) = match r.proof_status.as_str() {
         s if s.starts_with("VALID") => ("#22c55e", "VALID"),
@@ -24,35 +44,21 @@ pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_
         .as_ref()
         .and_then(|v| v.get("aggregate"))
         .and_then(|v| v.as_i64())
-        .map(|n| {
-            // Format with thousands separator
-            let s = n.abs().to_string();
-            let formatted: String = s.chars().rev().enumerate()
-                .flat_map(|(i, c)| if i > 0 && i % 3 == 0 { vec![',', c] } else { vec![c] })
-                .collect::<String>().chars().rev().collect();
-            if n < 0 { format!("-${}", formatted) } else { format!("${}", formatted) }
-        })
+        .map(format_currency)
         .or_else(|| readable
             .and_then(|v| v.get("verified_aggregate"))
             .and_then(|v| v.as_u64())
-            .map(|n| format!("${}", n)))
+            .map(|n| format_currency(n as i64)))
         .unwrap_or_else(|| "—".to_owned());
 
     let table_display = ev
         .as_ref()
         .and_then(|v| v.get("engine_used"))
         .and_then(|_| {
-            // Extract table from human_summary if available
             ev.as_ref()
                 .and_then(|v| v.get("human_summary"))
                 .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    // "Aggregated N rows from 'table_key' into..."
-                    let re = s.find("from '")?;
-                    let rest = &s[re + 6..];
-                    let end = rest.find('\'')?;
-                    Some(rest[..end].to_owned())
-                })
+                .and_then(extract_table_from_summary)
         })
         .or_else(|| readable
             .and_then(|v| v.get("category_name"))
@@ -265,6 +271,7 @@ pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_
     )
 }
 
+/// Render the paginated receipts list page.
 pub(super) fn render_receipts_list(list: &[receipts::Receipt], total: usize, page_size: usize) -> String {
     let rows: String = if list.is_empty() {
         r#"<tr><td colspan="5" style="text-align:center;color:#999;padding:32px 0">No receipts yet. Send a query through the proxy to generate one.</td></tr>"#.to_owned()
@@ -278,25 +285,14 @@ pub(super) fn render_receipts_list(list: &[receipts::Receipt], total: usize, pag
                 .as_ref()
                 .and_then(|v| v.get("aggregate"))
                 .and_then(|v| v.as_i64())
-                .map(|n| {
-                    let s = n.abs().to_string();
-                    let formatted: String = s.chars().rev().enumerate()
-                        .flat_map(|(i, c)| if i > 0 && i % 3 == 0 { vec![',', c] } else { vec![c] })
-                        .collect::<String>().chars().rev().collect();
-                    if n < 0 { format!("-${}", formatted) } else { format!("${}", formatted) }
-                })
+                .map(format_currency)
                 .unwrap_or_else(|| "—".to_owned());
 
             let table_cell = ev
                 .as_ref()
                 .and_then(|v| v.get("human_summary"))
                 .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    let re = s.find("from '")?;
-                    let rest = &s[re + 6..];
-                    let end = rest.find('\'')?;
-                    Some(rest[..end].to_owned())
-                })
+                .and_then(extract_table_from_summary)
                 .unwrap_or_else(|| "—".to_owned());
 
             let (badge_color, badge_label) = match r.proof_status.as_str() {
@@ -391,6 +387,7 @@ pub(super) fn render_receipts_list(list: &[receipts::Receipt], total: usize, pag
     )
 }
 
+/// Render a 404-style HTML page when a receipt ID is not found in the local DB.
 pub(super) fn render_not_found(id: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
@@ -408,6 +405,7 @@ pub(super) fn render_not_found(id: &str) -> String {
     )
 }
 
+/// Escape HTML special characters to prevent XSS in rendered pages.
 pub(super) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
