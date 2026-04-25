@@ -161,6 +161,7 @@ services:
     depends_on:
       zemtik:
         condition: service_healthy
+        required: false
       sidecar:
         condition: service_healthy
         required: false

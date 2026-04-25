@@ -345,13 +345,12 @@ pub enum EngineResult {
     SignError(String),
 }
 
-#[allow(dead_code)]
 fn default_llm_provider() -> String {
     "openai".to_owned()
 }
 
 /// Evidence pack produced by both engines — serialized into the LLM response.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct EvidencePack {
     pub engine_used: String,
     /// ZK path: SHA-256(ultraHonk_proof_bytes)

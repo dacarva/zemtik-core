@@ -1176,6 +1176,18 @@ pub fn load_from_sources(
         config.schema_config_hash = Some(hash);
     }
 
+    // Post-layer validation: Anthropic requires both API key and proxy auth key.
+    if config.llm_provider == "anthropic" {
+        anyhow::ensure!(
+            config.anthropic_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+            "ZEMTIK_ANTHROPIC_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic"
+        );
+        anyhow::ensure!(
+            config.proxy_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+            "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic"
+        );
+    }
+
     // Post-layer validation: catch zero/invalid values that the YAML layer can set
     // (serde deserializes without range checks; env-layer parsing validates its own inputs,
     // but a YAML file with intent_substring_gate_max_chars: 0 would pass serde unchanged).

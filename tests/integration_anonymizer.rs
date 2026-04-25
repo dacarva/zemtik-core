@@ -74,7 +74,7 @@ async fn spawn_anon_proxy(mock_openai: &MockServer, entity_types: &str) -> Socke
 /// The mock verifies the token arrives at OpenAI, then returns it; we assert the original
 /// value is restored before the response reaches the caller.
 #[tokio::test]
-#[ignore = "requires live gRPC sidecar; run manually with docker compose --profile anonymizer up"]
+#[ignore = "token hash 5b46 only valid with live sidecar; regex fallback produces a different hash — run with docker compose --profile anonymizer up"]
 async fn anonymizer_e2e_cedula_tokenized_and_deanonymized() {
     let mock_openai = MockServer::start().await;
 

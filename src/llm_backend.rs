@@ -273,6 +273,7 @@ impl LlmBackend for AnthropicBackend {
                         .and_then(|r| r.as_str())
                         .unwrap_or("stop")
                     {
+                        "end_turn" | "stop_sequence" => "stop",
                         "max_tokens" => "length",
                         other => other,
                     },
@@ -354,10 +355,17 @@ fn merge_consecutive_same_role(messages: Vec<Value>) -> Vec<Value> {
             .unwrap_or("")
             .to_owned();
 
-        // Only attempt merge when the incoming content is string or text-part array.
+        // Only attempt merge when content is a plain string or an array of exclusively
+        // text-type parts. Arrays with non-text parts (e.g. image_url) are pushed through
+        // unchanged so multimodal content is not silently dropped.
         let content_val = msg.get("content");
-        let is_plain = matches!(content_val, Some(Value::String(_)))
-            || matches!(content_val, Some(Value::Array(_)));
+        let is_plain = match content_val {
+            Some(Value::String(_)) => true,
+            Some(Value::Array(parts)) => parts.iter().all(|p| {
+                p.get("type").and_then(|t| t.as_str()) == Some("text")
+            }),
+            _ => false,
+        };
 
         if is_plain {
             let content = content_to_text(content_val.unwrap());

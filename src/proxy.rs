@@ -149,16 +149,23 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         );
     }
 
-    // S1: hard startup error — Anthropic path requires explicit proxy auth key
-    if config.llm_provider == "anthropic" && config.proxy_api_key.is_none() {
-        anyhow::bail!(
-            "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic.\n\
-             When Anthropic is the backend, Zemtik uses a server-side API key for all outbound\n\
-             Claude calls. Any client that reaches :4000 would otherwise get free API calls\n\
-             billed to your Anthropic account.\n\
-             Set ZEMTIK_PROXY_API_KEY to a strong bearer token and send it from your client\n\
-             as 'Authorization: Bearer <ZEMTIK_PROXY_API_KEY>'."
-        );
+    // S1: hard startup error — Anthropic path requires both API key and proxy auth key
+    if config.llm_provider == "anthropic" {
+        if config.anthropic_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+            anyhow::bail!(
+                "ZEMTIK_ANTHROPIC_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic."
+            );
+        }
+        if config.proxy_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+            anyhow::bail!(
+                "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic.\n\
+                 When Anthropic is the backend, Zemtik uses a server-side API key for all outbound\n\
+                 Claude calls. Any client that reaches :4000 would otherwise get free API calls\n\
+                 billed to your Anthropic account.\n\
+                 Set ZEMTIK_PROXY_API_KEY to a strong bearer token and send it from your client\n\
+                 as 'Authorization: Bearer <ZEMTIK_PROXY_API_KEY>'."
+            );
+        }
     }
 
     let schema_config_hash = config.schema_config_hash.clone().unwrap_or_default();
@@ -300,6 +307,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
     let llm_backend: Arc<dyn LlmBackend> = {
         let http_client = reqwest::Client::new();
         if config.llm_provider == "anthropic" {
+            // config validation (load_from_sources) guarantees anthropic_api_key is Some and non-empty.
             let api_key = config.anthropic_api_key.clone().unwrap_or_default();
             Arc::new(AnthropicBackend::new(
                 http_client,
