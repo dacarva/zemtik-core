@@ -12,6 +12,8 @@ Tunnel Mode lets a pilot customer route OpenAI traffic through Zemtik without ch
 
 The goal is frictionless evaluation: the customer sees zero latency penalty and zero risk of broken requests. Zemtik learns how well its verification matches real responses before any enforcement is turned on.
 
+> **Tunnel Mode is a measurement mode, not a privacy enforcement mode.** FORK 1 forwards the original request — including any raw data in the prompt — to OpenAI unmodified. The zero-raw-rows guarantee that applies in Standard Mode does **not** apply here. Switch to `ZEMTIK_MODE=standard` to enforce the perimeter.
+
 ---
 
 ## Data flow
@@ -62,6 +64,7 @@ sequenceDiagram
 | `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` | `50` | Max concurrent FORK 2 verifications. Excess requests get `match_status=backpressure` and `x-zemtik-verified: false`. |
 | `ZEMTIK_DASHBOARD_API_KEY` | — | If set, `/tunnel/audit`, `/tunnel/audit/csv`, and `/tunnel/summary` require `Authorization: Bearer <key>`. Warning printed at startup if missing. |
 | `ZEMTIK_TUNNEL_AUDIT_DB_PATH` | `~/.zemtik/tunnel_audit.db` | Path to the SQLite audit database (WAL mode). |
+| `ZEMTIK_TUNNEL_DEBUG_PREVIEWS` | `0` | When `1`, stores 500-char plaintext snippets of original LLM responses in `tunnel_audit.db`. **Do not enable against regulated traffic** — persists customer output in plaintext. |
 
 ### `schema_config.json` — per-table tolerance
 

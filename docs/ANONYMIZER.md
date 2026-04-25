@@ -128,7 +128,7 @@ The anonymizer pipeline uses two detection backends:
 
 ## Entity Types
 
-Zemtik v1 supports 16 entity types across two detection backends.
+Zemtik v1 supports 22 entity types across two detection backends. 15 are enabled by default; `PHONE_NUMBER`, `EMAIL_ADDRESS`, `EC_RUC`, `PE_RUC`, `BO_NIT`, `UY_CI`, and `VE_CI` are supported but excluded from the default set (set `ZEMTIK_ANONYMIZER_ENTITY_TYPES` explicitly to include them).
 
 ### Sidecar-detected (GLiNER + Presidio)
 
@@ -159,15 +159,26 @@ These are detected by the Rust process itself via regex patterns. Available even
 | `EMAIL_ADDRESS` | Email addresses | `user@example.com` | Standard RFC 5321 structure. |
 | `IBAN_CODE` | IBAN bank account numbers | `ES9121000418450200051332` | 2-letter country code + 2 check digits + up to 30 alphanumerics. |
 | `DATE_TIME` | Dates and times (regex-based; GLiNER may also detect) | `2024-01-15`, `15/01/2024` | ISO 8601 and slash-separated formats. |
+| `MONEY` | Monetary amounts | `$12.500.000 COP`, `USD 500,000` | Currency symbol or code required. |
+| `EC_RUC` | Ecuadorian RUC tax ID | `1234567890001` | 13-digit format. |
+| `PE_RUC` | Peruvian RUC tax ID | `20123456789` | 11-digit format. |
+| `BO_NIT` | Bolivian NIT tax ID | `1234567` | 7-digit format. |
+| `UY_CI` | Uruguayan cédula de identidad | `1.234.567-8` | Dotted format with check digit. |
+| `VE_CI` | Venezuelan cédula de identidad | `V-12345678` | Prefix V/E with 7–8 digits. |
+
+> **Detection quality:** Tokenization accuracy depends on GLiNER entity boundary precision. Compound organizational names (e.g. `"Andina de Inversiones y Capital S.A.S."`), abbreviated identifiers, and code-switched text may be partially tokenized — the un-tokenized portion reaches the LLM in plaintext. Verify output via `POST /v1/anonymize/preview` before relying on the anonymizer in regulated environments.
 
 ### Configuring entity types
 
 ```bash
-# Default: PERSON, ORG, LOCATION (sidecar entities only)
-export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION"
+# Default: 15-type set
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY"
 
-# Include all 16 types:
-export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_CEDULA,CO_NIT,CL_RUT,MX_CURP,MX_RFC,BR_CPF,BR_CNPJ,AR_DNI,ES_NIF,PHONE_NUMBER,EMAIL_ADDRESS,IBAN_CODE,DATE_TIME"
+# Extended: add LatAm IDs (EC_RUC, PE_RUC, BO_NIT, UY_CI, VE_CI) + contact types
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI"
+
+# Include all 22 types:
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI,PHONE_NUMBER,EMAIL_ADDRESS"
 ```
 
 ### Token format
@@ -200,6 +211,12 @@ Each detected entity is replaced with an opaque token:
 | `EMAIL_ADDRESS` | `a8d8` | `[[Z:a8d8:1]]` |
 | `IBAN_CODE` | `3f21` | `[[Z:3f21:1]]` |
 | `DATE_TIME` | `322b` | `[[Z:322b:1]]` |
+| `MONEY` | `ed2f` | `[[Z:ed2f:1]]` |
+| `EC_RUC` | `20ab` | `[[Z:20ab:1]]` |
+| `PE_RUC` | `124a` | `[[Z:124a:1]]` |
+| `BO_NIT` | `5121` | `[[Z:5121:1]]` |
+| `UY_CI` | `7f8a` | `[[Z:7f8a:1]]` |
+| `VE_CI` | `e41a` | `[[Z:e41a:1]]` |
 
 > **Hash consistency:** Hashes are derived from `SHA256(entity_type)[0..2]` (first 2 bytes as hex). They are hardcoded in `src/entity_hashes.rs` and `sidecar/zemtik_entity_hashes.py` — both files must be updated together if a new entity type is added.
 
