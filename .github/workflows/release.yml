@@ -143,8 +143,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=docker-proxy
+          cache-to: type=gha,mode=max,scope=docker-proxy
 
   docker-sidecar:
     name: Docker sidecar (linux/amd64, CPU-only)
@@ -185,8 +185,8 @@ jobs:
           push: true
           tags: ${{ steps.meta-sidecar.outputs.tags }}
           labels: ${{ steps.meta-sidecar.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=docker-sidecar
+          cache-to: type=gha,mode=max,scope=docker-sidecar
 
   release:
     name: Create GitHub Release

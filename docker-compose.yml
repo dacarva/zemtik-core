@@ -38,7 +38,7 @@ services:
     # Pre-built CPU image published to GHCR on every release (linux/amd64 only).
     # To build locally (required for GPU/CUDA or arm64):
     #   INSTALL_CUDA=true docker compose --profile anonymizer build
-    image: ghcr.io/dacarva/zemtik-sidecar:latest
+    image: ghcr.io/dacarva/zemtik-sidecar:v0.17.1
     build:
       context: .
       dockerfile: sidecar/Dockerfile
