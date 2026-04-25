@@ -431,6 +431,18 @@ fn regex_anonymize_money_dot_thousands_unchanged() {
     assert_eq!(vault[0].entity_type, "MONEY");
 }
 
+#[test]
+fn regex_anonymize_money_iso_no_trailing_punctuation() {
+    // "USD 100," — the trailing comma is sentence punctuation, not a thousands separator.
+    // The regex must stop at '0', not consume the comma.
+    let mut vault: Vault = Vec::new();
+    let mut counter = 0usize;
+    let text = "El precio es USD 100, impuestos incluidos.";
+    regex_anonymize(text, &["MONEY"], &mut vault, &mut counter);
+    assert_eq!(vault.len(), 1, "USD 100 must be detected as MONEY");
+    assert_eq!(vault[0].original, "USD 100", "match must end at digit, not include trailing comma");
+}
+
 // ─── New LatAm national IDs ───────────────────────────────────────────────────
 
 #[test]

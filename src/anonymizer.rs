@@ -117,7 +117,9 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("MONEY", Regex::new(r"\$\d{1,3}(?:[.,]\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
         // Shape 2: ISO currency-code prefix: "COP 2.500.000", "USD 1,000", "BRL 50.000"
         // \b at start prevents matching currency codes embedded in longer words (e.g. "OPEN 100" → "PEN 100").
-        ("MONEY", Regex::new(r"\b(?:USD|COP|EUR|BRL|ARS|CLP|MXN|PEN|UYU|VES|BOB)\s*\d[\d.,]*").unwrap()),
+        // (?:[\d.,]*\d)? ensures the match ends on a digit, preventing capture of trailing
+        // punctuation (e.g. "USD 100," — the comma is sentence punctuation, not a separator).
+        ("MONEY", Regex::new(r"\b(?:USD|COP|EUR|BRL|ARS|CLP|MXN|PEN|UYU|VES|BOB)\s*\d(?:[\d.,]*\d)?").unwrap()),
         // Colombian NIT: 900.123.456-7 — BEFORE CO_CEDULA so its dotted alternative
         // does not consume the digit run of a NIT (the `-\d` suffix makes it unambiguous).
         ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),

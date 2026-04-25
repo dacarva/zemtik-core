@@ -255,7 +255,7 @@ def build_custom_recognizers():
         ),
 
         # UY_CI: Uruguayan national identity card (cédula de identidad)
-        # Formats: 1234567-8 (dotted) or 12345678 (plain with context).
+        # Formats: 1234567-8 (dash-separated) or 12345678 (plain with context).
         PatternRecognizer(
             supported_entity="UY_CI",
             supported_language="en",
