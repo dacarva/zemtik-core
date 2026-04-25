@@ -1,7 +1,30 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use zemtik::config::{load_from_sources, validate_schema_config, AggFn, AppConfig, CliArgs, Command, SchemaConfig, TableConfig};
+use zemtik::config::{
+    load_from_sources, validate_schema_config, load_schema_config,
+    AggFn, AppConfig, CliArgs, Command, RewriterConfig, SchemaConfig, TableConfig, ZemtikMode,
+};
+
+// Pinning test: all public items from zemtik::config must remain importable after any refactor.
+// This test exercises each type/function so the compiler verifies the surface is intact.
+#[allow(dead_code)]
+fn _config_surface_pin() {
+    let _: fn(Option<&str>, &std::collections::HashMap<String, String>, &CliArgs) -> anyhow::Result<AppConfig> = load_from_sources;
+    let _: fn(&SchemaConfig, bool) -> anyhow::Result<()> = validate_schema_config;
+    let _: fn(&std::path::Path) -> anyhow::Result<(SchemaConfig, String)> = load_schema_config;
+    let _ = AggFn::Sum;
+    let _ = AggFn::Count;
+    let _ = AggFn::Avg;
+    let _ = ZemtikMode::Standard;
+    let _ = ZemtikMode::Tunnel;
+    let _ = Command::Proxy;
+    let _: AppConfig = AppConfig::default();
+    let _: CliArgs = CliArgs::default();
+    let _: TableConfig = TableConfig::default();
+    let _: Option<RewriterConfig> = None;
+    let _: SchemaConfig = SchemaConfig { fiscal_year_offset_months: 0, tables: Default::default() };
+}
 
 fn default_cli() -> CliArgs {
     CliArgs::default()
