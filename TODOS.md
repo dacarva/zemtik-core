@@ -1,5 +1,25 @@
 # TODOS
 
+## P2 — Commercial crate build time: make C dependencies optional (added 2026-04-25, /plan-devex-review)
+
+- **What:** `rusqlite = { features = ["bundled"] }` and `tonic-build` with vendored protoc cause a 3-5 minute first build for any commercial crate that adds zemtik as a dependency. This makes TTHW impossible to get below ~5 minutes regardless of module structure improvements.
+- **Why:** First build compiles SQLite from C source and runs protobuf codegen. The commercial crate developer waits before writing a single line of business logic. File splitting doesn't fix this.
+- **How to fix:** Add Cargo feature flags: `bundled-sqlite` (default on) and `mcp` (default on). Commercial crates that don't need MCP or embedded SQLite can opt out: `zemtik = { default-features = false, features = ["proxy"] }`.
+- **Context:** Found during DX review of Open-Core Module Architecture. Codex cross-model finding (D12). Separate workstream from module architecture — does not block PRs 2-5.
+- **Depends on:** PR 5 (lib.rs visibility reform) must land first; feature gating depends on clean module separation.
+
+---
+
+## P2 — Pre-commercial-crate audit: `#[doc(hidden)]` drift check (added 2026-04-25, /plan-eng-review)
+
+- **What:** Before the commercial crate ships, audit `tests/*.rs` for any import from a `#[doc(hidden)]` module that the commercial crate also uses. Items in both categories are de-facto stable API that isn't in the `pub use` surface.
+- **Why:** The `#[doc(hidden)]` pattern is an honor system. If the commercial crate accidentally depends on a hidden item, it becomes a silent semver breaking change when we rename it. Catching this before the commercial crate hardens is cheap; catching it after is expensive.
+- **How to apply:** After PR 5 lands, run: `grep -r "use zemtik::" tests/ | grep -v "pub use"` and compare against the stable `pub use` surface in `lib.rs`. Anything in tests but not in the stable surface is a candidate to promote or gate.
+- **Context:** Added during eng review of Open-Core Module Architecture (fix/refactor-for-readability plan). The right time to act is during Approach B (Cargo workspace migration), which is already in the plan. This TODO is a trigger, not blocking work.
+- **Depends on:** PR 5 (lib.rs visibility reform) must land first.
+
+---
+
 ## ~~P1 — Integration test suite (added 2026-04-07, QA post-mortem)~~ **Completed: v0.8.2 (2026-04-08)**
 
 ### ~~End-to-end proxy integration tests (P1, before next sprint)~~

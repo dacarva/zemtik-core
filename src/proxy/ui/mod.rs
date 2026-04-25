@@ -20,7 +20,7 @@ fn extract_table_from_summary(s: &str) -> Option<String> {
 }
 
 /// Render the receipt detail page for a single audit record.
-pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value>) -> String {
+pub(in crate::proxy) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_json::Value>) -> String {
     let (badge_color, status_label) = match r.proof_status.as_str() {
         s if s.starts_with("VALID") => ("#22c55e", "VALID"),
         "FAST_LANE_ATTESTED" => ("#3b82f6", "FAST LANE ATTESTED"),
@@ -272,7 +272,7 @@ pub(super) fn render_verify_page(r: &receipts::Receipt, readable: Option<&serde_
 }
 
 /// Render the paginated receipts list page.
-pub(super) fn render_receipts_list(list: &[receipts::Receipt], total: usize, page_size: usize) -> String {
+pub(in crate::proxy) fn render_receipts_list(list: &[receipts::Receipt], total: usize, page_size: usize) -> String {
     let rows: String = if list.is_empty() {
         r#"<tr><td colspan="5" style="text-align:center;color:#999;padding:32px 0">No receipts yet. Send a query through the proxy to generate one.</td></tr>"#.to_owned()
     } else {
@@ -388,7 +388,7 @@ pub(super) fn render_receipts_list(list: &[receipts::Receipt], total: usize, pag
 }
 
 /// Render a 404-style HTML page when a receipt ID is not found in the local DB.
-pub(super) fn render_not_found(id: &str) -> String {
+pub(in crate::proxy) fn render_not_found(id: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -406,7 +406,7 @@ pub(super) fn render_not_found(id: &str) -> String {
 }
 
 /// Escape HTML special characters to prevent XSS in rendered pages.
-pub(super) fn html_escape(s: &str) -> String {
+pub(in crate::proxy) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
