@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.1] - 2026-04-25
+
+### Fixed
+- `eval/intent_eval.rs`: updated calls to `try_new_embedding_backend` and `extract_intent_with_backend` to pass the new `usize` parameters added in v0.17.0, unblocking the release CI eval gate.
+
 ## [0.17.0] - 2026-04-25
 
 ### Added
