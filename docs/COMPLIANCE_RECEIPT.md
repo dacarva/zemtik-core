@@ -7,12 +7,16 @@ This document explains each field for compliance review, audit, and regulatory p
 
 ## What is a Compliance Receipt?
 
-A compliance receipt is a cryptographically-bound record that proves:
+A compliance receipt is a record that proves:
 1. The LLM received only an aggregate result (e.g. total AUM = $142M), **not raw client records**.
 2. The aggregate was computed locally on your infrastructure, under a signing key that never leaves your environment.
 3. No individual portfolio records were transmitted to any third party.
 
-The receipt can be presented to auditors as evidence that data handling obligations were met for each LLM query.
+**Two strength levels:**
+- **ZK SlowLane** (`engine_used: "zk_slow_lane"`) — the receipt includes a `proof_hash` pointing to an independently verifiable UltraHonk proof. A cryptographic constraint guarantees the aggregate was computed correctly from signed source rows. Independently verifiable offline with `zemtik verify <bundle.zip>` or `bb verify`.
+- **FastLane** (`engine_used: "fast_lane"`) — the receipt includes an `attestation_hash` (a key-bound BabyJubJub EdDSA signature). There is no circuit constraint; a malicious operator with key access could sign an arbitrary aggregate. Trust model: honest operator + key custody. FastLane receipts cannot be independently verified with `bb verify`.
+
+The receipt can be presented to auditors as evidence of data handling controls for each LLM query. Auditors should confirm which engine path was used before relying on the cryptographic guarantee.
 
 ---
 

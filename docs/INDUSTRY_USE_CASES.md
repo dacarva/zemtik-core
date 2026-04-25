@@ -11,9 +11,15 @@ Every example in this document follows the same integration pattern:
 1. Point Zemtik at your existing table (via `physical_table` in `schema_config.json` — Supabase/PostgREST backend only; the SQLite demo ledger always uses the built-in `transactions` table regardless of this setting)
 2. Map your column names (`value_column`, `timestamp_column`, `category_column`)
 3. Choose sensitivity (`"low"` for FastLane attestation, `"critical"` for ZK proof)
-4. Send natural-language queries — Zemtik returns only the cryptographically attested aggregate
+4. Send natural-language queries — Zemtik returns only the signed or ZK-proven aggregate
 
-No raw rows ever leave your perimeter.
+On ZK and FastLane paths, no raw rows leave your perimeter.
+
+> **Regulatory citations** in this document indicate where Zemtik's controls are relevant — not that Zemtik constitutes HIPAA, GDPR, FedRAMP, or other compliance. Work with your legal counsel to assess applicability to your specific situation.
+>
+> **Document review / RAG workloads** (contract analysis, legal drafting, HR summarization) do not route to ZK or FastLane. Only the anonymizer pipeline applies for those workloads — see the [Anonymizer guide](ANONYMIZER.md).
+>
+> **500-row circuit cap:** ZK SlowLane queries are capped at 500 matching rows in v1. Queries exceeding this limit return an error. See [docs/SCALING.md](SCALING.md) for the production path.
 
 ---
 

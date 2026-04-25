@@ -38,7 +38,7 @@ curl -X POST http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
 ```
 
-The response includes `evidence.data_exfiltrated: 0` — a cryptographic receipt showing no raw records were sent to OpenAI. See [COMPLIANCE_RECEIPT.md](COMPLIANCE_RECEIPT.md) for field descriptions.
+The response includes `evidence.data_exfiltrated: 0`. The `aws_spend` demo table uses FastLane (key-bound signature receipt, no ZK proof). See [COMPLIANCE_RECEIPT.md](COMPLIANCE_RECEIPT.md) for field descriptions and the trust model difference between FastLane and ZK SlowLane.
 
 **Using your own data:** `docker-compose.yml` already mounts `schema_config.example.json` with demo tables (aws\_spend, payroll, travel, and more). Replace that mount with your own `schema_config.json`. The demo dataset uses the `transactions` table with `client_id=123`.
 
@@ -46,7 +46,7 @@ The response includes `evidence.data_exfiltrated: 0` — a cryptographic receipt
 
 ## Switching to Anthropic (Claude)
 
-If your deployment requires Anthropic Claude instead of OpenAI, update three env vars and restart. No client code changes required — Zemtik translates OpenAI-format requests to Anthropic format internally.
+If your deployment requires Anthropic Claude instead of OpenAI, update three env vars and restart. Zemtik translates OpenAI-format requests to Anthropic format internally. **Note:** `stream: true` is not supported with the Anthropic backend (returns HTTP 501). This is an operator-key model — `ZEMTIK_ANTHROPIC_API_KEY` stays server-side; clients authenticate via `ZEMTIK_PROXY_API_KEY` instead.
 
 **In your `.env` file:**
 
@@ -332,7 +332,7 @@ Followed by the final result:
   Category : AWS Infrastructure
   Period   : Q1 2024
   Aggregate: $2805600
-  ZK Proof : VALID
+  ZK Proof : nargo execute: VALID (bb prove: blocked upstream — eddsa v0.1.3 × Barretenberg v4; tracked)
   Raw rows sent to OpenAI: 0
 ══════════════════════════════════════════════════════
 ```
@@ -572,7 +572,7 @@ If the deterministic pass cannot determine the table or time, the rewriter falls
 
 ## Step 6 — Try a critical table
 
-Query payroll (sensitivity = `critical`) to see the ZK slow lane in action:
+Query payroll (sensitivity = `critical`) to see the ZK slow lane in action. The demo circuit processes exactly 500 rows — queries matching more than 500 rows will return an error. See [Known Limitations](../README.md#known-limitations-poc).
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
