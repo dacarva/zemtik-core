@@ -202,6 +202,17 @@ pub(in crate::proxy) async fn handle_general_lane(
         }
     }
 
+    // Count dropped/injected tokens BEFORE deanonymize replaces [[Z:...]] tokens in resp_body.
+    // After deanonymization those tokens are gone from the string, making count_dropped_tokens
+    // report all vault entries as dropped even when the LLM preserved them.
+    let general_lane_token_counts: (usize, usize) = vault.as_ref().map(|vlt| {
+        let raw = serde_json::to_string(&resp_body).unwrap_or_default();
+        (
+            crate::anonymizer::count_dropped_tokens(&raw, vlt),
+            crate::anonymizer::count_tokens_injected(vlt),
+        )
+    }).unwrap_or((0, 0));
+
     // Deanonymize LLM response text before returning to caller
     if let Some(ref vlt) = vault {
         if let Some(obj) = resp_body.as_object_mut() {
@@ -218,16 +229,14 @@ pub(in crate::proxy) async fn handle_general_lane(
 
     // Augment zemtik_meta with anonymizer stats (entities, dropped tokens)
     if let Some(ref meta) = anon_meta {
-        let dropped = vault.as_ref().map(|vlt| {
-            let raw = serde_json::to_string(&resp_body).unwrap_or_default();
-            crate::anonymizer::count_dropped_tokens(&raw, vlt)
-        }).unwrap_or(0);
+        let (dropped, injected) = general_lane_token_counts;
         let mut anon_block = serde_json::json!({
             "entities_found": meta.entities_found,
             "entity_types": meta.entity_types,
             "sidecar_used": meta.sidecar_used,
             "sidecar_ms": meta.sidecar_ms,
             "dropped_tokens": dropped,
+            "tokens_injected": injected,
         });
         // Only emit preview when sidecar ran — regex fallback skips PERSON/ORG/LOCATION,
         // so partial-anonymized text could expose PII not in entity_types.

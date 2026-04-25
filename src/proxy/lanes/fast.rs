@@ -325,11 +325,14 @@ pub(in crate::proxy) async fn build_fast_lane_response(
 
     let resp_status = axum::http::StatusCode::from_u16(status_u16_fl).unwrap_or(axum::http::StatusCode::OK);
 
-    // Count dropped tokens BEFORE deanonymize replaces them in resp_body.
-    let dropped_fast = vault.as_ref().map(|vlt| {
+    // Count dropped/injected tokens BEFORE deanonymize replaces them in resp_body.
+    let (dropped_fast, injected_fast) = vault.as_ref().map(|vlt| {
         let raw = serde_json::to_string(&resp_body).unwrap_or_default();
-        crate::anonymizer::count_dropped_tokens(&raw, vlt)
-    }).unwrap_or(0);
+        (
+            crate::anonymizer::count_dropped_tokens(&raw, vlt),
+            crate::anonymizer::count_tokens_injected(vlt),
+        )
+    }).unwrap_or((0, 0));
 
     // Deanonymize FastLane response before returning to caller
     if let Some(ref vlt) = vault {
@@ -356,6 +359,7 @@ pub(in crate::proxy) async fn build_fast_lane_response(
                     "sidecar_used": meta.sidecar_used,
                     "sidecar_ms": meta.sidecar_ms,
                     "dropped_tokens": dropped_fast,
+                    "tokens_injected": injected_fast,
                 })));
         }
     }

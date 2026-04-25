@@ -1131,9 +1131,6 @@ fn streaming_not_supported_for_data_lane() -> Response {
         .into_response()
 }
 
-
-
-
 /// Compute the BN254 Fr field element encoding of a user prompt for circuit public input #6.
 ///
 /// Spec: SHA-256(prompt_bytes) → mask top 3 bits (AND 0x1f on byte 0) → "0x<64 hex chars>"

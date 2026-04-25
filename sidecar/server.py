@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from concurrent import futures
@@ -66,8 +67,17 @@ DEFAULT_ENTITY_TYPES = [
     "IBAN_CODE",
     # Temporal / financial
     "DATE_TIME", "MONEY",
+    # Additional LatAm (cross-border M&A)
+    "EC_RUC", "PE_RUC", "BO_NIT", "UY_CI", "VE_CI",
 ]
 DEFAULT_PORT = int(os.environ.get("ZEMTIK_ANONYMIZER_PORT", "50051"))
+
+# Corporate legal suffixes that GLiNER/Presidio models often truncate from ORG spans.
+# Used in post-dedup span expansion (see _expand_org_suffixes).
+CORP_SUFFIXES = re.compile(
+    r"\s+(?:S\.A\.S\.|S\.A\.|Ltda\.|S\.R\.L\.|E\.I\.R\.L\.|EIRL|SpA|LLC|Inc\.|Corp\.)",
+    re.IGNORECASE,
+)
 
 # Entity types handled by GLiNER (neural NER). LOCATION is intentionally excluded:
 # urchade/gliner_multi_pii-v1 produces false positives on Spanish words ("La",
@@ -218,6 +228,41 @@ class AnonymizerServicer(anon_pb2_grpc.AnonymizerServiceServicer):
                         for i in reversed(overlap_indices[1:]):
                             del gliner_spans[i]
                 spans = gliner_spans
+
+            # Expand ORG spans to include trailing corporate legal suffixes that
+            # the model boundary detection misses ("Andina de Inversiones y Capital" →
+            # should include "S.A.S." that follows immediately).
+            text_bytes_for_expand = text.encode("utf-8")
+            expanded_spans = []
+            for span in spans:
+                if span.entity_type == "ORG":
+                    suffix_window = text_bytes_for_expand[span.byte_end:span.byte_end + 20].decode("utf-8", errors="replace")
+                    m = CORP_SUFFIXES.match(suffix_window)
+                    if m:
+                        new_end = span.byte_end + len(m.group(0).encode("utf-8"))
+                        span = anon_pb2.AuditSpan(
+                            byte_start=span.byte_start,
+                            byte_end=new_end,
+                            entity_type=span.entity_type,
+                            score=span.score,
+                        )
+                expanded_spans.append(span)
+
+            # Re-merge any overlaps created by suffix expansion (e.g. two adjacent ORGs
+            # where expanding the first consumes the byte_start of the second).
+            expanded_spans.sort(key=lambda s: s.byte_start)
+            merged: list[anon_pb2.AuditSpan] = []
+            for s in expanded_spans:
+                if merged and s.byte_start < merged[-1].byte_end:
+                    merged[-1] = anon_pb2.AuditSpan(
+                        byte_start=merged[-1].byte_start,
+                        byte_end=max(merged[-1].byte_end, s.byte_end),
+                        entity_type=merged[-1].entity_type,
+                        score=merged[-1].score,
+                    )
+                else:
+                    merged.append(s)
+            spans = merged
 
             # Build anonymized content by applying spans (sorted by byte position, reverse)
             text_bytes = text.encode("utf-8")

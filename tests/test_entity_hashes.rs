@@ -18,7 +18,7 @@ fn canonical_hashes_match_sha256() {
 }
 
 #[test]
-fn all_17_types_present() {
+fn all_22_types_present() {
     let expected_types = [
         "PERSON", "ORG", "LOCATION",
         "CO_CEDULA", "CO_NIT", "CL_RUT",
@@ -27,10 +27,12 @@ fn all_17_types_present() {
         "AR_DNI", "ES_NIF",
         "PHONE_NUMBER", "EMAIL_ADDRESS", "IBAN_CODE", "DATE_TIME",
         "MONEY",
+        // Added in v0.15.x: cross-border LatAm M&A identifiers
+        "EC_RUC", "PE_RUC", "BO_NIT", "UY_CI", "VE_CI",
     ];
     let table_types: Vec<&str> = ENTITY_HASHES.iter().map(|(n, _)| *n).collect();
     for t in &expected_types {
         assert!(table_types.contains(t), "Missing entity type: {t}");
     }
-    assert_eq!(ENTITY_HASHES.len(), 17, "Expected exactly 17 entity types");
+    assert_eq!(ENTITY_HASHES.len(), 22, "Expected exactly 22 entity types");
 }

@@ -863,3 +863,11 @@ Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy
 
 ## Pre-existing (found during QA 2026-04-24)
 - [ ] `integration_anonymizer::anonymizer_e2e_cedula_tokenized_and_deanonymized` fails: dropped_tokens=1 when 0 expected; LLM drops anonymized cedula token in round-trip test. Pre-dates feat/multi-model-support branch.
+
+## P0 — Pre-existing test failure
+
+### `test_analyze_writes_audit_record` in `tests/integration_mcp_serve.rs:575`
+- **Noticed on:** worktree-inherited-jingling-lynx (2026-04-25) — failure exists on `main` without any branch changes
+- **Error:** `audit record must be written for zemtik_analyze call`
+- **Action needed:** Investigate `zemtik_analyze` MCP tool audit record persistence — likely a race condition or missing fixture setup in the test
+- **Priority:** P0 — blocks CI reliability
