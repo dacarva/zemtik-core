@@ -45,14 +45,17 @@ ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
 
 **Build variants:**
 
+> **GHCR images:** `ghcr.io/dacarva/zemtik-core` (proxy) is the `regex-only` / FastLane variant — no ONNX model, no ZK tools. `ghcr.io/dacarva/zemtik-sidecar` (anonymizer sidecar) is CPU-only (`linux/amd64`). GPU inference and the `embed` / ZK variants require a local build. See notes below.
+
 | Image | Command | Size | Notes |
 |---|---|---|---|
-| Default (regex intent) | `docker compose up --build` | ~150 MB | No model download |
-| Semantic intent (BGE-small-en) | `docker build --build-arg BUILD_FEATURES=embed --build-arg BUILDER_IMAGE=ubuntu:24.04 --build-arg RUNTIME_IMAGE=ubuntu:24.04 -t zemtik:embed .` | ~450 MB + 130 MB first-start download | Requires glibc 2.38+ (ubuntu:24.04) |
-| ZK SlowLane | `docker build --build-arg INSTALL_ZK_TOOLS=true -t zemtik:zk .` | +300 MB | Adds nargo + bb |
-| Anonymizer (GLiNER sidecar) | `DOCKER_BUILDKIT=1 docker compose --profile anonymizer build && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up` | ~900 MB sidecar | GLiNER + spaCy baked in; CPU inference ~2–4s; set `HF_TOKEN` for authenticated model CDN |
+| Default (regex intent) | `docker compose up --build` | ~150 MB | No model download. **This is the variant published to GHCR.** |
+| Semantic intent (BGE-small-en) | `docker build --build-arg BUILD_FEATURES=embed --build-arg BUILDER_IMAGE=ubuntu:24.04 --build-arg RUNTIME_IMAGE=ubuntu:24.04 -t zemtik:embed .` | ~450 MB + 130 MB first-start download | Requires glibc 2.38+ (ubuntu:24.04). Local build only — not published to GHCR. |
+| ZK SlowLane | `docker build --build-arg INSTALL_ZK_TOOLS=true -t zemtik:zk .` | +300 MB | Adds nargo + bb. Local build only — not published to GHCR. |
+| Anonymizer — CPU (pre-built) | `ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up` | ~900 MB sidecar | Pulls `ghcr.io/dacarva/zemtik-sidecar:latest` automatically. `linux/amd64` only. CPU inference ~2–4s. |
+| Anonymizer — GPU (local build) | `INSTALL_CUDA=true DOCKER_BUILDKIT=1 docker compose --profile anonymizer build --secret id=hf_token,env=HF_TOKEN && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up` | ~900 MB sidecar | CUDA 12.4, driver ≥ 550, `nvidia-container-toolkit` required. GPU inference ~50–100ms. Set `HF_TOKEN` for authenticated model CDN. |
 | MCP attestation server | `export ZEMTIK_MCP_API_KEY=<secret> && docker compose --profile mcp up` | no extra image | Reuses proxy image; exposes port 4001; `ZEMTIK_MCP_API_KEY` required |
-| Everything | `DOCKER_BUILDKIT=1 docker compose --profile anonymizer build && export ZEMTIK_MCP_API_KEY=<secret> && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up` | ~150 MB proxy + ~900 MB sidecar | Proxy (4000) + GLiNER sidecar + MCP server (4001) |
+| Everything | `export ZEMTIK_MCP_API_KEY=<secret> && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp up` | ~150 MB proxy + ~900 MB sidecar | Proxy (4000) + GLiNER sidecar (pre-built CPU) + MCP server (4001). For GPU sidecar add `INSTALL_CUDA=true DOCKER_BUILDKIT=1 docker compose --profile anonymizer build --secret id=hf_token,env=HF_TOKEN` first. |
 
 > **POC status (v0.16.1):** working proof-of-concept, not a production product. ZK circuit capped at 500 transactions; FastLane supports SQLite (default) and Supabase; signing key is file-based. See [Known Limitations](#known-limitations-poc).
 

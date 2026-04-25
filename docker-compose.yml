@@ -14,10 +14,14 @@
 #   export ZEMTIK_MCP_API_KEY=<secret>
 #   docker compose --profile mcp up
 #
-# With Anonymizer v1 (PII tokenization via GLiNER sidecar):
+# With Anonymizer v1 (PII tokenization via GLiNER sidecar) — CPU, pre-built image:
 #   export OPENAI_API_KEY=sk-...   # or ZEMTIK_ANTHROPIC_API_KEY
+#   ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up
+#
+# With Anonymizer v1 — GPU (CUDA 12.4, driver ≥ 550, nvidia-container-toolkit required):
+#   export OPENAI_API_KEY=sk-...
 #   export HF_TOKEN=hf_...         # optional: authenticated HF CDN (faster + cache-stable)
-#   DOCKER_BUILDKIT=1 docker compose --profile anonymizer build --secret id=hf_token,env=HF_TOKEN
+#   INSTALL_CUDA=true DOCKER_BUILDKIT=1 docker compose --profile anonymizer build --secret id=hf_token,env=HF_TOKEN
 #   ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up
 #
 # The proxy listens on http://localhost:4000 and intercepts POST /v1/chat/completions.
@@ -31,13 +35,16 @@ services:
   # without it when ZEMTIK_ANONYMIZER_ENABLED=false (the default).
   sidecar:
     profiles: ["anonymizer"]
+    # Pre-built CPU image published to GHCR on every release (linux/amd64 only).
+    # To build locally (required for GPU/CUDA or arm64):
+    #   INSTALL_CUDA=true docker compose --profile anonymizer build
+    image: ghcr.io/dacarva/zemtik-sidecar:v0.17.1
     build:
       context: .
       dockerfile: sidecar/Dockerfile
       args:
         # Set INSTALL_CUDA=true to build with CUDA torch (GPU inference, ~50-100ms vs ~1-2s on CPU).
         # Requires nvidia-container-toolkit on the host and driver >= 550 (CUDA 12.4).
-        # Build: INSTALL_CUDA=true docker compose --profile anonymizer build
         INSTALL_CUDA: "${INSTALL_CUDA:-false}"
     expose:
       - "50051"

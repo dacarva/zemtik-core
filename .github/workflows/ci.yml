@@ -61,6 +61,19 @@ jobs:
           ZEMTIK_SKIP_DB_VALIDATION: "1"
           ZEMTIK_TUNNEL_API_KEY: ci-test-tunnel-key
 
+      - name: Run MCP integration tests
+        run: cargo test --test integration_mcp --test integration_mcp_serve --no-default-features --features regex-only
+        env:
+          ZEMTIK_SKIP_CIRCUIT_VALIDATION: "1"
+          ZEMTIK_SKIP_DB_VALIDATION: "1"
+          ZEMTIK_MCP_API_KEY: ci-test-mcp-key
+
+      - name: Run anonymizer integration tests
+        run: cargo test --test integration_anonymizer --no-default-features --features regex-only
+        env:
+          ZEMTIK_SKIP_CIRCUIT_VALIDATION: "1"
+          ZEMTIK_SKIP_DB_VALIDATION: "1"
+
   docker:
     name: Docker Build (linux/amd64)
     runs-on: ubuntu-latest
@@ -79,6 +92,9 @@ jobs:
           tags: zemtik-core:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build anonymizer sidecar (smoke test)
+        run: DOCKER_BUILDKIT=1 docker build -f sidecar/Dockerfile -t zemtik-sidecar:ci .
 
   clippy:
     name: Clippy
@@ -103,5 +119,8 @@ jobs:
       - name: Install OpenSSL dev headers
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
 
-      - name: Clippy
+      - name: Clippy (regex-only)
         run: cargo clippy --no-default-features --features regex-only -- -D warnings
+
+      - name: Clippy (embed)
+        run: cargo clippy --features embed -- -D warnings
