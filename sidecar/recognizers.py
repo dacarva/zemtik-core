@@ -191,19 +191,89 @@ def build_custom_recognizers():
             ],
         ),
 
-        # MONEY: Colombian/LatAm currency amounts with dot-thousands separator.
-        # Covers "$120.000.000 COP", "$60.000.000", "$1.500.000 USD", etc.
-        # Requires at least one .NNN group to avoid matching bare "$5".
+        # MONEY: LatAm/US currency amounts — three shapes.
+        # Shape 1: $-prefixed dot-thousands (original): "$120.000.000 COP"
+        # Shape 2: $-prefixed comma-thousands (US/EU style): "$2,500,000,000 COP"
+        # Shape 3: ISO currency-code prefix: "COP 2.500.000", "USD 1,000"
+        # Requires at least one separator group to avoid matching bare "$5".
         PatternRecognizer(
             supported_entity="MONEY",
             supported_language="en",
             patterns=[
                 Pattern(
-                    "MONEY_LATAM",
+                    "MONEY_LATAM_DOT",
                     r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?\b",
                     0.85,
                 ),
+                Pattern(
+                    "MONEY_LATAM_COMMA",
+                    r"\$\d{1,3}(?:,\d{3})+(?:\s*[A-Z]{3})?\b",
+                    0.85,
+                ),
+                Pattern(
+                    "MONEY_ISO_PREFIX",
+                    r"(?:USD|COP|EUR|BRL|ARS|CLP|MXN|PEN|UYU|VES|BOB)\s*\d[\d.,]*\b",
+                    0.80,
+                ),
             ],
             context=["valor", "precio", "pago", "salario", "honorarios", "costo", "monto"],
+        ),
+
+        # EC_RUC: Ecuadorian tax ID (RUC)
+        # Company RUC only: 13 digits ending in "001". Person RUC (plain 10-digit base) is omitted
+        # because \b\d{10}\b collides destructively with CO_CEDULA and phone numbers in
+        # multi-jurisdiction documents where context words are globally scored by Presidio.
+        PatternRecognizer(
+            supported_entity="EC_RUC",
+            supported_language="en",
+            patterns=[
+                Pattern("EC_RUC_COMPANY", r"\b\d{10}001\b", 0.85),
+            ],
+            context=["ruc", "r.u.c.", "registro único", "contribuyente", "ecuador", "ecuatoriano"],
+        ),
+
+        # PE_RUC: Peruvian tax ID (RUC)
+        # 11 digits; first two digits are always 10, 15, 17, or 20.
+        PatternRecognizer(
+            supported_entity="PE_RUC",
+            supported_language="en",
+            patterns=[
+                Pattern("PE_RUC", r"\b(?:10|15|17|20)\d{9}\b", 0.85),
+            ],
+            context=["ruc", "r.u.c.", "sunat", "peru", "perú", "peruano"],
+        ),
+
+        # BO_NIT: Bolivian tax ID (NIT)
+        # 7-10 plain digits — high collision risk with CO_CEDULA_PLAIN; only activate with context.
+        PatternRecognizer(
+            supported_entity="BO_NIT",
+            supported_language="en",
+            patterns=[
+                Pattern("BO_NIT_PLAIN", r"\b\d{7,10}\b", 0.30),
+            ],
+            context=["nit", "bolivia", "boliviano", "impuestos nacionales", "SIN"],
+        ),
+
+        # UY_CI: Uruguayan national identity card (cédula de identidad)
+        # Formats: 1234567-8 (dotted) or 12345678 (plain with context).
+        PatternRecognizer(
+            supported_entity="UY_CI",
+            supported_language="en",
+            patterns=[
+                Pattern("UY_CI_DASH", r"\b\d{7,8}-\d\b", 0.85),
+                Pattern("UY_CI_PLAIN", r"\b\d{8}\b", 0.30),
+            ],
+            context=["ci", "cédula", "cedula", "identidad", "uruguay", "uruguayo"],
+        ),
+
+        # VE_CI: Venezuelan national identity card (cédula de identidad)
+        # Formats: V-12345678, E-12345678, J-12345678, G-12345678 (prefix letters are specific).
+        PatternRecognizer(
+            supported_entity="VE_CI",
+            supported_language="en",
+            patterns=[
+                Pattern("VE_CI", r"\b[VEJG]-?\d{7,8}\b", 0.90),
+            ],
+            context=["ci", "cédula", "cedula", "identidad", "venezuela", "venezolano"],
         ),
     ]

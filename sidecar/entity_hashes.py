@@ -1,4 +1,4 @@
-"""Canonical SHA-256[:4hex] hashes for the 17 supported entity types.
+"""Canonical SHA-256[:4hex] hashes for the 22 supported entity types.
 
 Must match src/entity_hashes.rs byte-for-byte.
 Verify with: cargo run --bin zemtik -- anonymizer hashes | diff - <(python entity_hashes.py)
@@ -23,6 +23,11 @@ ENTITY_HASHES: dict[str, str] = {
     "IBAN_CODE":     "3f21",
     "DATE_TIME":     "322b",
     "MONEY":         "ed2f",
+    "EC_RUC":        "20ab",
+    "PE_RUC":        "124a",
+    "BO_NIT":        "5121",
+    "UY_CI":         "7f8a",
+    "VE_CI":         "e41a",
 }
 
 
