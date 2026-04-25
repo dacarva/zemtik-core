@@ -70,7 +70,7 @@ we will bump our minor version and document the required axum version in the cha
 
 ## Module Tree
 
-```
+```text
 src/
 ├── lib.rs              # Stable public API surface + #[doc(hidden)] internal modules
 ├── error.rs            # ZemtikError — typed boundary over anyhow

@@ -54,18 +54,26 @@ pub(in crate::proxy) async fn handle_general_lane(
                 })
                 .unwrap_or(60);
 
+            // Clone data needed for the DB write before dropping the window lock.
+            let now_str = Utc::now().to_rfc3339();
+            let receipt_id_rl = receipt_id.clone();
+            let prompt_hash_rl = prompt_hash.clone();
+            let llm_provider_rl = state.config.llm_provider.clone();
+            // Drop the window lock before the DB write — holding it across a mutex
+            // acquisition serializes all GeneralLane requests on the 429 path.
+            drop(window);
+
             // Write a receipt so rate-limited requests appear in audit trail
             // and general_queries_today counts them.
-            let now_str = Utc::now().to_rfc3339();
             let db_guard = state.receipts_db.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = receipts::insert_receipt(&db_guard, &receipts::Receipt {
-                id: receipt_id.clone(),
+                id: receipt_id_rl.clone(),
                 bundle_path: String::new(),
                 proof_status: receipts::PROOF_STATUS_GENERAL_LANE_RATE_LIMITED.to_owned(),
                 circuit_hash: String::new(),
                 bb_version: String::new(),
-                prompt_hash: prompt_hash.clone(),
-                request_hash: prompt_hash.clone(),
+                prompt_hash: prompt_hash_rl.clone(),
+                request_hash: prompt_hash_rl,
                 created_at: now_str,
                 engine_used: "general_lane".to_owned(),
                 proof_hash: None,
@@ -78,9 +86,9 @@ pub(in crate::proxy) async fn handle_general_lane(
                 rewritten_query: None,
                 manifest_key_id: None,
                 evidence_json: None,
-                llm_provider: Some(state.config.llm_provider.clone()),
+                llm_provider: Some(llm_provider_rl),
             }) {
-                eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id, e);
+                eprintln!("[GENERAL_LANE] Warning: failed to write rate-limit receipt {}: {}", receipt_id_rl, e);
             }
             drop(db_guard);
 
@@ -266,8 +274,11 @@ pub(in crate::proxy) async fn handle_general_lane(
     }
 
     if let Some(obj) = resp_body.as_object_mut() {
-        obj.insert("zemtik_meta".to_string(), zemtik_meta);
+        obj.insert("zemtik_meta".to_string(), zemtik_meta.clone());
     }
+
+    // Recompute after all zemtik_meta mutations (resolved_model, anonymizer) are applied.
+    let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
 
     let final_body = serde_json::to_vec(&resp_body).unwrap_or_default();
     let mut response = Response::builder()

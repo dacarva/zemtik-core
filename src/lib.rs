@@ -26,7 +26,7 @@
 // ── Public modules (stable API surface) ─────────────────────────────────────
 pub mod config;
 pub mod error;
-pub mod proxy;
+#[doc(hidden)] pub mod proxy;
 pub mod types;
 
 // ── Stable re-exports ────────────────────────────────────────────────────────

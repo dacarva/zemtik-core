@@ -3,8 +3,8 @@
 /// Returned by [`build_proxy_router`] and [`run_proxy`]. Wraps the underlying
 /// anyhow error so callers get a typed boundary without a direct anyhow dependency.
 ///
-/// [`build_proxy_router`]: crate::proxy::build_proxy_router
-/// [`run_proxy`]: crate::proxy::run_proxy
+/// [`build_proxy_router`]: crate::build_proxy_router
+/// [`run_proxy`]: crate::run_proxy
 #[derive(Debug)]
 pub struct ZemtikError(pub(crate) anyhow::Error);
 

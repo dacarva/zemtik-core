@@ -31,19 +31,24 @@ pub(super) async fn handle_verify(
     match receipt {
         None => Ok((StatusCode::NOT_FOUND, Html(render_not_found(&id))).into_response()),
         Some(r) => {
-            let readable = read_public_inputs_from_bundle(&r.bundle_path);
+            let readable = read_public_inputs_from_bundle(r.bundle_path.clone()).await;
             Ok(Html(render_verify_page(&r, readable.as_ref())).into_response())
         }
     }
 }
 
-fn read_public_inputs_from_bundle(bundle_path: &str) -> Option<serde_json::Value> {
-    let file = std::fs::File::open(bundle_path).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
-    let mut entry = archive.by_name("public_inputs_readable.json").ok()?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut entry, &mut bytes).ok()?;
-    serde_json::from_slice(&bytes).ok()
+async fn read_public_inputs_from_bundle(bundle_path: String) -> Option<serde_json::Value> {
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&bundle_path).ok()?;
+        let mut archive = zip::ZipArchive::new(file).ok()?;
+        let mut entry = archive.by_name("public_inputs_readable.json").ok()?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).ok()?;
+        serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Serve the /receipts page — browseable HTML list of all receipts.
@@ -120,14 +125,19 @@ pub(super) async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl 
             &state.config.supabase_service_key,
         ) {
             let probe_url = format!("{}/rest/v1/", url.trim_end_matches('/'));
-            // Any HTTP response (even 401/403) means reachable; only network errors count as down.
-            state.http_client
-                .get(&probe_url)
-                .header("apikey", key.as_str())
-                .header("Authorization", format!("Bearer {}", key))
-                .send()
-                .await
-                .is_ok()
+            // Any HTTP response (even 401/403) means reachable; only network errors or
+            // timeout count as down. 3s cap prevents /health from hanging on a slow DB.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                state.http_client
+                    .get(&probe_url)
+                    .header("apikey", key.as_str())
+                    .header("Authorization", format!("Bearer {}", key))
+                    .send(),
+            )
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false)
         } else {
             false
         }

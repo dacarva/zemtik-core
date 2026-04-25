@@ -45,8 +45,10 @@ pub(crate) async fn run_fast_lane_engine(
     let metric_label = table_config.metric_label.clone();
 
     let engine_result: EngineResult = if state.config.use_supabase_fast_lane() {
-        let url = state.config.supabase_url.as_ref().unwrap();
-        let svc_key = state.config.supabase_service_key.as_ref().unwrap();
+        let url = state.config.supabase_url.as_ref()
+            .expect("supabase_url must be set when use_supabase_fast_lane() is true");
+        let svc_key = state.config.supabase_service_key.as_ref()
+            .expect("supabase_service_key must be set when use_supabase_fast_lane() is true");
         let physical_table = table_config.resolved_table(&table).to_owned();
         let (aggregate, row_count) = db::query_aggregate_table(
             &state.http_client,
@@ -351,16 +353,16 @@ pub(in crate::proxy) async fn build_fast_lane_response(
     // Inject zemtik_meta.anonymizer stats into FastLane response
     if let Some(ref meta) = anon_meta {
         if let Some(obj) = resp_body.as_object_mut() {
-            obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .map(|m| m.insert("anonymizer".to_string(), serde_json::json!({
+            if let Some(m) = obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({})).as_object_mut() {
+                m.insert("anonymizer".to_string(), serde_json::json!({
                     "entities_found": meta.entities_found,
                     "entity_types": meta.entity_types,
                     "sidecar_used": meta.sidecar_used,
                     "sidecar_ms": meta.sidecar_ms,
                     "dropped_tokens": dropped_fast,
                     "tokens_injected": injected_fast,
-                })));
+                }));
+            }
         }
     }
 
@@ -368,10 +370,9 @@ pub(in crate::proxy) async fn build_fast_lane_response(
     // zemtik_meta may or may not exist yet (only created above when anon_meta.is_some()).
     if let Some(resolved) = fl_resolved_model {
         if let Some(obj) = resp_body.as_object_mut() {
-            obj.entry("zemtik_meta")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .map(|m| m.insert("resolved_model".to_owned(), resolved));
+            if let Some(m) = obj.entry("zemtik_meta").or_insert_with(|| serde_json::json!({})).as_object_mut() {
+                m.insert("resolved_model".to_owned(), resolved);
+            }
         }
     }
 

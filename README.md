@@ -958,18 +958,16 @@ Minimal proxy startup:
 ```rust
 use zemtik::{AppConfig, build_proxy_router, ZemtikError};
 
+type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 #[tokio::main]
-async fn main() -> Result<(), ZemtikError> {
+async fn main() -> Result<(), BoxError> {
     // Load config from ~/.zemtik/config.yaml + env vars
-    let config = AppConfig::load(&Default::default())
-        .map_err(ZemtikError::from)?;
+    let config = AppConfig::load(&Default::default())?;
 
     let router = build_proxy_router(config.clone()).await?;
-    let listener = tokio::net::TcpListener::bind(&config.bind_addr)
-        .await
-        .map_err(|e| ZemtikError::from(anyhow::Error::from(e)))?;
-    axum::serve(listener, router).await
-        .map_err(|e| ZemtikError::from(anyhow::Error::from(e)))?;
+    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
+    axum::serve(listener, router).await?;
     Ok(())
 }
 ```
