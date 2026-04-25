@@ -142,6 +142,11 @@ async fn anonymizer_e2e_cedula_tokenized_and_deanonymized() {
         "dropped_tokens must be 0 (LLM preserved the token), got: {meta}"
     );
     assert_eq!(
+        meta["tokens_injected"].as_u64().unwrap_or(0),
+        1,
+        "tokens_injected must be 1 (one cédula redacted from input), got: {meta}"
+    );
+    assert_eq!(
         meta["sidecar_used"].as_bool().unwrap_or(true),
         false,
         "regex fallback path → sidecar_used must be false"
@@ -196,6 +201,38 @@ async fn anonymizer_dropped_token_counted_in_meta() {
         1,
         "LLM dropped the token → dropped_tokens must be 1, got: {meta}"
     );
+    assert_eq!(
+        meta["tokens_injected"].as_u64().unwrap_or(0),
+        1,
+        "tokens_injected must be 1 (one cédula was redacted from input), got: {meta}"
+    );
+}
+
+/// FastLane tokens_injected: stub — requires a seeded SQLite schema that triggers FastLane routing.
+/// Verifies that `zemtik_meta.anonymizer.tokens_injected` is present and correct when the
+/// proxy routes through the FastLane (low-sensitivity table, SUM/COUNT aggregate).
+#[tokio::test]
+#[ignore = "requires a seeded DB + schema_config.json with a low-sensitivity table to trigger FastLane routing; \
+tokens_injected code path is a mirror of the general lane (proxy/mod.rs) — add a full integration \
+test when a self-contained test fixture exists"]
+async fn anonymizer_fast_lane_tokens_injected_stub() {
+    // Setup: spawn proxy with a schema_config that routes to FastLane (sensitivity = "low"),
+    // seed the DB, POST a data query with PII in it, assert tokens_injected >= 1.
+    todo!("implement when FastLane test fixture is available")
+}
+
+/// ZK slow lane tokens_injected: stub — requires nargo/bb circuit tools in the test environment.
+/// Verifies that `zemtik_meta.anonymizer.tokens_injected` is present and correct when the
+/// proxy routes through the ZK SlowLane (critical-sensitivity table, full proof).
+#[tokio::test]
+#[ignore = "requires nargo/bb circuit tools + seeded DB with critical-sensitivity schema; \
+ZEMTIK_SKIP_CIRCUIT_VALIDATION=1 bypasses tool checks but the actual prove step would fail; \
+tokens_injected code path is a mirror of the general lane (proxy/mod.rs) — add a full integration \
+test when a stub circuit fixture is available"]
+async fn anonymizer_zk_lane_tokens_injected_stub() {
+    // Setup: spawn proxy with a schema_config that routes to ZK lane (sensitivity = "critical"),
+    // POST a data query with PII in it, assert tokens_injected >= 1.
+    todo!("implement when ZK lane test fixture is available")
 }
 
 /// No PII in prompt: anonymizer is a no-op, entities_found == 0.

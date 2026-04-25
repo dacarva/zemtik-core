@@ -40,7 +40,7 @@ sys.modules["anonymizer_pb2_grpc"].AnonymizerServiceServicer = _BaseServicer  # 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 try:
-    from server import DEFAULT_ENTITY_TYPES, GLINER_ENTITY_TYPES, MIN_ENTITY_CHARS, GLINER_STOPWORDS
+    from server import DEFAULT_ENTITY_TYPES, GLINER_ENTITY_TYPES, MIN_ENTITY_CHARS, GLINER_STOPWORDS, CORP_SUFFIXES
 except ImportError as _e:
     pytest.skip(f"server.py could not be imported (missing dependency): {_e}", allow_module_level=True)
 
@@ -54,6 +54,11 @@ def test_default_entity_types_includes_money():
 def test_default_entity_types_includes_all_latam_ids():
     expected = {"CO_NIT", "CO_CEDULA", "AR_DNI", "CL_RUT", "BR_CPF", "BR_CNPJ", "MX_CURP", "MX_RFC", "ES_NIF"}
     assert expected.issubset(set(DEFAULT_ENTITY_TYPES))
+
+
+def test_default_entity_types_includes_new_latam_ids():
+    new_ids = {"EC_RUC", "PE_RUC", "BO_NIT", "UY_CI", "VE_CI"}
+    assert new_ids.issubset(set(DEFAULT_ENTITY_TYPES)), f"missing: {new_ids - set(DEFAULT_ENTITY_TYPES)}"
 
 
 def test_default_entity_types_includes_core_types():
@@ -75,7 +80,8 @@ def test_gliner_entity_types_excludes_location():
 def test_gliner_entity_types_excludes_all_regex_only_types():
     # Regex-only types must never be routed to GLiNER — GLiNER only handles neural NER.
     regex_only = {"LOCATION", "MONEY", "CO_NIT", "CO_CEDULA", "AR_DNI", "CL_RUT",
-                  "BR_CPF", "BR_CNPJ", "MX_CURP", "MX_RFC", "ES_NIF", "IBAN_CODE", "DATE_TIME"}
+                  "BR_CPF", "BR_CNPJ", "MX_CURP", "MX_RFC", "ES_NIF", "IBAN_CODE", "DATE_TIME",
+                  "EC_RUC", "PE_RUC", "BO_NIT", "UY_CI", "VE_CI"}
     for t in regex_only:
         assert t not in GLINER_ENTITY_TYPES, f"{t} must not be in GLINER_ENTITY_TYPES"
 
@@ -143,3 +149,37 @@ def test_gliner_stopwords_filters_determiners():
     ]
     assert len(filtered) == 2
     assert text[filtered[0]["start"]:filtered[0]["end"]] == "sociedad"
+
+
+# ─── CORP_SUFFIXES ────────────────────────────────────────────────────────────
+
+def test_corp_suffixes_matches_sas():
+    # "Andina de Inversiones y Capital S.A.S." — the suffix must match the trailing token.
+    m = CORP_SUFFIXES.match(" S.A.S.")
+    assert m is not None, "CORP_SUFFIXES must match ' S.A.S.'"
+    assert m.group(0) == " S.A.S."
+
+
+def test_corp_suffixes_matches_all_known_forms():
+    for suffix in (" S.A.S.", " S.A.", " Ltda.", " S.R.L.", " E.I.R.L.", " EIRL", " SpA", " LLC", " Inc.", " Corp."):
+        m = CORP_SUFFIXES.match(suffix)
+        assert m is not None, f"CORP_SUFFIXES must match '{suffix}'"
+
+
+def test_corp_suffixes_requires_leading_whitespace():
+    # No space before suffix — must not match (suffix must trail a span, not lead).
+    assert CORP_SUFFIXES.match("S.A.S.") is None
+
+
+def test_corp_suffixes_expansion_logic():
+    # Simulate the server.py ORG span expansion: given an ORG span ending just before
+    # " S.A.S.", verify the expanded byte_end covers the full suffix.
+    text = "Andina de Inversiones y Capital S.A.S."
+    text_bytes = text.encode("utf-8")
+    # Pretend GLiNER detected "Andina de Inversiones y Capital" (31 chars, 31 bytes ASCII)
+    fake_byte_end = len("Andina de Inversiones y Capital".encode("utf-8"))
+    suffix_window = text_bytes[fake_byte_end:fake_byte_end + 20].decode("utf-8", errors="replace")
+    m = CORP_SUFFIXES.match(suffix_window)
+    assert m is not None, "expansion must detect ' S.A.S.' after ORG span"
+    new_byte_end = fake_byte_end + len(m.group(0).encode("utf-8"))
+    assert text_bytes[:new_byte_end].decode("utf-8") == "Andina de Inversiones y Capital S.A.S."

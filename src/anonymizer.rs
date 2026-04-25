@@ -109,11 +109,17 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("EMAIL_ADDRESS", Regex::new(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}").unwrap()),
         // IBAN — very specific structure
         ("IBAN_CODE", Regex::new(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b").unwrap()),
-        // LatAm currency amounts: $120.000.000 COP, $1.500.000 USD, $60.000.000
+        // LatAm currency amounts — three shapes, most specific first.
         // Must appear BEFORE CO_CEDULA and AR_DNI: sequential replacement means
         // "$120.000.000" is tokenized here first so the dotted-digit patterns below
         // never see the digit run. (Rust regex crate has no lookbehind support.)
-        ("MONEY", Regex::new(r"\$\d{1,3}(?:\.\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
+        // Shape 1: $-prefixed with dot OR comma thousands: "$2.500.000 COP", "$2,500,000,000 COP"
+        ("MONEY", Regex::new(r"\$\d{1,3}(?:[.,]\d{3})+(?:\s*[A-Z]{3})?").unwrap()),
+        // Shape 2: ISO currency-code prefix: "COP 2.500.000", "USD 1,000", "BRL 50.000"
+        // \b at start prevents matching currency codes embedded in longer words (e.g. "OPEN 100" → "PEN 100").
+        // (?:[\d.,]*\d)? ensures the match ends on a digit, preventing capture of trailing
+        // punctuation (e.g. "USD 100," — the comma is sentence punctuation, not a separator).
+        ("MONEY", Regex::new(r"\b(?:USD|COP|EUR|BRL|ARS|CLP|MXN|PEN|UYU|VES|BOB)\s*\d(?:[\d.,]*\d)?").unwrap()),
         // Colombian NIT: 900.123.456-7 — BEFORE CO_CEDULA so its dotted alternative
         // does not consume the digit run of a NIT (the `-\d` suffix makes it unambiguous).
         ("CO_NIT", Regex::new(r"\b\d{3}\.\d{3}\.\d{3}-\d\b").unwrap()),
@@ -139,6 +145,16 @@ static REGEX_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         // Phone: requires international prefix (+\d) OR separators (spaces/dashes/parens)
         // AND at least 10 digit characters total, to avoid matching arbitrary digit runs.
         ("PHONE_NUMBER", Regex::new(r"(?:\+\d[\d\s\-().]{8,18}|\(?\d{2,4}\)?[\s\-]\d{3,4}[\s\-]\d{3,4}(?:[\s\-]\d{2,4})?)").unwrap()),
+        // Ecuadorian RUC company: 10 base digits + "001" suffix (13 digits total)
+        ("EC_RUC", Regex::new(r"\b\d{10}001\b").unwrap()),
+        // Peruvian RUC: 11 digits starting with 10/15/17/20
+        ("PE_RUC", Regex::new(r"\b(?:10|15|17|20)\d{9}\b").unwrap()),
+        // Venezuelan CI: letter prefix V/E/J/G + optional dash + 7-8 digits (prefix is specific)
+        ("VE_CI", Regex::new(r"\b[VEJG]-?\d{7,8}\b").unwrap()),
+        // Uruguayan CI dotted: 1234567-8 (dash-separated, less ambiguous than plain)
+        ("UY_CI", Regex::new(r"\b\d{7,8}-\d\b").unwrap()),
+        // BO_NIT: context-dependent only in sidecar; regex fallback uses keyword context guard
+        // Plain 7-10 digit run is too ambiguous without context — omit from regex fast-path.
     ]
 });
 
@@ -486,9 +502,15 @@ pub fn deanonymize(text: &str, vault: &Vault) -> String {
 }
 
 /// Count how many vault tokens from `vault` are absent from `text`
-/// (dropped by the LLM — paraphrased or omitted).
+/// (dropped by the LLM — paraphrased or omitted, NOT a count of redacted input PII).
 pub fn count_dropped_tokens(text: &str, vault: &Vault) -> usize {
     vault.iter().filter(|e| !text.contains(&e.token)).count()
+}
+
+/// Count how many entities were injected (redacted) from the input.
+/// Equal to `vault.len()` at response-emit time — all entries were created from input PII.
+pub fn count_tokens_injected(vault: &Vault) -> usize {
+    vault.len()
 }
 
 // ---------------------------------------------------------------------------
