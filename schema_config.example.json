@@ -85,7 +85,7 @@
     },
     "travel": {
       "sensitivity": "low",
-      "aliases": ["travel", "T&E", "expenses"],
+      "aliases": ["travel", "T&E"],
       "description": "Employee travel and expense reimbursements, including trips, lodging, meals, client entertainment, and expense reports.",
       "physical_table": "transactions",
       "value_column": "amount",
