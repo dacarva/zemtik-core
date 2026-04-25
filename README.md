@@ -50,6 +50,7 @@ ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
 | Default (regex intent) | `docker compose up --build` | ~150 MB | No model download |
 | Semantic intent (BGE-small-en) | `docker build --build-arg BUILD_FEATURES=embed --build-arg BUILDER_IMAGE=ubuntu:24.04 --build-arg RUNTIME_IMAGE=ubuntu:24.04 -t zemtik:embed .` | ~450 MB + 130 MB first-start download | Requires glibc 2.38+ (ubuntu:24.04) |
 | ZK SlowLane | `docker build --build-arg INSTALL_ZK_TOOLS=true -t zemtik:zk .` | +300 MB | Adds nargo + bb |
+| Anonymizer (GLiNER sidecar) | `DOCKER_BUILDKIT=1 docker compose --profile anonymizer build && ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer up` | ~900 MB sidecar | GLiNER + spaCy baked in; CPU inference ~2–4s; set `HF_TOKEN` for authenticated model CDN |
 
 > **POC status (v0.16.1):** working proof-of-concept, not a production product. ZK circuit capped at 500 transactions; FastLane supports SQLite (default) and Supabase; signing key is file-based. See [Known Limitations](#known-limitations-poc).
 
