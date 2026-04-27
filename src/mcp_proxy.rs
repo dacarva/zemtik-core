@@ -459,8 +459,14 @@ impl ZemtikMcpHandler {
         let input_json = serde_json::to_string(
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
+        // Attest with SHA-256 digests (sign_and_write expects pre-computed hashes).
+        // Pass the raw JSON as preview overrides so the audit UI shows human-readable content.
+        let input_hash = sha256_hex(input_json.as_bytes());
+        let output_hash = sha256_hex(result_json.as_bytes());
+        let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
+        let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
 
-        self.attest_for_mode(tool_name, input_json, result_json.clone(), duration_ms, None, None).await?;
+        self.attest_for_mode(tool_name, input_hash, output_hash, duration_ms, preview_in, preview_out).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -605,8 +611,14 @@ impl ZemtikMcpHandler {
         let input_json = serde_json::to_string(
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
+        // Attest with SHA-256 digests (sign_and_write expects pre-computed hashes).
+        // Pass the raw JSON as preview overrides so the audit UI shows human-readable content.
+        let input_hash = sha256_hex(input_json.as_bytes());
+        let output_hash = sha256_hex(result_json.as_bytes());
+        let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
+        let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
 
-        self.attest_for_mode("zemtik_fetch".to_string(), input_json, result_json.clone(), duration_ms, None, None).await?;
+        self.attest_for_mode("zemtik_fetch".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
