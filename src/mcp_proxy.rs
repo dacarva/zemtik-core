@@ -510,7 +510,7 @@ impl ZemtikMcpHandler {
             None
         };
 
-        self.attest_for_mode("zemtik_read_file".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format.clone()).await?;
+        self.attest_for_mode(AttestParams { tool_name: "zemtik_read_file".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: file_format.clone() }).await?;
 
         let result_json = serde_json::to_string(&serde_json::json!({
             "content": final_content,
@@ -679,7 +679,7 @@ impl ZemtikMcpHandler {
         let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
         let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
 
-        self.attest_for_mode("zemtik_fetch".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, None).await?;
+        self.attest_for_mode(AttestParams { tool_name: "zemtik_fetch".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: None }).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -821,7 +821,7 @@ impl ZemtikMcpHandler {
             (None, None)
         };
 
-        self.attest_for_mode("zemtik_analyze".to_string(), raw_input_hash, raw_output_hash, duration_ms, preview_in, preview_out, None).await?;
+        self.attest_for_mode(AttestParams { tool_name: "zemtik_analyze".to_string(), input_hash: raw_input_hash, output_hash: raw_output_hash, duration_ms, preview_in, preview_out, file_format: None }).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -834,17 +834,11 @@ impl ZemtikMcpHandler {
     /// (read_file, fetch) the caller can pass `None` and the hash/content is used as-is.
     async fn attest_for_mode(
         &self,
-        tool_name: String,
-        input_hash: String,
-        output_hash: String,
-        duration_ms: u64,
-        preview_in: Option<String>,
-        preview_out: Option<String>,
-        file_format: Option<String>,
+        p: AttestParams,
     ) -> Result<(), rmcp::ErrorData> {
         match self.state.mode {
             McpMode::Tunnel => {
-                self.fork2_attest(tool_name, input_hash, output_hash, duration_ms, preview_in, preview_out, file_format);
+                self.fork2_attest(p);
                 Ok(())
             }
             McpMode::Governed => {
@@ -852,7 +846,7 @@ impl ZemtikMcpHandler {
                 tokio::time::timeout(
                     FORK2_TIMEOUT,
                     tokio::task::spawn_blocking(move || {
-                        sign_and_write(&state, tool_name, input_hash, output_hash, duration_ms, preview_in, preview_out, file_format)
+                        sign_and_write(&state, p)
                     }),
                 )
                 .await
@@ -878,22 +872,16 @@ impl ZemtikMcpHandler {
     /// Spawn FORK 2: sign + write audit record with 1-second timeout.
     fn fork2_attest(
         &self,
-        tool_name: String,
-        input_hash: String,
-        output_hash: String,
-        duration_ms: u64,
-        preview_in: Option<String>,
-        preview_out: Option<String>,
-        file_format: Option<String>,
+        p: AttestParams,
     ) {
         let state = Arc::clone(&self.state);
         let handle = tokio::spawn(async move {
-            let tool_name_for_log = tool_name.clone();
+            let tool_name_for_log = p.tool_name.clone();
             let result = tokio::time::timeout(FORK2_TIMEOUT, async move {
                 let state2 = Arc::clone(&state);
 
                 tokio::task::spawn_blocking(move || {
-                    sign_and_write(&state2, tool_name, input_hash, output_hash, duration_ms, preview_in, preview_out, file_format)
+                    sign_and_write(&state2, p)
                 })
                 .await
                 .map_err(|e| format!("spawn_blocking join: {}", e))?
@@ -932,6 +920,20 @@ impl ZemtikMcpHandler {
             .any(|d| domain == *d || domain.ends_with(&format!(".{}", d)));
         !allowed
     }
+}
+
+// ---------------------------------------------------------------------------
+// Attestation parameter bundle (reduces function arity below clippy limit)
+// ---------------------------------------------------------------------------
+
+struct AttestParams {
+    tool_name: String,
+    input_hash: String,
+    output_hash: String,
+    duration_ms: u64,
+    preview_in: Option<String>,
+    preview_out: Option<String>,
+    file_format: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,14 +1233,9 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
 /// input and output (not JSON wrappers) — used directly in the signed message.
 fn sign_and_write(
     state: &McpHandlerState,
-    tool_name: String,
-    input_hash: String,
-    output_hash: String,
-    duration_ms: u64,
-    preview_override_in: Option<String>,
-    preview_override_out: Option<String>,
-    file_format: Option<String>,
+    p: AttestParams,
 ) -> anyhow::Result<()> {
+    let AttestParams { tool_name, input_hash, output_hash, duration_ms, preview_in: preview_override_in, preview_out: preview_override_out, file_format } = p;
     let ts = Utc::now().to_rfc3339();
     let receipt_id = Uuid::new_v4().to_string();
 
