@@ -166,11 +166,23 @@ See [sidecar/README.md](sidecar/README.md) for sidecar setup and [docs/CONFIGURA
 
 ---
 
-## MCP + Claude Desktop (v0.16.0+)
+## MCP + Claude Desktop (v0.17.0+)
 
-Zemtik ships an MCP server that routes document text through the anonymizer before Claude reasons on it. The `zemtik_analyze` tool replaces PII with `[[Z:xxxx:n]]` tokens; every tool call is attested with a BabyJubJub EdDSA signature.
+### Quick Install (Claude Desktop — no terminal required)
 
-Note: Claude calling `zemtik_analyze` is enforced by the system prompt, not by the proxy. Tokenization quality depends on GLiNER entity boundary detection.
+Download `zemtik-macos.mcpb` from the [latest release](https://github.com/dacarva/zemtik-core/releases/latest) and double-click it. Claude Desktop installs Zemtik automatically. Then ask Claude:
+
+> "Please read /Users/yourname/Desktop/contract.pdf and summarize the key parties."
+
+To get a file path on macOS: right-click the file in Finder → hold Option → choose **Copy Pathname**.
+
+Supported: PDF (text-layer), DOCX, plain text. Max 25 MB for PDF/DOCX, 10 MB for text.
+
+---
+
+### Manual install (developers)
+
+Zemtik ships an MCP server that reads PDF, DOCX, and plain text files with ZK-backed attestation and optional PII anonymization. Every tool call is signed with a BabyJubJub EdDSA signature logged to `~/.zemtik/mcp_audit.db`.
 
 ```bash
 export ZEMTIK_MCP_API_KEY=$(openssl rand -hex 32)
@@ -179,7 +191,7 @@ ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp
 
 | Command | Transport | Use case |
 |---|---|---|
-| `zemtik mcp` | stdio | Claude Desktop (local binary) |
+| `zemtik mcp` | stdio | Claude Desktop (local binary, no Docker needed) |
 | `zemtik mcp-serve` | Streamable HTTP on `:4001` | Docker, IDE plugins, CI |
 
 See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for full setup, audit record schema, and governed mode.

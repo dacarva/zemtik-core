@@ -1,5 +1,45 @@
 # TODOS
 
+## P2 — Opt-in telemetry ping on first zemtik_read_file success (added 2026-04-27, /plan-devex-review)
+
+- **What:** When `zemtik_read_file` succeeds for the first time after install, send an anonymous usage ping: `{ event: 'first_read', file_format: 'pdf', version: '0.17.2', platform: 'macos' }`. Gated on `ZEMTIK_TELEMETRY_ENABLED=true` (opt-in, default off). No file contents, no paths, no PII.
+- **Why:** After the lawyer pilot ships, there's no automated signal that he actually used the tool. Manual follow-up (`zemtik list-mcp`) covers v1, but automated feedback scales to multiple lawyers without calls.
+- **How to fix:** In `handle_read_file`, after successful attestation: if `ZEMTIK_TELEMETRY_ENABLED=true` AND no `~/.zemtik/.first-read-ping-sent` marker exists, spawn a detached task that POSTs to `https://telemetry.zemtik.io/event` with the above payload, then touch the marker file.
+- **Context:** Identified during DX review of `.mcpb` distribution plan. Manual feedback (pilot calls) is sufficient for v1 single-user pilot.
+- **Blocked by:** Zemtik telemetry endpoint infrastructure (doesn't exist yet).
+
+---
+
+## P2 — DOCX extraction scope: headers, footers, footnotes, tracked changes (added 2026-04-27, /plan-eng-review)
+
+- **What:** `word/document.xml` parsing (planned for `zemtik_read_file`) covers body text only. Substantive content also lives in: `word/header1.xml` / `word/footer1.xml` (case numbers, firm name), `word/footnotes.xml` (legal citations), `word/comments.xml` + `word/revisions` (negotiated tracked changes).
+- **Why:** Attesting partial text as the complete document is a legal compliance risk. A contract with critical negotiated edits in tracked changes would have those edits omitted from the attested content. The pilot user reviews exactly this type of document.
+- **How to fix:** After `word/document.xml` is parsed, additionally unzip and parse `word/header1.xml`, `word/footer1.xml`, `word/footnotes.xml`. Append headers at top, footers at bottom, footnotes inline. Tracked changes (`<w:del>` / `<w:ins>`) should be configurable: include-deleted-text off by default.
+- **Context:** Found during Codex outside-voice review of `.mcpb` distribution plan. Acceptable to defer for v1 pilot — trigger: pilot reports missing content in extracted DOCX text.
+- **Depends on:** DOCX extraction (this branch) must land first.
+
+---
+
+## P2 — Concurrent read_file memory cap for mcp-serve (added 2026-04-27, /plan-eng-review)
+
+- **What:** `pdf-extract` loads full PDF bytes + decompressed streams + text output in memory during extraction. For 25MB PDFs, peak RSS per call is ~50-75MB. In `mcp-serve` mode with 10 concurrent sessions, peak ~500-750MB RSS — OOM risk in constrained environments.
+- **Why:** Single-user `.mcpb` install (lawyer pilot) is safe. Multi-session `mcp-serve` deployment is not.
+- **How to fix:** Add `tokio::sync::Semaphore` to `McpHandlerState` for `handle_read_file`. Permit count configurable via `ZEMTIK_MCP_MAX_CONCURRENT_FILE_READS` (default 4). `handle_read_file` acquires permit before `spawn_blocking`.
+- **Context:** Identified during performance review of `.mcpb` distribution plan. Not a blocker for the lawyer pilot.
+- **Depends on:** PDF/DOCX extraction (this branch) must land first.
+
+---
+
+## P2 — read_file timeout for large PDF extraction (added 2026-04-27, /plan-eng-review)
+
+- **What:** `zemtik_read_file` has no timeout. Complex 25MB PDFs can run `pdf-extract` for 5-30s in `spawn_blocking`. Claude Desktop MCP timeout may fire before extraction completes — lawyer sees "tool call timed out" with no context. The `spawn_blocking` thread continues running after timeout fires (CPU work is not cancellable).
+- **Why:** Recoverable (retry with smaller file) but confusing UX for non-technical users. `ZEMTIK_MCP_FETCH_TIMEOUT_SECS` covers `zemtik_fetch` but not `read_file`.
+- **How to fix:** `tokio::time::timeout(Duration::from_secs(read_timeout), spawn_blocking(...)).await`. Add `ZEMTIK_MCP_READ_FILE_TIMEOUT_SECS` env var (default 60s). Document in config ref.
+- **Context:** Identified during performance review. Not a blocker for pilot.
+- **Depends on:** PDF/DOCX extraction (this branch) must land first.
+
+---
+
 ## P2 — Commercial crate build time: make C dependencies optional (added 2026-04-25, /plan-devex-review)
 
 - **What:** `rusqlite = { features = ["bundled"] }` and `tonic-build` with vendored protoc cause a 3-5 minute first build for any commercial crate that adds zemtik as a dependency. This makes TTHW impossible to get below ~5 minutes regardless of module structure improvements.
@@ -860,6 +900,28 @@ Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy
 - **Cons:** Rewriter would need to use `LlmBackend` trait internally, adding complexity. The rewriter's context window turns and timeout config is OpenAI-specific.
 - **Context:** `src/rewriter.rs:299` hardcodes `POST /v1/chat/completions` with Bearer auth. `RewriterConfig` in `proxy.rs:638` is built from `config.openai_base_url`. Both need to be provider-aware.
 - **Depends on:** feat/multi-model-support merged. `LlmBackend` trait available.
+
+## feat/mcpb-distribution-pdf-support deferred items (2026-04-27, /plan-ceo-review)
+
+### McpAuditRecord typed fields: raw_file_hash + file_format (P2)
+- **What:** Add typed `raw_file_hash: Option<String>` and `file_format: Option<String>` fields to `McpAuditRecord` in `src/types.rs`. v10 migration adds them as `TEXT` columns; initial impl stores values in the existing `input_json` blob.
+- **Why:** Audit query (`/mcp/audit`) currently requires JSON parsing to filter by file type. Typed columns enable `SELECT * WHERE file_format='pdf'` directly.
+- **Effort:** S (CC: ~20min — migration pattern exists in mcp_proxy.rs v9 migration)
+- **Context:** Accepted as P2 TODOS during /plan-ceo-review 2026-04-27. v10 migration lands in feat/mcpb-distribution-pdf-support.
+
+### Cloud sidecar infrastructure: api.zemtik.io:50051 (P1, on first enterprise inquiry)
+- **What:** Stand up the Tier 2 cloud PII sidecar at `api.zemtik.io:50051` (gRPC, same interface as local Docker sidecar). Add `ZEMTIK_ANONYMIZER_SIDECAR_ADDR=http://api.zemtik.io:50051` tier to startup message. Add mTLS for transport security (client cert issued per tenant).
+- **Why:** Enterprise pilots that cannot run Docker locally (security policy, managed workstations) need a hosted anonymization option. Tier 2 is the revenue gate for cloud-managed contracts.
+- **Effort:** L (human: ~3 days infra + DPA review / CC: ~45min scaffolding)
+- **Context:** User introduced idea mid /plan-ceo-review 2026-04-27. Deferred to P1 triggered by first enterprise inquiry. Three-tier model documented in docs/MCP_ANONYMIZER.md.
+- **Depends on:** docs/MCP_ANONYMIZER.md shipped (feat/mcpb-distribution-pdf-support), legal DPA review.
+
+### DPA template for cloud sidecar: docs/CLOUD_DPA_TEMPLATE.md (P2)
+- **What:** Lawyer-friendly Data Processing Agreement template covering: what PII transits the Zemtik cloud sidecar, retention policy (zero — process and discard), jurisdiction, breach notification timeline. Referenced from docs/MCP_ANONYMIZER.md Tier 2 section.
+- **Why:** Enterprise legal review gates cloud sidecar adoption. Providing a pre-drafted DPA reduces their procurement cycle from weeks to days.
+- **Effort:** M (human: ~1 day legal review / CC: ~15min first draft)
+- **Context:** Deferred from /plan-ceo-review 2026-04-27 scope table (item D4). Needs legal review before publishing. Do not publish without review.
+- **Depends on:** Cloud sidecar infra standing up (see above).
 
 ## Pre-existing (found during QA 2026-04-24)
 - [ ] `integration_anonymizer::anonymizer_e2e_cedula_tokenized_and_deanonymized` fails: dropped_tokens=1 when 0 expected; LLM drops anonymized cedula token in round-trip test. Pre-dates feat/multi-model-support branch.

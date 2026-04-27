@@ -82,6 +82,7 @@ fn seed_audit_record(db_path: &std::path::Path, tool: &str) -> McpAuditRecord {
         public_key_hex: "pubkey".to_owned(),
         duration_ms: 42,
         mode: "tunnel".to_owned(),
+        file_format: None,
     };
     write_audit_record(db_path, &record).expect("write audit record");
     record

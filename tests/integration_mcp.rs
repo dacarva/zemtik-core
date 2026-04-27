@@ -45,6 +45,7 @@ fn test_mcp_audit_db_roundtrip() {
         public_key_hex: "pubkey".to_string(),
         duration_ms: 5,
         mode: "tunnel".to_string(),
+        file_format: None,
     };
 
     write_audit_record(&db_path, &record).unwrap();
@@ -73,6 +74,7 @@ fn test_mcp_audit_db_insert_idempotent() {
         public_key_hex: "pubkey".to_string(),
         duration_ms: 1,
         mode: "tunnel".to_string(),
+        file_format: None,
     };
 
     // Insert twice — INSERT OR IGNORE should deduplicate

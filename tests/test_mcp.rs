@@ -47,6 +47,7 @@ fn test_mcp_audit_record_schema() {
         public_key_hex: "deadpubkey".to_string(),
         duration_ms: 42,
         mode: "tunnel".to_string(),
+        file_format: None,
     };
 
     // Must serialize/deserialize round-trip cleanly
@@ -74,6 +75,7 @@ fn test_mcp_audit_db_write_read() {
         public_key_hex: "testpubkey".to_string(),
         duration_ms: 10,
         mode: "tunnel".to_string(),
+        file_format: None,
     };
 
     write_audit_record(&db_path, &record).unwrap();

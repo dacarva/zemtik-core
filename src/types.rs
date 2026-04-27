@@ -595,6 +595,8 @@ pub struct McpAuditRecord {
     pub duration_ms: u64,
     /// "tunnel" or "governed".
     pub mode: String,
+    /// Detected file format for zemtik_read_file calls ("pdf", "docx", "text"). None for other tools.
+    pub file_format: Option<String>,
 }
 
 /// Dynamic tool definition loaded from mcp_tools.json.
