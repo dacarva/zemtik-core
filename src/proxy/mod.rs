@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::extract::State;
@@ -278,8 +278,11 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         vault_store: new_vault_store(),
         anonymizer_client: if config.anonymizer_enabled {
             Some(AnonymizerGrpcClient::new(
-                build_channel(&config.anonymizer_sidecar_addr)
-                    .context("build anonymizer gRPC channel")?
+                build_channel(
+                    &config.anonymizer_sidecar_addr,
+                    Duration::from_millis(config.anonymizer_sidecar_timeout_ms),
+                )
+                .context("build anonymizer gRPC channel")?
             ))
         } else {
             None
@@ -302,10 +305,11 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         // Startup sidecar health ping — surfaces misconfigurations before the first request
         // and warms the tonic lazy connection so the first real request doesn't fall back to regex.
         let addr = config.anonymizer_sidecar_addr.clone();
-        let channel = build_channel(&addr).context("build anonymizer gRPC channel for startup ping")?;
+        let ping_timeout = Duration::from_secs(2);
+        let channel = build_channel(&addr, ping_timeout).context("build anonymizer gRPC channel for startup ping")?;
         let ping_start = std::time::Instant::now();
         let health = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            ping_timeout,
             check_sidecar_health(channel),
         )
         .await

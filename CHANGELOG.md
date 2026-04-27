@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.2] - 2026-04-27
+
+### Fixed
+- **MCP Claude Desktop 4-minute timeout** (`src/mcp_proxy.rs`): switched `StreamableHttpService` from `LocalSessionManager` to `NeverSessionManager` with `stateful_mode(false)`. GET `/mcp` now returns 405 (silently ignored by mcp-remote) instead of expiring session state after 5 minutes, eliminating the "Session not found" → mcp-remote retry loop that caused ~4-minute hangs.
+- **`zemtik_analyze` audit preview showing SHA-256 hashes** (`src/mcp_proxy.rs`): `sign_and_write` now accepts `preview_override_in: Option<String>` / `preview_override_out: Option<String>`. When `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true`, `handle_analyze_inner` passes the first 500 chars of the plaintext input and anonymized output instead of the SHA-256 hex strings.
+- **Anonymizer sidecar connect timeout** (`src/anonymizer.rs`): `build_channel` now accepts a `connect_timeout: Duration` parameter applied via `.connect_timeout()` before `.connect_lazy()`. Prevents tower's `Buffer` background task from stalling indefinitely when the sidecar accepts TCP but hangs on the HTTP/2 handshake.
+
+### Added
+- **Structured MCP and anonymizer logs**: `[MCP]` prefix on `zemtik_analyze` start/ok/error events; `[ANON]` prefix on gRPC call start, timeout, error, ok, and fallback events. Aids diagnosis of sidecar connectivity issues without requiring a full trace.
+- **`handle_analyze` outer deadline** (`src/mcp_proxy.rs`): `ANALYZE_DEADLINE_BUFFER_MS` (10s) added to `anonymizer_sidecar_timeout_ms` as a hard outer timeout on `handle_analyze`, returning a structured MCP error instead of silently hanging.
+
 ## [0.17.1] - 2026-04-25
 
 ### Fixed
