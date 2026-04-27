@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde_json::Value;
@@ -216,14 +216,20 @@ pub fn regex_anonymize(
 pub type AnonymizerGrpcClient = AnonymizerServiceClient<Channel>;
 
 /// Build a lazy gRPC channel. `connect_lazy()` defers TCP until the first call.
-/// Returns an error if `addr` is not a valid URI (e.g. missing scheme).
-pub fn build_channel(addr: &str) -> anyhow::Result<Channel> {
+/// `connect_timeout` bounds how long the HTTP/2 handshake may take before the
+/// background reconnect task gives up and returns `Unavailable`. Without this,
+/// a sidecar that accepts TCP but hangs on HTTP/2 (e.g. model loading) blocks
+/// tower's `Buffer` background task indefinitely, starving all subsequent calls
+/// even though each caller's `tokio::time::timeout` fires correctly on the
+/// foreground side.
+pub fn build_channel(addr: &str, connect_timeout: Duration) -> anyhow::Result<Channel> {
     let channel = Channel::from_shared(addr.to_owned())
         .map_err(|e| anyhow::anyhow!(
             "ZEMTIK_ANONYMIZER_SIDECAR_ADDR {:?} is not a valid URI: {}. \
              Expected format: http://host:port",
             addr, e
         ))?
+        .connect_timeout(connect_timeout)
         .connect_lazy();
     Ok(channel)
 }
@@ -335,14 +341,28 @@ pub async fn anonymize_conversation(
             entity_types: entity_types_csv.to_owned(),
         };
 
-        let deadline = std::time::Duration::from_millis(timeout_ms);
-        let start = Instant::now();
+        let deadline = Duration::from_millis(timeout_ms);
+        let call_start = Instant::now();
+        eprintln!(
+            "[ANON] gRPC call start: addr={} timeout_ms={} msgs={}",
+            addr, timeout_ms, user_msgs.len()
+        );
         let call = tokio::time::timeout(deadline, grpc.anonymize(request)).await;
-        meta.sidecar_ms = start.elapsed().as_millis() as u64;
+        meta.sidecar_ms = call_start.elapsed().as_millis() as u64;
 
-        match call {
-            Err(_elapsed) => Err(AnonymizerError::SidecarTimeout { ms: timeout_ms }),
+        let result = match call {
+            Err(_elapsed) => {
+                eprintln!(
+                    "[ANON] gRPC timeout after {}ms (deadline {}ms) addr={}",
+                    meta.sidecar_ms, timeout_ms, addr
+                );
+                Err(AnonymizerError::SidecarTimeout { ms: timeout_ms })
+            }
             Ok(Err(status)) => {
+                eprintln!(
+                    "[ANON] gRPC error after {}ms: code={:?} addr={}",
+                    meta.sidecar_ms, status.code(), addr
+                );
                 // Map tonic status to appropriate error
                 match status.code() {
                     tonic::Code::Unavailable => Err(AnonymizerError::SidecarUnreachable { addr: addr.to_owned() }),
@@ -350,8 +370,15 @@ pub async fn anonymize_conversation(
                     _ => Err(AnonymizerError::MalformedResponse { detail: status.code().description().to_owned() }),
                 }
             }
-            Ok(Ok(response)) => Ok(response.into_inner()),
-        }
+            Ok(Ok(response)) => {
+                eprintln!(
+                    "[ANON] gRPC ok after {}ms addr={}",
+                    meta.sidecar_ms, addr
+                );
+                Ok(response.into_inner())
+            }
+        };
+        result
     } else {
         Err(AnonymizerError::SidecarUnreachable { addr: addr.to_owned() })
     };
@@ -425,8 +452,10 @@ pub async fn anonymize_conversation(
         }
         Err(e) => {
             if !fallback_regex {
+                eprintln!("[ANON] sidecar error, fallback_regex=false → returning error: {}", e);
                 return Err(e);
             }
+            eprintln!("[ANON] sidecar error, using regex fallback: {}", e);
             // Regex fallback — only LATAM IDs and structured patterns, no PERSON/ORG
             let regex_types: Vec<&str> = entity_types
                 .iter()

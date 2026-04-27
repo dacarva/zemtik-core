@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -183,9 +183,9 @@ pub(super) async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl 
     if let Some(obj) = body.as_object_mut() {
         let anon_block = if state.config.anonymizer_enabled {
             let addr = state.config.anonymizer_sidecar_addr.clone();
-            let probe_deadline = std::time::Duration::from_millis(500);
+            let probe_deadline = Duration::from_millis(500);
             let t0 = std::time::Instant::now();
-            let status = match build_channel(&addr) {
+            let status = match build_channel(&addr, probe_deadline) {
                 Ok(channel) => tokio::time::timeout(probe_deadline, check_sidecar_health(channel))
                     .await
                     .unwrap_or(SidecarHealth::Unreachable),

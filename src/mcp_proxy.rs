@@ -44,7 +44,7 @@ use rmcp::{
     transport::stdio,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
-        session::local::LocalSessionManager,
+        session::never::NeverSessionManager,
     },
 };
 use num_bigint::BigInt;
@@ -81,6 +81,11 @@ const ANALYZE_INPUT_CAP: usize = 100 * 1024;
 const PREVIEW_LEN: usize = 500;
 // FORK 2 timeout
 const FORK2_TIMEOUT: Duration = Duration::from_secs(1);
+// Extra buffer added on top of anonymizer_sidecar_timeout_ms for the handle_analyze
+// defense-in-depth deadline. Covers regex fallback + attestation + headroom.
+// Full deadline = sidecar_timeout_ms + ANALYZE_DEADLINE_BUFFER_MS.
+// Example: default (1500ms + 10s = 11.5s), mcp-docker (60000ms + 10s = 70s).
+const ANALYZE_DEADLINE_BUFFER_MS: u64 = 10_000;
 
 // ---------------------------------------------------------------------------
 // SSRF guard helpers (SEC-1)
@@ -292,8 +297,11 @@ impl McpHandlerState {
 
         let anonymizer_client = if config.anonymizer_enabled {
             Some(AnonymizerGrpcClient::new(
-                build_channel(&config.anonymizer_sidecar_addr)
-                    .context("build anonymizer gRPC channel for MCP handler")?,
+                build_channel(
+                    &config.anonymizer_sidecar_addr,
+                    Duration::from_millis(config.anonymizer_sidecar_timeout_ms),
+                )
+                .context("build anonymizer gRPC channel for MCP handler")?,
             ))
         } else {
             None
@@ -451,8 +459,14 @@ impl ZemtikMcpHandler {
         let input_json = serde_json::to_string(
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
+        // Attest with SHA-256 digests (sign_and_write expects pre-computed hashes).
+        // Pass the raw JSON as preview overrides so the audit UI shows human-readable content.
+        let input_hash = sha256_hex(input_json.as_bytes());
+        let output_hash = sha256_hex(result_json.as_bytes());
+        let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
+        let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
 
-        self.attest_for_mode(tool_name, input_json, result_json.clone(), duration_ms).await?;
+        self.attest_for_mode(tool_name, input_hash, output_hash, duration_ms, preview_in, preview_out).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -597,8 +611,14 @@ impl ZemtikMcpHandler {
         let input_json = serde_json::to_string(
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
+        // Attest with SHA-256 digests (sign_and_write expects pre-computed hashes).
+        // Pass the raw JSON as preview overrides so the audit UI shows human-readable content.
+        let input_hash = sha256_hex(input_json.as_bytes());
+        let output_hash = sha256_hex(result_json.as_bytes());
+        let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
+        let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
 
-        self.attest_for_mode("zemtik_fetch".to_string(), input_json, result_json.clone(), duration_ms).await?;
+        self.attest_for_mode("zemtik_fetch".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -608,6 +628,30 @@ impl ZemtikMcpHandler {
     // ---------------------------------------------------------------------------
 
     async fn handle_analyze(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Outer deadline = sidecar_timeout_ms + ANALYZE_DEADLINE_BUFFER_MS. Prevents the
+        // 4-minute Claude Desktop MCP timeout when the gRPC connect_lazy background task
+        // stalls on a slow sidecar. Inner per-call timeout (anonymizer_sidecar_timeout_ms)
+        // is the normal fast path; this is the safety net and must be larger.
+        let deadline = Duration::from_millis(
+            self.state.anonymizer_sidecar_timeout_ms.saturating_add(ANALYZE_DEADLINE_BUFFER_MS),
+        );
+        tokio::time::timeout(deadline, self.handle_analyze_inner(request))
+            .await
+            .unwrap_or_else(|_| Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32000),
+                format!(
+                    "analyze_timeout: tool call exceeded {}ms deadline. \
+                     Check that the anonymizer sidecar is running (ZEMTIK_ANONYMIZER_SIDECAR_ADDR).",
+                    deadline.as_millis(),
+                ),
+                None,
+            )))
+    }
+
+    async fn handle_analyze_inner(
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -645,6 +689,15 @@ impl ZemtikMcpHandler {
         let messages = vec![serde_json::json!({"role": "user", "content": text.clone()})];
         let mut grpc = self.state.anonymizer_client.clone();
 
+        eprintln!(
+            "[MCP] zemtik_analyze start: input_bytes={} sidecar={} timeout_ms={} fallback_regex={} session={}",
+            text.len(),
+            self.state.anonymizer_sidecar_addr,
+            self.state.anonymizer_sidecar_timeout_ms,
+            self.state.anonymizer_fallback_regex,
+            &session_id[..8],
+        );
+
         let anon_result = anonymize_conversation(
             &messages,
             &session_id,
@@ -657,6 +710,10 @@ impl ZemtikMcpHandler {
 
         let (anonymized_text, meta): (String, AuditMeta) = match anon_result {
             Ok((msgs, _vault, m)) => {
+                eprintln!(
+                    "[MCP] zemtik_analyze ok: sidecar_used={} entities={} elapsed_ms={} session={}",
+                    m.sidecar_used, m.entities_found, start.elapsed().as_millis(), &session_id[..8],
+                );
                 // Discard vault — never return original values to the LLM.
                 let t = msgs.first()
                     .and_then(|msg| msg.get("content"))
@@ -666,6 +723,10 @@ impl ZemtikMcpHandler {
                 (t, m)
             }
             Err(e) => {
+                eprintln!(
+                    "[MCP] zemtik_analyze error: {} elapsed_ms={} session={}",
+                    e, start.elapsed().as_millis(), &session_id[..8],
+                );
                 return Err(rmcp::ErrorData::new(
                     rmcp::model::ErrorCode(-32000),
                     format!("anonymizer_failed: {}", e),
@@ -688,7 +749,18 @@ impl ZemtikMcpHandler {
         let raw_input_hash = sha256_hex(text.as_bytes());
         let raw_output_hash = sha256_hex(anonymized_text.as_bytes());
 
-        self.attest_for_mode("zemtik_analyze".to_string(), raw_input_hash, raw_output_hash, duration_ms).await?;
+        // Debug preview: store plaintext input/output in audit DB when enabled.
+        // Disabled by default (ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=false) — do not enable in production.
+        let (preview_in, preview_out) = if self.state.anonymizer_debug_preview {
+            (
+                Some(truncate(&text, PREVIEW_LEN)),
+                Some(truncate(&anonymized_text, PREVIEW_LEN)),
+            )
+        } else {
+            (None, None)
+        };
+
+        self.attest_for_mode("zemtik_analyze".to_string(), raw_input_hash, raw_output_hash, duration_ms, preview_in, preview_out).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -696,16 +768,21 @@ impl ZemtikMcpHandler {
     /// Attest based on operating mode.
     /// Tunnel: fire-and-forget FORK 2 (zero latency added).
     /// Governed: await signing synchronously — return Err to caller if attestation fails.
+    /// `preview_in` / `preview_out`: optional plaintext previews written to audit DB when
+    /// `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true`; for tools that pass full content as `input_json`
+    /// (read_file, fetch) the caller can pass `None` and the hash/content is used as-is.
     async fn attest_for_mode(
         &self,
         tool_name: String,
         input_json: String,
         output_json: String,
         duration_ms: u64,
+        preview_in: Option<String>,
+        preview_out: Option<String>,
     ) -> Result<(), rmcp::ErrorData> {
         match self.state.mode {
             McpMode::Tunnel => {
-                self.fork2_attest(tool_name, input_json, output_json, duration_ms);
+                self.fork2_attest(tool_name, input_json, output_json, duration_ms, preview_in, preview_out);
                 Ok(())
             }
             McpMode::Governed => {
@@ -713,7 +790,7 @@ impl ZemtikMcpHandler {
                 tokio::time::timeout(
                     FORK2_TIMEOUT,
                     tokio::task::spawn_blocking(move || {
-                        sign_and_write(&state, tool_name, input_json, output_json, duration_ms)
+                        sign_and_write(&state, tool_name, input_json, output_json, duration_ms, preview_in, preview_out)
                     }),
                 )
                 .await
@@ -743,6 +820,8 @@ impl ZemtikMcpHandler {
         input_json: String,
         output_json: String,
         duration_ms: u64,
+        preview_in: Option<String>,
+        preview_out: Option<String>,
     ) {
         let state = Arc::clone(&self.state);
         let handle = tokio::spawn(async move {
@@ -751,7 +830,7 @@ impl ZemtikMcpHandler {
                 let state2 = Arc::clone(&state);
 
                 tokio::task::spawn_blocking(move || {
-                    sign_and_write(&state2, tool_name, input_json, output_json, duration_ms)
+                    sign_and_write(&state2, tool_name, input_json, output_json, duration_ms, preview_in, preview_out)
                 })
                 .await
                 .map_err(|e| format!("spawn_blocking join: {}", e))?
@@ -900,6 +979,8 @@ fn sign_and_write(
     input_hash: String,
     output_hash: String,
     duration_ms: u64,
+    preview_override_in: Option<String>,
+    preview_override_out: Option<String>,
 ) -> anyhow::Result<()> {
     let ts = Utc::now().to_rfc3339();
     let receipt_id = Uuid::new_v4().to_string();
@@ -923,8 +1004,10 @@ fn sign_and_write(
     // sig_hex: r_b8.x and s as decimal strings joined with ":"
     let sig_hex = format!("{}:{}", sig.r_b8.x, sig.s);
 
-    let preview_in = truncate(&input_hash, PREVIEW_LEN);
-    let preview_out = truncate(&output_hash, PREVIEW_LEN);
+    // Use caller-supplied plaintext previews when available (e.g. ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true
+    // on zemtik_analyze); otherwise fall back to the first PREVIEW_LEN chars of the hash/content.
+    let preview_in = preview_override_in.unwrap_or_else(|| truncate(&input_hash, PREVIEW_LEN));
+    let preview_out = preview_override_out.unwrap_or_else(|| truncate(&output_hash, PREVIEW_LEN));
     let record = McpAuditRecord {
         receipt_id,
         ts,
@@ -1131,10 +1214,15 @@ pub fn build_mcp_router(
     let state = Arc::new(McpHandlerState::from_config(config, false)?);
     let state_clone = Arc::clone(&state);
 
+    // Stateless mode: each POST is handled independently — no session state on the server.
+    // mcp-remote opens a GET SSE stream after initialize; stateless mode returns 405 for GET,
+    // which mcp-remote silently ignores (per spec). Avoids session-expiry 404s after idle periods.
     let mcp_service = StreamableHttpService::new(
         move || Ok(ZemtikMcpHandler::new(Arc::clone(&state_clone))),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+        Arc::new(NeverSessionManager::default()),
+        StreamableHttpServerConfig::default()
+            .with_stateful_mode(false)
+            .with_cancellation_token(ct.child_token()),
     );
 
     let router = Router::new()
