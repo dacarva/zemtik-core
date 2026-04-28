@@ -374,10 +374,12 @@ impl ServerHandler for ZemtikMcpHandler {
             let base = "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
                         Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.";
             let analyze_hint = if self.state.anonymizer_enabled {
-                " Before reasoning on user-supplied document text that may contain PII \
-                 (names, emails, IDs, phone numbers, addresses), FIRST call zemtik_analyze \
-                 on the raw text and reason only on the returned tokenized form. \
-                 Preserve any [[Z:xxxx:n]] tokens verbatim — they are opaque privacy identifiers."
+                " When the user asks you to analyze or process text that contains PII \
+                 (names, IDs, emails, phone numbers, IBANs, addresses), call zemtik_analyze \
+                 first to tokenize it and create an audit record. Reason on the returned \
+                 [[Z:xxxx:n]] tokens rather than the raw values. Note: for full PII isolation \
+                 (where the LLM never sees raw personal data), use zemtik_read_file with a \
+                 file path instead of pasting text directly."
             } else {
                 ""
             };
@@ -512,22 +514,16 @@ impl ZemtikMcpHandler {
 
         self.attest_for_mode(AttestParams { tool_name: "zemtik_read_file".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: file_format.clone() }).await?;
 
-        let result_json = serde_json::to_string(&serde_json::json!({
-            "content": final_content,
-            "raw_file_hash": raw_file_hash,
-            "size_bytes": size_bytes,
-            "file_format": file_format,
-        })).unwrap_or_default();
-
-        let summary = format!(
-            "File read successfully ({} bytes, format: {}).{} Attestation in progress.",
-            size_bytes,
+        let metadata = format!(
+            "[zemtik] format={} size={} hash={}{} Attestation logged.",
             file_format.as_deref().unwrap_or("text"),
+            size_bytes,
+            raw_file_hash,
             anon_note,
         );
         Ok(CallToolResult::success(vec![
-            Content::text(result_json),
-            Content::text(summary),
+            Content::text(final_content),
+            Content::text(metadata),
         ]))
     }
 
