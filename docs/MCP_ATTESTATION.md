@@ -1,6 +1,45 @@
 # MCP Attestation — Integration Guide
 
-Zemtik ships an MCP server that makes Claude Desktop safe for regulated industries. Every tool call is attested with a BabyJubJub EdDSA signature and logged to a tamper-evident audit database. In v0.16.0, the `zemtik_analyze` tool adds PII tokenization: Claude calls it before reasoning on sensitive documents, so raw names, tax IDs, and financial identifiers never appear in Claude's context.
+## Quick Install (Claude Desktop — no terminal required)
+
+Download the `.mcpb` for your platform from the [latest release](https://github.com/dacarva/zemtik-core/releases/latest) and double-click it. Claude Desktop installs Zemtik automatically.
+
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon / Intel) | `zemtik-macos.mcpb` |
+| Linux | `zemtik-linux.mcpb` |
+| Windows | `zemtik-windows.mcpb` — see note below |
+
+Then ask Claude:
+> "Please read /Users/yourname/Desktop/contract.pdf and summarize the key parties and obligations."
+
+To get the full path on macOS: right-click the file in Finder → hold Option → choose **Copy Pathname**.
+
+Supported: PDF (text-layer), DOCX, plain text. Max 25 MB for PDF/DOCX, 10 MB for text.
+
+### PII Anonymization requires the Zemtik sidecar
+
+The `.mcpb` package enables PII anonymization by default (`ZEMTIK_ANONYMIZER_ENABLED=true`). Full entity detection (PERSON, ORG, LOCATION, IDs) requires the GLiNER/Presidio sidecar. Without it, file reads will return a sidecar error.
+
+**macOS / Linux:** Start Docker Desktop, then:
+```bash
+docker compose --profile anonymizer up -d
+```
+
+**Windows:** PII anonymization requires one of:
+1. **Docker Desktop with WSL2** — run the command above inside a WSL2 terminal.
+2. **Cloud sidecar** — add `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` pointing to your hosted endpoint in `claude_desktop_config.json` under the `zemtik` server's `env` block.
+
+To disable anonymization (reads succeed without Docker, but no PII protection):
+```json
+"env": { "ZEMTIK_ANONYMIZER_ENABLED": "false" }
+```
+
+**Attestation note:** `output_hash` in each audit record covers the anonymized text delivered to Claude. `raw_file_hash` in the tool response covers the source binary file. Both can be verified independently.
+
+---
+
+Zemtik ships an MCP server that makes Claude Desktop safe for regulated industries. Every tool call is attested with a BabyJubJub EdDSA signature and logged to a tamper-evident audit database. In v0.18.0, `zemtik_read_file` supports PDF and DOCX extraction with hash separation (content hash vs. raw file hash). The `zemtik_analyze` tool adds PII tokenization: Claude calls it before reasoning on sensitive documents, so raw names, tax IDs, and financial identifiers never appear in Claude's context.
 
 ## How attestation works
 

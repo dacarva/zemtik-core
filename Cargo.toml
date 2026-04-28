@@ -1,6 +1,6 @@
 [package]
 name = "zemtik"
-version = "0.17.2"
+version = "0.18.0"
 edition = "2021"
 # Main CLI is the default when multiple [[bin]] targets exist (e.g. intent-eval).
 default-run = "zemtik"
@@ -52,6 +52,8 @@ tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 scopeguard = "1"
 thiserror = "1"
+pdf-extract = "0.7"
+quick-xml = "0.36"
 
 # aarch64-specific: babyjubjub-rs needs the "aarch64" feature on Apple Silicon
 # to avoid a ppv-lite86 blake-hash panic. x86_64 builds must NOT include it.

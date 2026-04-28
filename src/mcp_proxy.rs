@@ -73,8 +73,9 @@ use crate::keys::load_or_generate_key;
 use crate::mcp_auth::check_mcp_auth;
 use crate::types::{McpAuditRecord, McpMode};
 
-// File size cap: 10MB
-const FILE_SIZE_CAP: u64 = 10 * 1024 * 1024;
+// File size caps
+const FILE_SIZE_CAP_TEXT: u64 = 10 * 1024 * 1024;     // 10MB for plain text
+const FILE_SIZE_CAP_DOCUMENT: u64 = 25 * 1024 * 1024; // 25MB for PDF/DOCX
 // zemtik_analyze input cap: 100KB
 const ANALYZE_INPUT_CAP: usize = 100 * 1024;
 // Max preview chars
@@ -233,7 +234,7 @@ pub struct McpHandlerState {
     /// Fetch timeout.
     pub fetch_timeout: Duration,
     /// Allowed path prefixes (empty = allow-all in STDIO, deny-all in SSE).
-    pub allowed_paths: Vec<String>,
+    pub allowed_paths: Vec<PathBuf>,
     /// Allowed fetch domains (empty = allow-all in STDIO, deny-all in SSE).
     pub allowed_fetch_domains: Vec<String>,
     /// Whether running in STDIO (true) or SSE (false) mode.
@@ -318,14 +319,17 @@ impl McpHandlerState {
                 .build()
                 .context("build reqwest client")?,
             fetch_timeout: Duration::from_secs(config.mcp_fetch_timeout_secs),
-            // Canonicalize allowed_paths at construction time so starts_with() comparisons
-            // work correctly even when entries contain symlink components or relative paths.
+            // Store allowed_paths as canonicalized PathBufs so prefix matching uses
+            // component-aware Path::starts_with rather than raw string comparison,
+            // preventing bypasses via path traversal or glob suffix confusion.
             allowed_paths: config.mcp_allowed_paths.iter()
                 .map(|p| {
                     let expanded = crate::config::expand_tilde(p);
-                    expanded.canonicalize()
-                        .map(|c| c.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| expanded.to_string_lossy().into_owned())
+                    // Strip glob suffixes before canonicalize so the directory itself resolves.
+                    let dir_str = expanded.to_string_lossy();
+                    let dir = dir_str.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
+                    let dir_path = PathBuf::from(dir);
+                    dir_path.canonicalize().unwrap_or(dir_path)
                 })
                 .collect(),
             allowed_fetch_domains: config.mcp_allowed_fetch_domains.clone(),
@@ -370,13 +374,29 @@ impl ServerHandler for ZemtikMcpHandler {
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_server_info(Implementation::from_build_env())
         .with_instructions({
-            let base = "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
-                        Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.";
+            // Derive host-file hint from the first allowed path glob, stripping the trailing /**
+            // so Claude gets a concrete directory to reference (e.g. /home/zemtik/host-files).
+            let host_files_hint = self.state.allowed_paths.first().map(|p| {
+                let dir = p.display();
+                format!(
+                    " Host files are mounted at '{dir}/'. \
+                     When the user references a local file path, translate it to '{dir}/<filename>' \
+                     before calling zemtik_read_file.",
+                    dir = dir
+                )
+            }).unwrap_or_default();
+
+            let base = format!(
+                "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
+                 Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.{host_files_hint}"
+            );
             let analyze_hint = if self.state.anonymizer_enabled {
-                " Before reasoning on user-supplied document text that may contain PII \
-                 (names, emails, IDs, phone numbers, addresses), FIRST call zemtik_analyze \
-                 on the raw text and reason only on the returned tokenized form. \
-                 Preserve any [[Z:xxxx:n]] tokens verbatim — they are opaque privacy identifiers."
+                " When the user asks you to analyze or process text that contains PII \
+                 (names, IDs, emails, phone numbers, IBANs, addresses), call zemtik_analyze \
+                 first to tokenize it and create an audit record. Reason on the returned \
+                 [[Z:xxxx:n]] tokens rather than the raw values. Note: for full PII isolation \
+                 (where the LLM never sees raw personal data), use zemtik_read_file with a \
+                 file path instead of pasting text directly."
             } else {
                 ""
             };
@@ -451,24 +471,93 @@ impl ZemtikMcpHandler {
             None,
         ))??;
 
+        // Hoist these before result.content is consumed by the anonymizer block.
+        let raw_file_hash = result.raw_file_hash.clone();
+        let size_bytes = result.size_bytes;
+        let file_format = result.file_format.clone();
+
+        // Anonymize content if enabled — output_hash is computed AFTER anonymization
+        // so it covers exactly what Claude receives. raw_file_hash in the response JSON
+        // covers the source file for provenance.
+        let (final_content, anon_note) = if self.state.anonymizer_enabled {
+            let session_id = Uuid::new_v4().to_string();
+            let messages = vec![serde_json::json!({"role": "user", "content": result.content.clone()})];
+            let mut grpc = self.state.anonymizer_client.clone();
+            match anonymize_conversation(
+                &messages,
+                &session_id,
+                grpc.as_mut(),
+                &self.state.anonymizer_entity_types,
+                self.state.anonymizer_sidecar_timeout_ms,
+                self.state.anonymizer_fallback_regex,
+                &self.state.anonymizer_sidecar_addr,
+            ).await {
+                Ok((msgs, _vault, m)) => {
+                    let anon = msgs.first()
+                        .and_then(|msg| msg.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let note = if m.sidecar_used {
+                        format!(" PII anonymized via sidecar ({} entities).", m.entities_found)
+                    } else {
+                        format!(" PII anonymized via regex fallback — structured PII only ({} entities). Start Docker for full NER coverage.", m.entities_found)
+                    };
+                    (anon, note)
+                }
+                Err(e) => {
+                    // Anonymizer failed and no fallback succeeded — return an error rather
+                    // than passing raw un-anonymized content to the LLM, which would violate
+                    // the ZEMTIK_ANONYMIZER_ENABLED=true guarantee.
+                    eprintln!("[MCP] read_file anonymizer unavailable: {}", e);
+                    return Err(rmcp::ErrorData::new(
+                        rmcp::model::ErrorCode(-32603),
+                        format!(
+                            "anonymizer_unavailable: Cannot read file — PII anonymization is enabled \
+                             but the sidecar is unreachable. Start Docker and run \
+                             `docker compose --profile anonymizer up -d`, or set \
+                             ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true to use regex-only mode. Error: {}", e
+                        ),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            (result.content, String::new())
+        };
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // FORK 2: attest in background
-        let result_json = serde_json::to_string(&result).unwrap_or_default();
-        let tool_name = "zemtik_read_file".to_string();
         let input_json = serde_json::to_string(
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
-        // Attest with SHA-256 digests (sign_and_write expects pre-computed hashes).
-        // Pass the raw JSON as preview overrides so the audit UI shows human-readable content.
         let input_hash = sha256_hex(input_json.as_bytes());
-        let output_hash = sha256_hex(result_json.as_bytes());
+        // Build metadata first so output_hash covers the full returned payload
+        // (content + metadata), not just the text content.
+        let metadata = format!(
+            "[zemtik] format={} file_size={} hash={}{} Attestation logged.",
+            file_format.as_deref().unwrap_or("text"),
+            size_bytes,
+            raw_file_hash,
+            anon_note,
+        );
+        // output_hash covers the full returned payload (content + metadata).
+        let mut output_bytes = final_content.as_bytes().to_vec();
+        output_bytes.extend_from_slice(metadata.as_bytes());
+        let output_hash = sha256_hex(&output_bytes);
         let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
-        let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
+        let preview_out = if self.state.anonymizer_debug_preview {
+            Some(truncate(&final_content, PREVIEW_LEN))
+        } else {
+            None
+        };
 
-        self.attest_for_mode(tool_name, input_hash, output_hash, duration_ms, preview_in, preview_out).await?;
+        self.attest_for_mode(AttestParams { tool_name: "zemtik_read_file".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: file_format.clone() }).await?;
 
-        Ok(CallToolResult::success(vec![Content::text(result_json)]))
+        Ok(CallToolResult::success(vec![
+            Content::text(final_content),
+            Content::text(metadata),
+        ]))
     }
 
     async fn handle_fetch(
@@ -514,6 +603,7 @@ impl ZemtikMcpHandler {
                     public_key_hex: state.public_key_hex.clone(),
                     duration_ms: 0,
                     mode: if is_stdio { "bypass_stdio" } else { "bypass_blocked" }.to_string(),
+                    file_format: None,
                 };
                 let _ = tokio::time::timeout(
                     FORK2_TIMEOUT,
@@ -618,7 +708,7 @@ impl ZemtikMcpHandler {
         let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
         let preview_out = Some(truncate(&result_json, PREVIEW_LEN));
 
-        self.attest_for_mode("zemtik_fetch".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out).await?;
+        self.attest_for_mode(AttestParams { tool_name: "zemtik_fetch".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: None }).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -760,7 +850,7 @@ impl ZemtikMcpHandler {
             (None, None)
         };
 
-        self.attest_for_mode("zemtik_analyze".to_string(), raw_input_hash, raw_output_hash, duration_ms, preview_in, preview_out).await?;
+        self.attest_for_mode(AttestParams { tool_name: "zemtik_analyze".to_string(), input_hash: raw_input_hash, output_hash: raw_output_hash, duration_ms, preview_in, preview_out, file_format: None }).await?;
 
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
@@ -773,16 +863,11 @@ impl ZemtikMcpHandler {
     /// (read_file, fetch) the caller can pass `None` and the hash/content is used as-is.
     async fn attest_for_mode(
         &self,
-        tool_name: String,
-        input_json: String,
-        output_json: String,
-        duration_ms: u64,
-        preview_in: Option<String>,
-        preview_out: Option<String>,
+        p: AttestParams,
     ) -> Result<(), rmcp::ErrorData> {
         match self.state.mode {
             McpMode::Tunnel => {
-                self.fork2_attest(tool_name, input_json, output_json, duration_ms, preview_in, preview_out);
+                self.fork2_attest(p);
                 Ok(())
             }
             McpMode::Governed => {
@@ -790,7 +875,7 @@ impl ZemtikMcpHandler {
                 tokio::time::timeout(
                     FORK2_TIMEOUT,
                     tokio::task::spawn_blocking(move || {
-                        sign_and_write(&state, tool_name, input_json, output_json, duration_ms, preview_in, preview_out)
+                        sign_and_write(&state, p)
                     }),
                 )
                 .await
@@ -816,21 +901,16 @@ impl ZemtikMcpHandler {
     /// Spawn FORK 2: sign + write audit record with 1-second timeout.
     fn fork2_attest(
         &self,
-        tool_name: String,
-        input_json: String,
-        output_json: String,
-        duration_ms: u64,
-        preview_in: Option<String>,
-        preview_out: Option<String>,
+        p: AttestParams,
     ) {
         let state = Arc::clone(&self.state);
         let handle = tokio::spawn(async move {
-            let tool_name_for_log = tool_name.clone();
+            let tool_name_for_log = p.tool_name.clone();
             let result = tokio::time::timeout(FORK2_TIMEOUT, async move {
                 let state2 = Arc::clone(&state);
 
                 tokio::task::spawn_blocking(move || {
-                    sign_and_write(&state2, tool_name, input_json, output_json, duration_ms, preview_in, preview_out)
+                    sign_and_write(&state2, p)
                 })
                 .await
                 .map_err(|e| format!("spawn_blocking join: {}", e))?
@@ -872,21 +952,204 @@ impl ZemtikMcpHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Attestation parameter bundle (reduces function arity below clippy limit)
+// ---------------------------------------------------------------------------
+
+struct AttestParams {
+    tool_name: String,
+    input_hash: String,
+    output_hash: String,
+    duration_ms: u64,
+    preview_in: Option<String>,
+    preview_out: Option<String>,
+    file_format: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Blocking helpers (run in spawn_blocking)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFormat {
+    Pdf,
+    Docx,
+    Text,
+}
+
+impl FileFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FileFormat::Pdf => "pdf",
+            FileFormat::Docx => "docx",
+            FileFormat::Text => "text",
+        }
+    }
+
+    pub fn size_cap(&self) -> u64 {
+        match self {
+            FileFormat::Pdf | FileFormat::Docx => FILE_SIZE_CAP_DOCUMENT,
+            FileFormat::Text => FILE_SIZE_CAP_TEXT,
+        }
+    }
+}
+
+/// Detect file format from extension + magic bytes (first 8 bytes).
+pub fn detect_format(path: &Path, magic: &[u8]) -> FileFormat {
+    // Extension check first
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("pdf") => return FileFormat::Pdf,
+        Some("docx") => return FileFormat::Docx,
+        _ => {}
+    }
+    // Magic bytes fallback
+    if magic.starts_with(b"%PDF") {
+        return FileFormat::Pdf;
+    }
+    if magic.starts_with(b"\x50\x4B\x03\x04") {
+        return FileFormat::Docx;
+    }
+    FileFormat::Text
+}
+
+/// Extract text from a PDF. Returns Err if password-protected or no text layer.
+fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
+    match pdf_extract::extract_text_from_mem(bytes) {
+        Ok(text) => {
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                Err("no_extractable_text_layer: this appears to be a scanned PDF (image-only). For OCR, use docling-mcp.".to_string())
+            } else {
+                Ok(trimmed)
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("password") || msg.contains("encrypt") {
+                Err("pdf_password_protected: PDF is password-protected. Remove the password before reading.".to_string())
+            } else {
+                Err(format!("pdf_parse_error: {}", msg))
+            }
+        }
+    }
+}
+
+/// Extract plain text from a DOCX (ZIP + word/document.xml).
+fn extract_docx_text(bytes: &[u8]) -> Result<String, String> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("docx_parse_error: not a valid ZIP archive: {}", e))?;
+    let mut xml_data = Vec::new();
+    {
+        let entry = archive.by_name("word/document.xml")
+            .map_err(|_| "docx_parse_error: word/document.xml not found in archive".to_string())?;
+        use std::io::Read as _;
+        // Cap decompressed XML at 64 MB — prevents ZIP bomb from a compressed DOCX.
+        const DOCX_XML_MAX: u64 = 64 * 1024 * 1024;
+        entry.take(DOCX_XML_MAX + 1).read_to_end(&mut xml_data)
+            .map_err(|e| format!("docx_read_error: {}", e))?;
+        if xml_data.len() as u64 > DOCX_XML_MAX {
+            return Err("docx_too_large: decompressed document.xml exceeds 64 MB".to_string());
+        }
+    }
+    // Parse XML and extract <w:t> text nodes, preserving spaces
+    let mut output = String::new();
+    let mut reader = quick_xml::Reader::from_reader(xml_data.as_slice());
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut in_paragraph = false;
+    let mut para_buf = String::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e) | quick_xml::events::Event::Empty(ref e)) => {
+                match e.name().as_ref() {
+                    b"w:p" => {
+                        in_paragraph = true;
+                    }
+                    b"w:br" if in_paragraph => {
+                        para_buf.push('\n');
+                    }
+                    b"w:tab" if in_paragraph => {
+                        para_buf.push('\t');
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) if e.name().as_ref() == b"w:p" => {
+                if !para_buf.trim().is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(para_buf.trim_end());
+                }
+                para_buf.clear();
+                in_paragraph = false;
+            }
+            Ok(quick_xml::events::Event::Text(ref e)) if in_paragraph => {
+                if let Ok(text) = e.unescape() {
+                    para_buf.push_str(&text);
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(e) => return Err(format!("docx_xml_error: {}", e)),
+            _ => {}
+        }
+        buf.clear();
+    }
+    let result = output.trim().to_string();
+    if result.is_empty() {
+        return Err("docx_empty: no text content found in document".to_string());
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReadFileResult {
-    content_hash: String,
-    preview: String,
-    size_bytes: u64,
+    pub content: String,
+    pub raw_file_hash: String,
+    pub size_bytes: u64,
+    pub file_format: Option<String>,
 }
 
 pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<ReadFileResult, rmcp::ErrorData> {
     let path = Path::new(path_str);
 
+    // If the requested path doesn't exist, try to find a file with the same name inside
+    // any allowed-paths directory (e.g. the Docker host-files mount). This transparently
+    // remaps host paths like /Users/.../Downloads/foo.pdf → /home/zemtik/host-files/foo.pdf
+    // without requiring the caller to know the container path.
+    let effective_path_str: String;
+    let path = if !path.exists() {
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Only remap when exactly one candidate exists across all allowed dirs.
+        // Multiple matches would mean ambiguity — we cannot know which file the
+        // user meant, so we don't remap and let canonicalize() return file_not_found.
+        let remapped = if !filename.is_empty() {
+            let candidates: Vec<_> = state.allowed_paths.iter().filter_map(|dir| {
+                let candidate = dir.join(filename);
+                if candidate.exists() { Some(candidate) } else { None }
+            }).collect();
+            if candidates.len() == 1 { candidates.into_iter().next() } else { None }
+        } else {
+            None
+        };
+        match remapped {
+            Some(p) => { effective_path_str = p.to_string_lossy().into_owned(); Path::new(&effective_path_str) }
+            None => path,
+        }
+    } else {
+        path
+    };
+
     // P0 security: deny access to ~/.zemtik/ (signing key protection)
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical = path.canonicalize().map_err(|_| rmcp::ErrorData::new(
+        rmcp::model::ErrorCode(-32002),
+        format!("file_not_found: '{}' does not exist or is not accessible. On macOS, right-click the file in Finder → hold Option → Copy Pathname to get the correct path.", path_str),
+        None,
+    ))?;
     if canonical.starts_with(&state.zemtik_home) {
         return Err(rmcp::ErrorData::new(
             rmcp::model::ErrorCode(-32002),
@@ -907,10 +1170,9 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         }
         // STDIO + empty allowlist → allow all (except the P0 key-protection above)
     } else {
-        let path_str_norm = canonical.to_string_lossy();
-        let allowed = state.allowed_paths.iter().any(|prefix| {
-            path_str_norm.starts_with(prefix.as_str())
-        });
+        // Component-aware prefix check — Path::starts_with prevents string-prefix bypasses
+        // (e.g. /allowed/dir-evil/ would not match prefix /allowed/dir).
+        let allowed = state.allowed_paths.iter().any(|dir| canonical.starts_with(dir));
         if !allowed {
             return Err(rmcp::ErrorData::new(
                 rmcp::model::ErrorCode(-32002),
@@ -920,53 +1182,114 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         }
     }
 
-    // Metadata check and subsequent read use canonical — decision and access must be on the same file.
-    let metadata = std::fs::metadata(&canonical).map_err(|e| rmcp::ErrorData::new(
+    // Open once — hold the fd open across magic detection, size check, and full read.
+    // This eliminates TOCTOU: all three operations are on the same inode via the same fd.
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(&canonical).map_err(|e| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
-        format!("file_not_found_or_permission_denied: {}", e),
+        format!("file_open_error: {}", e),
         None,
     ))?;
 
-    if metadata.len() > FILE_SIZE_CAP {
+    // Read 8 magic bytes for format detection, then rewind.
+    let mut magic = [0u8; 8];
+    let magic_len = file.read(&mut magic).unwrap_or(0);
+    let fmt = detect_format(&canonical, &magic[..magic_len]);
+    file.seek(SeekFrom::Start(0)).map_err(|e| rmcp::ErrorData::new(
+        rmcp::model::ErrorCode(-32002),
+        format!("file_seek_error: {}", e),
+        None,
+    ))?;
+
+    let effective_cap = fmt.size_cap();
+
+    // Stat the open fd — same inode as the magic read.
+    let metadata = file.metadata().map_err(|e| rmcp::ErrorData::new(
+        rmcp::model::ErrorCode(-32002),
+        format!("file_stat_error: {}", e),
+        None,
+    ))?;
+
+    if metadata.len() > effective_cap {
         return Err(rmcp::ErrorData::new(
             rmcp::model::ErrorCode(-32003),
             format!(
-                "file_too_large: {} bytes exceeds 10MB cap",
-                metadata.len()
+                "file_too_large: {} bytes exceeds {}MB cap for {} files",
+                metadata.len(),
+                effective_cap / (1024 * 1024),
+                fmt.as_str(),
             ),
             None,
         ));
     }
 
-    // Bounded read: prevents TOCTOU — file may grow between metadata check and read.
-    // We read at most FILE_SIZE_CAP+1 bytes; if we get more, the file grew past the cap.
-    use std::io::Read as _;
-    let file = std::fs::File::open(&canonical).map_err(|e| rmcp::ErrorData::new(
-        rmcp::model::ErrorCode(-32002),
-        format!("file_open_error: {}", e),
-        None,
-    ))?;
+    // Bounded read from the already-open fd.
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(FILE_SIZE_CAP + 1).read_to_end(&mut bytes).map_err(|e| rmcp::ErrorData::new(
+    file.take(effective_cap + 1).read_to_end(&mut bytes).map_err(|e| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
         format!("file_read_error: {}", e),
         None,
     ))?;
-    if bytes.len() as u64 > FILE_SIZE_CAP {
+    if bytes.len() as u64 > effective_cap {
         return Err(rmcp::ErrorData::new(
             rmcp::model::ErrorCode(-32003),
-            format!("file_too_large: read {} bytes exceeds 10MB cap", bytes.len()),
+            format!("file_too_large: read {} bytes exceeds cap for {} files", bytes.len(), fmt.as_str()),
             None,
         ));
     }
 
-    let content_hash = sha256_hex(&bytes);
-    let preview = truncate(&String::from_utf8_lossy(&bytes), PREVIEW_LEN);
+    let raw_file_hash = sha256_hex(&bytes);
+    let size_bytes = bytes.len() as u64;
+
+    // Extracted text can expand beyond the raw file size (e.g. dense PDF with
+    // embedded fonts). Cap extracted output at the same envelope as the file cap
+    // so we never transport an unbounded String to the caller.
+    let check_extracted = |text: String, fmt_name: &'static str| -> Result<String, rmcp::ErrorData> {
+        if text.len() as u64 > FILE_SIZE_CAP_DOCUMENT {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                format!(
+                    "extracted_too_large: {} extracted text exceeds {} MB limit",
+                    fmt_name,
+                    FILE_SIZE_CAP_DOCUMENT / (1024 * 1024),
+                ),
+                None,
+            ));
+        }
+        Ok(text)
+    };
+
+    let (content, file_format_str) = match fmt {
+        FileFormat::Pdf => {
+            let text = extract_pdf_text(&bytes).map_err(|e| rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                e,
+                None,
+            ))?;
+            drop(bytes); // release raw PDF bytes before size-checking extracted text
+            (check_extracted(text, "pdf")?, Some("pdf".to_string()))
+        }
+        FileFormat::Docx => {
+            let text = extract_docx_text(&bytes).map_err(|e| rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                e,
+                None,
+            ))?;
+            drop(bytes); // release raw DOCX bytes before size-checking extracted text
+            (check_extracted(text, "docx")?, Some("docx".to_string()))
+        }
+        FileFormat::Text => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            drop(bytes);
+            (check_extracted(text, "text")?, Some("text".to_string()))
+        }
+    };
 
     Ok(ReadFileResult {
-        content_hash,
-        preview,
-        size_bytes: bytes.len() as u64,
+        content,
+        raw_file_hash,
+        size_bytes,
+        file_format: file_format_str,
     })
 }
 
@@ -975,13 +1298,9 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
 /// input and output (not JSON wrappers) — used directly in the signed message.
 fn sign_and_write(
     state: &McpHandlerState,
-    tool_name: String,
-    input_hash: String,
-    output_hash: String,
-    duration_ms: u64,
-    preview_override_in: Option<String>,
-    preview_override_out: Option<String>,
+    p: AttestParams,
 ) -> anyhow::Result<()> {
+    let AttestParams { tool_name, input_hash, output_hash, duration_ms, preview_in: preview_override_in, preview_out: preview_override_out, file_format } = p;
     let ts = Utc::now().to_rfc3339();
     let receipt_id = Uuid::new_v4().to_string();
 
@@ -1005,9 +1324,9 @@ fn sign_and_write(
     let sig_hex = format!("{}:{}", sig.r_b8.x, sig.s);
 
     // Use caller-supplied plaintext previews when available (e.g. ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true
-    // on zemtik_analyze); otherwise fall back to the first PREVIEW_LEN chars of the hash/content.
-    let preview_in = preview_override_in.unwrap_or_else(|| truncate(&input_hash, PREVIEW_LEN));
-    let preview_out = preview_override_out.unwrap_or_else(|| truncate(&output_hash, PREVIEW_LEN));
+    // on zemtik_analyze); otherwise store a sentinel so auditors know preview is disabled, not missing.
+    let preview_in = preview_override_in.unwrap_or_else(|| "[preview disabled]".to_string());
+    let preview_out = preview_override_out.unwrap_or_else(|| "[preview disabled]".to_string());
     let record = McpAuditRecord {
         receipt_id,
         ts,
@@ -1020,6 +1339,7 @@ fn sign_and_write(
         public_key_hex: state.public_key_hex.clone(),
         duration_ms,
         mode: state.mode.as_str().to_string(),
+        file_format,
     };
 
     write_audit_record(&state.audit_db_path, &record)
@@ -1055,6 +1375,16 @@ pub fn open_mcp_audit_db(db_path: &Path) -> anyhow::Result<Connection> {
         );",
     )
     .context("create mcp_audit table")?;
+    // v2 migration: add file_format column for zemtik_read_file format tracking.
+    // Check first via PRAGMA to distinguish "column exists" from real DB errors.
+    let has_file_format: bool = conn
+        .prepare("PRAGMA table_info('mcp_audit')")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|r| r.map(|name| name == "file_format").unwrap_or(false));
+    if !has_file_format {
+        conn.execute_batch("ALTER TABLE mcp_audit ADD COLUMN file_format TEXT;")
+            .context("add file_format column to mcp_audit")?;
+    }
     Ok(conn)
 }
 
@@ -1065,8 +1395,8 @@ pub fn write_audit_record(db_path: &Path, record: &McpAuditRecord) -> anyhow::Re
         "INSERT OR IGNORE INTO mcp_audit \
          (receipt_id, ts, tool_name, input_hash, output_hash, \
           preview_input, preview_output, attestation_sig, public_key_hex, \
-          duration_ms, mode) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+          duration_ms, mode, file_format) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             record.receipt_id,
             record.ts,
@@ -1079,6 +1409,7 @@ pub fn write_audit_record(db_path: &Path, record: &McpAuditRecord) -> anyhow::Re
             record.public_key_hex,
             record.duration_ms as i64,
             record.mode,
+            record.file_format,
         ],
     )
     .context("insert mcp_audit record")?;
@@ -1091,7 +1422,7 @@ pub fn list_mcp_audit_records(db_path: &Path, limit: usize) -> anyhow::Result<Ve
     let mut stmt = conn.prepare(
         "SELECT receipt_id, ts, tool_name, input_hash, output_hash, \
                 preview_input, preview_output, attestation_sig, public_key_hex, \
-                duration_ms, mode \
+                duration_ms, mode, file_format \
          FROM mcp_audit ORDER BY ts DESC LIMIT ?1",
     )?;
     let records = stmt
@@ -1113,10 +1444,40 @@ pub fn list_mcp_audit_records(db_path: &Path, limit: usize) -> anyhow::Result<Ve
                 public_key_hex: row.get(8)?,
                 duration_ms,
                 mode: row.get(10)?,
+                file_format: row.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(records)
+}
+
+pub fn get_mcp_audit_record(db_path: &Path, receipt_id: &str) -> anyhow::Result<Option<McpAuditRecord>> {
+    let conn = open_mcp_audit_db(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT receipt_id, ts, tool_name, input_hash, output_hash, \
+                preview_input, preview_output, attestation_sig, public_key_hex, \
+                duration_ms, mode, file_format \
+         FROM mcp_audit WHERE receipt_id = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![receipt_id], |row| {
+        let duration_raw: i64 = row.get(9)?;
+        let duration_ms = u64::try_from(duration_raw).unwrap_or(0);
+        Ok(McpAuditRecord {
+            receipt_id: row.get(0)?,
+            ts: row.get(1)?,
+            tool_name: row.get(2)?,
+            input_hash: row.get(3)?,
+            output_hash: row.get(4)?,
+            preview_input: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            preview_output: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            attestation_sig: row.get(7)?,
+            public_key_hex: row.get(8)?,
+            duration_ms,
+            mode: row.get(10)?,
+            file_format: row.get(11)?,
+        })
+    })?;
+    rows.next().transpose().map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,6 +1506,7 @@ pub fn run_dry_run(config: &AppConfig) -> anyhow::Result<()> {
         public_key_hex: state.public_key_hex.clone(),
         duration_ms: 0,
         mode: "dry_run".to_string(),
+        file_format: None,
     };
 
     write_audit_record(&config.mcp_audit_db_path, &record)?;
@@ -1165,11 +1527,51 @@ pub fn run_dry_run(config: &AppConfig) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Startup checks (Docker detection, version check)
+// ---------------------------------------------------------------------------
+
+/// Emit a warning to stderr if the anonymizer is enabled but Docker is not running.
+/// Only warns when ZEMTIK_ANONYMIZER_ENABLED=true AND the sidecar address has not been
+/// explicitly overridden (i.e. user is relying on the default localhost Docker container).
+fn warn_if_anonymizer_needs_docker(config: &AppConfig) {
+    if !config.anonymizer_enabled {
+        return;
+    }
+    // If user set an explicit sidecar address, they know what they're doing — skip.
+    if std::env::var("ZEMTIK_ANONYMIZER_SIDECAR_ADDR").is_ok()
+        || std::env::var("ZEMTIK_ANONYMIZER_SIDECAR_URL").is_ok()
+    {
+        return;
+    }
+    // Quick heuristic: check if Docker daemon is reachable by probing its socket.
+    let docker_running = std::path::Path::new("/var/run/docker.sock").exists()
+        || std::path::Path::new("/run/docker.sock").exists()
+        || cfg!(target_os = "windows"); // Docker Desktop on Windows uses named pipes; skip
+    if !docker_running {
+        if config.anonymizer_fallback_regex {
+            eprintln!(
+                "[MCP] WARNING: ZEMTIK_ANONYMIZER_ENABLED=true but Docker does not appear to be running. \
+                 PII anonymization will use the regex fallback (structured PII only, less accurate). \
+                 Start Docker Desktop and re-run 'zemtik mcp' for full sidecar anonymization."
+            );
+        } else {
+            eprintln!(
+                "[MCP] WARNING: ZEMTIK_ANONYMIZER_ENABLED=true but Docker does not appear to be running \
+                 and ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false. The sidecar is unavailable — \
+                 anonymizer_unavailable errors will occur at runtime. \
+                 Start Docker Desktop and re-run 'zemtik mcp' for full sidecar anonymization."
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // STDIO entry point
 // ---------------------------------------------------------------------------
 
 /// Run the MCP server in STDIO mode (Claude Desktop subprocess).
 pub async fn run_mcp_stdio(config: AppConfig) -> anyhow::Result<()> {
+    warn_if_anonymizer_needs_docker(&config);
     let state = Arc::new(McpHandlerState::from_config(&config, true)?);
     eprintln!("[MCP] Starting STDIO server (mode: {})", config.mcp_mode);
     eprintln!("[MCP] Audit DB: {}", config.mcp_audit_db_path.display());
@@ -1236,6 +1638,7 @@ pub fn build_mcp_router(
 }
 
 pub async fn run_mcp_serve(config: AppConfig) -> anyhow::Result<()> {
+    warn_if_anonymizer_needs_docker(&config);
     // Hard startup error: ZEMTIK_MCP_API_KEY required in SSE mode (blank counts as absent)
     if config.mcp_api_key.as_ref().is_none_or(|k| k.trim().is_empty()) {
         anyhow::bail!(
@@ -1464,14 +1867,18 @@ fn builtin_tools(anonymizer_enabled: bool) -> Vec<Tool> {
     let mut tools = vec![
         Tool::new(
             "zemtik_read_file",
-            "Read a file and return its content hash + preview. Zemtik attests the read.",
+            "Read a file and return its full extracted text content with ZK-backed attestation. \
+             Supports PDF (text-layer), DOCX, and plain text. Returns the extracted text, \
+             raw file hash, file size, and detected format. Max 25 MB for PDF/DOCX, 10 MB for text. \
+             Scanned PDFs (image-only) return an error — use docling-mcp for OCR. \
+             To get the file path on macOS: right-click in Finder, hold Option, choose Copy Pathname.",
             {
                 let mut m = serde_json::Map::new();
                 m.insert("type".to_string(), serde_json::json!("object"));
                 m.insert("properties".to_string(), serde_json::json!({
                     "path": {
                         "type": "string",
-                        "description": "Absolute path to file"
+                        "description": "Absolute path to the file. On macOS: right-click in Finder → hold Option → Copy Pathname."
                     }
                 }));
                 m.insert("required".to_string(), serde_json::json!(["path"]));

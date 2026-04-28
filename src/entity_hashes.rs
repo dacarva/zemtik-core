@@ -1,4 +1,4 @@
-/// Canonical SHA-256[:4hex] hashes for the 22 supported entity types.
+/// Canonical SHA-256[:4hex] hashes for the 23 supported entity types.
 ///
 /// Each entry is (entity_type_name, type_hash_4hex) where type_hash_4hex =
 /// hex(SHA256(entity_type.as_bytes())[0..2]).  These values are generated
@@ -27,6 +27,7 @@ pub const ENTITY_HASHES: &[(&str, &str)] = &[
     ("BO_NIT",        "5121"),
     ("UY_CI",         "7f8a"),
     ("VE_CI",         "e41a"),
+    ("PASSPORT",      "02bc"),
 ];
 
 /// Look up the canonical 4-hex type hash for an entity type string.

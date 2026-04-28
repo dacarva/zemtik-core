@@ -242,11 +242,14 @@ Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNN
 | `ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS` | `""` | Comma-separated domains | Domain allowlist for `zemtik_fetch`. Same empty-value semantics as `ZEMTIK_MCP_ALLOWED_PATHS`. |
 | `ZEMTIK_MCP_TOOLS_PATH` | — | file path | Path to `mcp_tools.json` for dynamic tool registration. Omit to use built-in tools only (`zemtik_fetch`, `zemtik_read_file`). |
 
-**Quick start (stdio / Claude Desktop):**
+**Easiest install (Claude Desktop — no terminal):**
+
+Download `zemtik-macos.mcpb` from the [latest release](https://github.com/dacarva/zemtik-core/releases/latest) and double-click it. Claude Desktop installs and configures Zemtik automatically. No env vars required for basic PDF/DOCX reading.
+
+**Quick start (stdio / Claude Desktop — manual):**
 ```bash
 # Add to claude_desktop_config.json mcpServers section:
 # "zemtik": { "command": "zemtik", "args": ["mcp"] }
-export ZEMTIK_MCP_API_KEY=secret
 zemtik mcp
 ```
 

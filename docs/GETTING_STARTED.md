@@ -985,18 +985,39 @@ curl http://localhost:4001/mcp/health
 
 ### Claude Desktop integration
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+> **Node.js 20+ required.** `mcp-remote` depends on `undici` which requires the `File` global
+> (added in Node 20). Claude Desktop inherits your login `PATH`, so `npx` and `node` may resolve
+> to an older version even if Node 20 is installed. The shebang in `npx` is `#!/usr/bin/env node`,
+> so specifying a full path to `npx` is not enough — `node` itself must also resolve to v20+.
+>
+> **Find your Node 20+ bin dir:**
+> ```bash
+> # nvm:
+> nvm which 20 | xargs dirname
+> # Homebrew:
+> echo "$(brew --prefix node@20)/bin"
+> # System / volta / fnm: check `which node` after activating v20+
+> ```
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`, replacing
+`/path/to/node18/bin` with the output of the command above — **both fields are required**:
 
 ```json
 {
   "mcpServers": {
     "zemtik-docker": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:4001/mcp"]
+      "command": "/path/to/node20/bin/npx",
+      "args": ["-y", "mcp-remote", "http://localhost:4001/mcp"],
+      "env": {
+        "PATH": "/path/to/node20/bin:/usr/local/bin:/usr/bin:/bin"
+      }
     }
   }
 }
 ```
+
+- `command` — full path so Claude Desktop spawns v20's npx (not the first `npx` in its own PATH)
+- `env.PATH` — so `mcp-remote`'s `#!/usr/bin/env node` shebang also resolves to v20+
 
 Fully quit and relaunch Claude Desktop. The tools appear in the composer tool list.
 
@@ -1026,6 +1047,38 @@ Expected: Claude calls `zemtik_analyze` first, then summarizes using only `[[Z:.
 ```bash
 curl -s -H "Authorization: Bearer $ZEMTIK_MCP_API_KEY" http://localhost:4001/mcp/audit
 ```
+
+### Reading local files from Docker
+
+`zemtik_read_file` runs inside the Docker container, which cannot see your host filesystem by
+default. The `docker-compose.yml` mounts one host directory into the container at
+`/home/zemtik/host-files/` (read-only), and `ZEMTIK_MCP_ALLOWED_PATHS` restricts
+`zemtik_read_file` to that directory.
+
+**Default:** `$HOME/Downloads` is mounted. Docker Compose does not expand `~`, so the path
+uses `${HOME}` explicitly. Restart with `--build` is not needed — just `up -d`.
+
+```bash
+# Use the default (~/Downloads → /home/zemtik/host-files/)
+ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile mcp --profile anonymizer up -d
+
+# Or override the host directory
+ZEMTIK_MCP_HOST_DIR=/path/to/your/documents \
+  ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile mcp --profile anonymizer up -d
+```
+
+Then ask Claude to read a file using its **container path**:
+
+```text
+Please use zemtik_read_file on /home/zemtik/host-files/SPA Mock.pdf and summarize it.
+```
+
+**Limitation:** Only files inside the mounted directory are accessible. Files outside it
+(e.g. `/Users/you/Desktop/`) are blocked by `ZEMTIK_MCP_ALLOWED_PATHS`. To access a
+different directory, set `ZEMTIK_MCP_HOST_DIR` to that path and restart the `mcp` service.
+
+**Alternative:** For unrestricted host file access without Docker isolation, use the stdio
+deployment instead (`zemtik mcp` via the installed binary — see [MCP stdio setup](#mcp-attestation-proxy-claude-desktop)).
 
 ### Why Claude Desktop chat is NOT anonymized
 

@@ -48,11 +48,14 @@ enum Commands {
     },
     /// Run MCP HTTP server on :4001 (Streamable HTTP transport)
     McpServe,
-    /// List recent MCP audit records
+    /// List recent MCP audit records (use --id <uuid> to inspect a single receipt)
     ListMcp {
         /// Maximum number of records to show (default: 20)
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Show full detail for a single receipt by UUID
+        #[arg(long)]
+        id: Option<String>,
     },
 }
 
@@ -145,7 +148,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::McpServe) => {
             return mcp_proxy::run_mcp_serve(app_config).await;
         }
-        Some(Commands::ListMcp { limit }) => {
+        Some(Commands::ListMcp { limit, id }) => {
+            if let Some(receipt_id) = id {
+                return run_show_mcp_receipt(app_config, receipt_id);
+            }
             return run_list_mcp(app_config, *limit);
         }
         _ => {}
@@ -489,6 +495,107 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
             direct_count, det_count, llm_count, list.len()
         );
     }
+    Ok(())
+}
+
+/// Strip ANSI escape sequences and replace control characters with safe placeholders
+/// so terminal preview output cannot be spoofed or corrupted by embedded escapes.
+fn sanitize_preview(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC — swallow the escape sequence (CSI, OSC, or bare ESC)
+            '\x1b' => {
+                match chars.peek() {
+                    Some('[') => {
+                        // CSI sequence: ESC [ ... final-byte (0x40–0x7E)
+                        chars.next(); // consume '['
+                        for c2 in chars.by_ref() {
+                            if ('\x40'..='\x7e').contains(&c2) { break; }
+                        }
+                    }
+                    Some(']') => {
+                        // OSC sequence: ESC ] ... ST (BEL or ESC \)
+                        chars.next(); // consume ']'
+                        for c2 in chars.by_ref() {
+                            if c2 == '\x07' || c2 == '\x1b' { break; }
+                        }
+                    }
+                    _ => {} // bare ESC — drop it
+                }
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Other C0/C1 control bytes — replace with placeholder
+            c if (c as u32) < 0x20 || (c as u32 >= 0x7f && c as u32 <= 0x9f) => {
+                out.push('\u{FFFD}');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn run_show_mcp_receipt(config: config::AppConfig, receipt_id: &str) -> anyhow::Result<()> {
+    let record = mcp_proxy::get_mcp_audit_record(&config.mcp_audit_db_path, receipt_id)
+        .context("query MCP audit DB")?;
+
+    let r = match record {
+        Some(r) => r,
+        None => {
+            eprintln!("Receipt not found: {}", receipt_id);
+            std::process::exit(1);
+        }
+    };
+
+    let sig_verified = if r.attestation_sig.contains(':') { "present" } else { "missing" };
+    let format_str = r.file_format.as_deref().unwrap_or("—");
+
+    println!("┌─────────────────────────────────────────────────────────────────┐");
+    println!("│  MCP Audit Receipt                                              │");
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  ID          {}  │", r.receipt_id);
+    println!("│  Tool        {:<52} │", r.tool_name);
+    println!("│  Timestamp   {:<52} │", r.ts);
+    println!("│  Duration    {:<52} │", format!("{}ms", r.duration_ms));
+    println!("│  Mode        {:<52} │", r.mode);
+    println!("│  Format      {:<52} │", format_str);
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Hashes                                                         │");
+    println!("│  input   {}  │", r.input_hash);
+    println!("│  output  {}  │", r.output_hash);
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Attestation   {}                                              │", sig_verified);
+    if !r.attestation_sig.is_empty() {
+        let sig_parts: Vec<&str> = r.attestation_sig.splitn(2, ':').collect();
+        if sig_parts.len() == 2 {
+            println!("│  pubkey  {:<58} │", &r.public_key_hex[..r.public_key_hex.len().min(60)]);
+            println!("│  sig     {:<58} │", &sig_parts[1][..sig_parts[1].len().min(60)]);
+        }
+    }
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Preview input                                                  │");
+    if r.preview_input.is_empty() {
+        println!("│  (none)                                                         │");
+    } else {
+        let safe_in = sanitize_preview(&r.preview_input);
+        for chunk in safe_in.chars().collect::<Vec<_>>().chunks(65) {
+            println!("│  {:<65} │", chunk.iter().collect::<String>());
+        }
+    }
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Preview output                                                 │");
+    if r.preview_output.is_empty() {
+        println!("│  (none)                                                         │");
+    } else {
+        let safe_out = sanitize_preview(&r.preview_output);
+        for chunk in safe_out.chars().collect::<Vec<_>>().chunks(65) {
+            println!("│  {:<65} │", chunk.iter().collect::<String>());
+        }
+    }
+    println!("└─────────────────────────────────────────────────────────────────┘");
     Ok(())
 }
 

@@ -181,7 +181,10 @@ services:
       - ZEMTIK_MCP_MODE=${ZEMTIK_MCP_MODE:-tunnel}
       - ZEMTIK_MCP_FETCH_TIMEOUT_SECS=${ZEMTIK_MCP_FETCH_TIMEOUT_SECS:-30}
       - ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS=${ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS:-}
-      - ZEMTIK_MCP_ALLOWED_PATHS=${ZEMTIK_MCP_ALLOWED_PATHS:-}
+      # Host file access: set ZEMTIK_MCP_HOST_DIR on the host (default: ~/Downloads).
+      # Files land at /home/zemtik/host-files/ inside the container.
+      # ZEMTIK_MCP_ALLOWED_PATHS restricts which paths zemtik_read_file may open.
+      - ZEMTIK_MCP_ALLOWED_PATHS=/home/zemtik/host-files/**
       - ZEMTIK_SKIP_CIRCUIT_VALIDATION=1
       - ZEMTIK_SKIP_DB_VALIDATION=1
       # Anonymizer: enables zemtik_analyze tool. Requires --profile anonymizer (sidecar on port 50051).
@@ -194,6 +197,7 @@ services:
       # Debug: store plaintext input/output in mcp_audit.db previews. Disable in production.
       - ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=${ZEMTIK_ANONYMIZER_DEBUG_PREVIEW:-false}
     volumes:
+      - ${ZEMTIK_MCP_HOST_DIR:-${HOME}/Downloads}:/home/zemtik/host-files:ro
       - zemtik_keys:/home/zemtik/.zemtik/keys
       - zemtik_mcp_audit:/home/zemtik/.zemtik
     healthcheck:
