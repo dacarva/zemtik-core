@@ -1124,11 +1124,15 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
     let effective_path_str: String;
     let path = if !path.exists() {
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Only remap when exactly one candidate exists across all allowed dirs.
+        // Multiple matches would mean ambiguity — we cannot know which file the
+        // user meant, so we don't remap and let canonicalize() return file_not_found.
         let remapped = if !filename.is_empty() {
-            state.allowed_paths.iter().find_map(|dir| {
+            let candidates: Vec<_> = state.allowed_paths.iter().filter_map(|dir| {
                 let candidate = dir.join(filename);
                 if candidate.exists() { Some(candidate) } else { None }
-            })
+            }).collect();
+            if candidates.len() == 1 { candidates.into_iter().next() } else { None }
         } else {
             None
         };
@@ -1237,6 +1241,24 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
     let raw_file_hash = sha256_hex(&bytes);
     let size_bytes = bytes.len() as u64;
 
+    // Extracted text can expand beyond the raw file size (e.g. dense PDF with
+    // embedded fonts). Cap extracted output at the same envelope as the file cap
+    // so we never transport an unbounded String to the caller.
+    let check_extracted = |text: String, fmt_name: &'static str| -> Result<String, rmcp::ErrorData> {
+        if text.len() as u64 > FILE_SIZE_CAP_DOCUMENT {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode(-32002),
+                format!(
+                    "extracted_too_large: {} extracted text exceeds {} MB limit",
+                    fmt_name,
+                    FILE_SIZE_CAP_DOCUMENT / (1024 * 1024),
+                ),
+                None,
+            ));
+        }
+        Ok(text)
+    };
+
     let (content, file_format_str) = match fmt {
         FileFormat::Pdf => {
             let text = extract_pdf_text(&bytes).map_err(|e| rmcp::ErrorData::new(
@@ -1244,8 +1266,8 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
                 e,
                 None,
             ))?;
-            drop(bytes); // release raw PDF bytes before returning large extracted String
-            (text, Some("pdf".to_string()))
+            drop(bytes); // release raw PDF bytes before size-checking extracted text
+            (check_extracted(text, "pdf")?, Some("pdf".to_string()))
         }
         FileFormat::Docx => {
             let text = extract_docx_text(&bytes).map_err(|e| rmcp::ErrorData::new(
@@ -1253,13 +1275,13 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
                 e,
                 None,
             ))?;
-            drop(bytes); // release raw DOCX bytes before returning extracted String
-            (text, Some("docx".to_string()))
+            drop(bytes); // release raw DOCX bytes before size-checking extracted text
+            (check_extracted(text, "docx")?, Some("docx".to_string()))
         }
         FileFormat::Text => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
             drop(bytes);
-            (text, Some("text".to_string()))
+            (check_extracted(text, "text")?, Some("text".to_string()))
         }
     };
 

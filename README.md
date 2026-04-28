@@ -182,7 +182,7 @@ Supported: PDF (text-layer), DOCX, plain text. Max 25 MB for PDF/DOCX, 10 MB for
 
 ### Manual install (developers)
 
-Zemtik ships an MCP server that reads PDF, DOCX, and plain text files with ZK-backed attestation and optional PII anonymization. Every tool call is signed with a BabyJubJub EdDSA signature logged to `~/.zemtik/mcp_audit.db`.
+Zemtik ships an MCP server that reads PDF, DOCX, and plain text files with optional PII anonymization. Every tool call is signed with a BabyJubJub EdDSA signature and logged to `~/.zemtik/mcp_audit.db` as a tamper-evident audit trail (no ZK proof is generated for MCP reads).
 
 ```bash
 export ZEMTIK_MCP_API_KEY=$(openssl rand -hex 32)
@@ -193,7 +193,7 @@ ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp
 |---|---|---|
 | `zemtik mcp` | stdio | Claude Desktop (local binary, no Docker needed) |
 | `zemtik mcp-serve` | Streamable HTTP on `:4001` | Docker, IDE plugins, CI |
-| `zemtik list-mcp --id <uuid>` | stdio | Inspect a single MCP receipt by UUID |
+| `zemtik list-mcp --id <uuid>` | local audit DB | Inspect a single MCP receipt by UUID |
 
 See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for full setup, audit record schema, and governed mode.
 

@@ -267,10 +267,17 @@ jobs:
           # manifest.json entry_point "zemtik" matches on macOS/Linux; Windows uses "zemtik.exe".
           if [ "${{ matrix.bin_name }}" = "zemtik.exe" ]; then
             # Windows: keep zemtik.exe as-is; mcpb resolves "zemtik" entry_point to zemtik.exe on Windows.
-            true
+            if [ ! -f "packages/zemtik-mcp/zemtik.exe" ]; then
+              echo "ERROR: packages/zemtik-mcp/zemtik.exe not found" >&2; exit 1
+            fi
           else
-            mv packages/zemtik-mcp/${{ matrix.bin_name }} packages/zemtik-mcp/zemtik 2>/dev/null || true
-            chmod +x packages/zemtik-mcp/zemtik 2>/dev/null || true
+            if [ ! -f "packages/zemtik-mcp/${{ matrix.bin_name }}" ]; then
+              echo "ERROR: packages/zemtik-mcp/${{ matrix.bin_name }} not found" >&2; exit 1
+            fi
+            if [ "${{ matrix.bin_name }}" != "zemtik" ]; then
+              mv "packages/zemtik-mcp/${{ matrix.bin_name }}" packages/zemtik-mcp/zemtik
+            fi
+            chmod +x packages/zemtik-mcp/zemtik
           fi
 
       - name: Pack .mcpb

@@ -498,6 +498,46 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Strip ANSI escape sequences and replace control characters with safe placeholders
+/// so terminal preview output cannot be spoofed or corrupted by embedded escapes.
+fn sanitize_preview(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC — swallow the escape sequence (CSI, OSC, or bare ESC)
+            '\x1b' => {
+                match chars.peek() {
+                    Some('[') => {
+                        // CSI sequence: ESC [ ... final-byte (0x40–0x7E)
+                        chars.next(); // consume '['
+                        for c2 in chars.by_ref() {
+                            if ('\x40'..='\x7e').contains(&c2) { break; }
+                        }
+                    }
+                    Some(']') => {
+                        // OSC sequence: ESC ] ... ST (BEL or ESC \)
+                        chars.next(); // consume ']'
+                        for c2 in chars.by_ref() {
+                            if c2 == '\x07' || c2 == '\x1b' { break; }
+                        }
+                    }
+                    _ => {} // bare ESC — drop it
+                }
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Other C0/C1 control bytes — replace with placeholder
+            c if (c as u32) < 0x20 || (c as u32 >= 0x7f && c as u32 <= 0x9f) => {
+                out.push('\u{FFFD}');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn run_show_mcp_receipt(config: config::AppConfig, receipt_id: &str) -> anyhow::Result<()> {
     let record = mcp_proxy::get_mcp_audit_record(&config.mcp_audit_db_path, receipt_id)
         .context("query MCP audit DB")?;
@@ -540,7 +580,8 @@ fn run_show_mcp_receipt(config: config::AppConfig, receipt_id: &str) -> anyhow::
     if r.preview_input.is_empty() {
         println!("│  (none)                                                         │");
     } else {
-        for chunk in r.preview_input.chars().collect::<Vec<_>>().chunks(65) {
+        let safe_in = sanitize_preview(&r.preview_input);
+        for chunk in safe_in.chars().collect::<Vec<_>>().chunks(65) {
             println!("│  {:<65} │", chunk.iter().collect::<String>());
         }
     }
@@ -549,7 +590,8 @@ fn run_show_mcp_receipt(config: config::AppConfig, receipt_id: &str) -> anyhow::
     if r.preview_output.is_empty() {
         println!("│  (none)                                                         │");
     } else {
-        for chunk in r.preview_output.chars().collect::<Vec<_>>().chunks(65) {
+        let safe_out = sanitize_preview(&r.preview_output);
+        for chunk in safe_out.chars().collect::<Vec<_>>().chunks(65) {
             println!("│  {:<65} │", chunk.iter().collect::<String>());
         }
     }
