@@ -1,6 +1,8 @@
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::Context;
 use babyjubjub_rs::PrivateKey;
@@ -42,11 +44,11 @@ pub fn load_or_generate_key(keys_dir: &Path) -> anyhow::Result<PrivateKey> {
     let key_path = keys_dir.join("bank_sk");
     let seed: [u8; 32] = rand::thread_rng().gen();
 
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&key_path)
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    open_opts.mode(0o600);
+    match open_opts.open(&key_path)
     {
         Ok(mut f) => {
             // We won the creation race — write the seed, clean up on failure.
