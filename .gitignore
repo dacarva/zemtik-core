@@ -30,6 +30,8 @@ audit/
 .kiro/
 .mcp.json
 .opencode.json
+.opencode/
+opencode.jsonc
 .windsurfrules
 
 # Debugging
@@ -46,6 +48,9 @@ dist/
 
 # Local QA and scratch files (not committed)
 tmp/
+
+# Distribution binary (built artifact — not committed)
+packages/zemtik-mcp/zemtik
 .gstack/
 zemtik-course/
 skills-lock.json
