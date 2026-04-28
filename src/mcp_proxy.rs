@@ -1069,36 +1069,28 @@ fn extract_docx_text(bytes: &[u8]) -> Result<String, String> {
                     b"w:p" => {
                         in_paragraph = true;
                     }
-                    b"w:br" => {
-                        if in_paragraph {
-                            para_buf.push('\n');
-                        }
+                    b"w:br" if in_paragraph => {
+                        para_buf.push('\n');
                     }
-                    b"w:tab" => {
-                        if in_paragraph {
-                            para_buf.push('\t');
-                        }
+                    b"w:tab" if in_paragraph => {
+                        para_buf.push('\t');
                     }
                     _ => {}
                 }
             }
-            Ok(quick_xml::events::Event::End(ref e)) => {
-                if e.name().as_ref() == b"w:p" {
-                    if !para_buf.trim().is_empty() {
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        output.push_str(para_buf.trim_end());
+            Ok(quick_xml::events::Event::End(ref e)) if e.name().as_ref() == b"w:p" => {
+                if !para_buf.trim().is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
                     }
-                    para_buf.clear();
-                    in_paragraph = false;
+                    output.push_str(para_buf.trim_end());
                 }
+                para_buf.clear();
+                in_paragraph = false;
             }
-            Ok(quick_xml::events::Event::Text(ref e)) => {
-                if in_paragraph {
-                    if let Ok(text) = e.unescape() {
-                        para_buf.push_str(&text);
-                    }
+            Ok(quick_xml::events::Event::Text(ref e)) if in_paragraph => {
+                if let Ok(text) = e.unescape() {
+                    para_buf.push_str(&text);
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
