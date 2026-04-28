@@ -271,7 +271,7 @@ jobs:
           fi
 
       - name: Pack .mcpb
-        run: mcpb pack packages/zemtik-mcp/ --output ${{ matrix.mcpb_name }}
+        run: mcpb pack packages/zemtik-mcp/ ${{ matrix.mcpb_name }}
 
       - name: Upload .mcpb artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
