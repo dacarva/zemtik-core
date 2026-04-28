@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.0] - 2026-04-28
+
+### Added
+- **PDF and DOCX reading via `zemtik_read_file`**: Claude can now read PDF files (text-layer, up to 25 MB) and DOCX files (up to 25 MB) in addition to plain text. Scanned PDFs (image-only, no text layer), password-protected PDFs, and corrupted DOCX files return clear, user-friendly errors.
+- **`.mcpb` distribution**: Zemtik ships as a double-click-to-install `.mcpb` bundle for Claude Desktop on macOS, Linux, and Windows. No terminal, no JSON editing required.
+- **`zc list-mcp --id <uuid>`**: Auditors can now view a single MCP receipt in formatted output (hashes, attestation signature, input/output previews) without writing SQL. Example: `zc list-mcp --id 3f8903d2-...`.
+- **Magic byte format detection**: files without `.pdf` or `.docx` extensions are correctly identified by their binary signature.
+- **File format audit column**: `mcp_audit.db` now records `file_format` (`pdf`, `docx`, or `text`) for every `zemtik_read_file` call.
+- **Docker sidecar startup warning**: if `ZEMTIK_ANONYMIZER_ENABLED=true` and the Docker socket is not reachable at startup, zemtik emits a clear setup message to stderr.
+
+### Fixed
+- **Anonymizer trust boundary**: when `ZEMTIK_ANONYMIZER_ENABLED=true` and the anonymizer fails with no fallback, zemtik now returns `anonymizer_unavailable` to Claude instead of silently passing raw PII content.
+- **`zemtik_read_file` response format**: file content is returned as plain text in the first content block (previously a JSON blob that Claude Desktop misidentified as binary).
+- **MCP instructions**: `with_instructions()` text accurately describes pasted-text vs. file-path PII isolation model.
+- **Metadata label**: `size=` renamed to `file_size=` in the attestation metadata line.
+
 ## [0.17.2] - 2026-04-27
 
 ### Fixed
