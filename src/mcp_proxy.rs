@@ -371,8 +371,22 @@ impl ServerHandler for ZemtikMcpHandler {
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_server_info(Implementation::from_build_env())
         .with_instructions({
-            let base = "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
-                        Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.";
+            // Derive host-file hint from the first allowed path glob, stripping the trailing /**
+            // so Claude gets a concrete directory to reference (e.g. /home/zemtik/host-files).
+            let host_files_hint = self.state.allowed_paths.first().map(|p| {
+                let dir = p.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
+                format!(
+                    " Host files are mounted at '{dir}/'. \
+                     When the user references a local file path, translate it to '{dir}/<filename>' \
+                     before calling zemtik_read_file.",
+                    dir = dir
+                )
+            }).unwrap_or_default();
+
+            let base = format!(
+                "Zemtik MCP Proxy: attests every tool call with BabyJubJub EdDSA. \
+                 Use zemtik_read_file to read files, zemtik_fetch to HTTP GET URLs.{host_files_hint}"
+            );
             let analyze_hint = if self.state.anonymizer_enabled {
                 " When the user asks you to analyze or process text that contains PII \
                  (names, IDs, emails, phone numbers, IBANs, addresses), call zemtik_analyze \
@@ -1104,6 +1118,30 @@ pub struct ReadFileResult {
 pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<ReadFileResult, rmcp::ErrorData> {
     let path = Path::new(path_str);
 
+    // If the requested path doesn't exist, try to find a file with the same name inside
+    // any allowed-paths directory (e.g. the Docker host-files mount). This transparently
+    // remaps host paths like /Users/.../Downloads/foo.pdf → /home/zemtik/host-files/foo.pdf
+    // without requiring the caller to know the container path.
+    let effective_path_str: String;
+    let path = if !path.exists() {
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let remapped = if !filename.is_empty() {
+            state.allowed_paths.iter().find_map(|allowed| {
+                let dir = allowed.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
+                let candidate = Path::new(dir).join(filename);
+                if candidate.exists() { Some(candidate) } else { None }
+            })
+        } else {
+            None
+        };
+        match remapped {
+            Some(p) => { effective_path_str = p.to_string_lossy().into_owned(); Path::new(&effective_path_str) }
+            None => path,
+        }
+    } else {
+        path
+    };
+
     // P0 security: deny access to ~/.zemtik/ (signing key protection)
     let canonical = path.canonicalize().map_err(|_| rmcp::ErrorData::new(
         rmcp::model::ErrorCode(-32002),
@@ -1132,7 +1170,9 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
     } else {
         let path_str_norm = canonical.to_string_lossy();
         let allowed = state.allowed_paths.iter().any(|prefix| {
-            path_str_norm.starts_with(prefix.as_str())
+            // Strip glob suffixes (/** or /*) so "/allowed/dir/**" matches "/allowed/dir/file.pdf"
+            let dir = prefix.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
+            path_str_norm.starts_with(dir)
         });
         if !allowed {
             return Err(rmcp::ErrorData::new(
