@@ -88,10 +88,11 @@ jobs:
 
       - name: Install OpenSSL (Windows)
         if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
         run: |
           vcpkg install openssl:x64-windows-static-md
-          echo "OPENSSL_DIR=C:/vcpkg/installed/x64-windows-static-md" >> $GITHUB_ENV
-          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+          "OPENSSL_DIR=C:/vcpkg/installed/x64-windows-static-md" >> $env:GITHUB_ENV
+          "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.extra_args }}
@@ -110,7 +111,8 @@ jobs:
 
           mkdir -p "dist/$ARCHIVE_NAME"
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}${BIN_SUFFIX}" "dist/$ARCHIVE_NAME/"
-          if [ -f install.sh ]; then cp install.sh "dist/$ARCHIVE_NAME/"; fi
+          if [ ! -f install.sh ]; then echo "ERROR: install.sh not found"; exit 1; fi
+          cp install.sh "dist/$ARCHIVE_NAME/"
           cp config.example.yaml "dist/$ARCHIVE_NAME/"
           if [ -f README.md ]; then cp README.md "dist/$ARCHIVE_NAME/"; fi
 
@@ -282,7 +284,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build, package-mcpb]
+    needs: [eval, build, docker, docker-sidecar, package-mcpb]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

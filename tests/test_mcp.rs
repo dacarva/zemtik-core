@@ -56,6 +56,7 @@ fn test_mcp_audit_record_schema() {
     assert_eq!(back.receipt_id, "test-uuid");
     assert_eq!(back.tool_name, "zemtik_read_file");
     assert_eq!(back.duration_ms, 42);
+    assert_eq!(back.file_format, record.file_format);
 }
 
 #[test]
@@ -84,4 +85,5 @@ fn test_mcp_audit_db_write_read() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].receipt_id, "round-trip-uuid");
     assert_eq!(records[0].tool_name, "zemtik_read_file");
+    assert_eq!(records[0].file_format, record.file_format);
 }

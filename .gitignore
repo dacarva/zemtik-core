@@ -49,8 +49,9 @@ dist/
 # Local QA and scratch files (not committed)
 tmp/
 
-# Distribution binary (built artifact — not committed)
+# Distribution binaries (built artifacts — not committed)
 packages/zemtik-mcp/zemtik
+packages/zemtik-mcp/zemtik.exe
 .gstack/
 zemtik-course/
 skills-lock.json

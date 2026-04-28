@@ -5,9 +5,12 @@
 # creates ~/.zemtik structure, and adds the binary dir to PATH in the
 # relevant shell rc file.
 #
-# Claude Desktop users: the easiest install is to download zemtik-macos.mcpb
-# from the latest GitHub release and double-click it. This script is for
-# developers who want the full CLI or want to build from source.
+# Claude Desktop users: the easiest install is to download the .mcpb bundle
+# matching your OS from the latest GitHub release and double-click it:
+#   macOS   → zemtik-macos.mcpb
+#   Linux   → zemtik-linux.mcpb
+#   Windows → zemtik-windows.mcpb
+# This script is for developers who want the full CLI or want to build from source.
 
 set -e
 

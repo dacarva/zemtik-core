@@ -193,6 +193,7 @@ ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp
 |---|---|---|
 | `zemtik mcp` | stdio | Claude Desktop (local binary, no Docker needed) |
 | `zemtik mcp-serve` | Streamable HTTP on `:4001` | Docker, IDE plugins, CI |
+| `zemtik list-mcp --id <uuid>` | stdio | Inspect a single MCP receipt by UUID |
 
 See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for full setup, audit record schema, and governed mode.
 

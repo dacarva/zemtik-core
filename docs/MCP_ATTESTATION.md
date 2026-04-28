@@ -39,7 +39,7 @@ To disable anonymization (reads succeed without Docker, but no PII protection):
 
 ---
 
-Zemtik ships an MCP server that makes Claude Desktop safe for regulated industries. Every tool call is attested with a BabyJubJub EdDSA signature and logged to a tamper-evident audit database. In v0.17.0, `zemtik_read_file` supports PDF and DOCX extraction with hash separation (content hash vs. raw file hash). The `zemtik_analyze` tool adds PII tokenization: Claude calls it before reasoning on sensitive documents, so raw names, tax IDs, and financial identifiers never appear in Claude's context.
+Zemtik ships an MCP server that makes Claude Desktop safe for regulated industries. Every tool call is attested with a BabyJubJub EdDSA signature and logged to a tamper-evident audit database. In v0.18.0, `zemtik_read_file` supports PDF and DOCX extraction with hash separation (content hash vs. raw file hash). The `zemtik_analyze` tool adds PII tokenization: Claude calls it before reasoning on sensitive documents, so raw names, tax IDs, and financial identifiers never appear in Claude's context.
 
 ## How attestation works
 

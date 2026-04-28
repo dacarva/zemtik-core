@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **PDF and DOCX reading via `zemtik_read_file`**: Claude can now read PDF files (text-layer, up to 25 MB) and DOCX files (up to 25 MB) in addition to plain text. Scanned PDFs (image-only, no text layer), password-protected PDFs, and corrupted DOCX files return clear, user-friendly errors.
 - **`.mcpb` distribution**: Zemtik ships as a double-click-to-install `.mcpb` bundle for Claude Desktop on macOS, Linux, and Windows. No terminal, no JSON editing required.
-- **`zc list-mcp --id <uuid>`**: Auditors can now view a single MCP receipt in formatted output (hashes, attestation signature, input/output previews) without writing SQL. Example: `zc list-mcp --id 3f8903d2-...`.
+- **`zemtik list-mcp --id <uuid>`**: Auditors can now view a single MCP receipt in formatted output (hashes, attestation signature, input/output previews) without writing SQL. Example: `zemtik list-mcp --id 3f8903d2-...`.
 - **Magic byte format detection**: files without `.pdf` or `.docx` extensions are correctly identified by their binary signature.
 - **File format audit column**: `mcp_audit.db` now records `file_format` (`pdf`, `docx`, or `text`) for every `zemtik_read_file` call.
 - **Docker sidecar startup warning**: if `ZEMTIK_ANONYMIZER_ENABLED=true` and the Docker socket is not reachable at startup, zemtik emits a clear setup message to stderr.

@@ -234,7 +234,7 @@ pub struct McpHandlerState {
     /// Fetch timeout.
     pub fetch_timeout: Duration,
     /// Allowed path prefixes (empty = allow-all in STDIO, deny-all in SSE).
-    pub allowed_paths: Vec<String>,
+    pub allowed_paths: Vec<PathBuf>,
     /// Allowed fetch domains (empty = allow-all in STDIO, deny-all in SSE).
     pub allowed_fetch_domains: Vec<String>,
     /// Whether running in STDIO (true) or SSE (false) mode.
@@ -319,14 +319,17 @@ impl McpHandlerState {
                 .build()
                 .context("build reqwest client")?,
             fetch_timeout: Duration::from_secs(config.mcp_fetch_timeout_secs),
-            // Canonicalize allowed_paths at construction time so starts_with() comparisons
-            // work correctly even when entries contain symlink components or relative paths.
+            // Store allowed_paths as canonicalized PathBufs so prefix matching uses
+            // component-aware Path::starts_with rather than raw string comparison,
+            // preventing bypasses via path traversal or glob suffix confusion.
             allowed_paths: config.mcp_allowed_paths.iter()
                 .map(|p| {
                     let expanded = crate::config::expand_tilde(p);
-                    expanded.canonicalize()
-                        .map(|c| c.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| expanded.to_string_lossy().into_owned())
+                    // Strip glob suffixes before canonicalize so the directory itself resolves.
+                    let dir_str = expanded.to_string_lossy();
+                    let dir = dir_str.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
+                    let dir_path = PathBuf::from(dir);
+                    dir_path.canonicalize().unwrap_or(dir_path)
                 })
                 .collect(),
             allowed_fetch_domains: config.mcp_allowed_fetch_domains.clone(),
@@ -374,7 +377,7 @@ impl ServerHandler for ZemtikMcpHandler {
             // Derive host-file hint from the first allowed path glob, stripping the trailing /**
             // so Claude gets a concrete directory to reference (e.g. /home/zemtik/host-files).
             let host_files_hint = self.state.allowed_paths.first().map(|p| {
-                let dir = p.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
+                let dir = p.display();
                 format!(
                     " Host files are mounted at '{dir}/'. \
                      When the user references a local file path, translate it to '{dir}/<filename>' \
@@ -529,8 +532,19 @@ impl ZemtikMcpHandler {
             request.arguments.as_ref().unwrap_or(&serde_json::Map::new()),
         ).unwrap_or_default();
         let input_hash = sha256_hex(input_json.as_bytes());
-        // output_hash signs final_content — what Claude actually receives.
-        let output_hash = sha256_hex(final_content.as_bytes());
+        // Build metadata first so output_hash covers the full returned payload
+        // (content + metadata), not just the text content.
+        let metadata = format!(
+            "[zemtik] format={} file_size={} hash={}{} Attestation logged.",
+            file_format.as_deref().unwrap_or("text"),
+            size_bytes,
+            raw_file_hash,
+            anon_note,
+        );
+        // output_hash covers the full returned payload (content + metadata).
+        let mut output_bytes = final_content.as_bytes().to_vec();
+        output_bytes.extend_from_slice(metadata.as_bytes());
+        let output_hash = sha256_hex(&output_bytes);
         let preview_in = Some(truncate(&input_json, PREVIEW_LEN));
         let preview_out = if self.state.anonymizer_debug_preview {
             Some(truncate(&final_content, PREVIEW_LEN))
@@ -540,13 +554,6 @@ impl ZemtikMcpHandler {
 
         self.attest_for_mode(AttestParams { tool_name: "zemtik_read_file".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: file_format.clone() }).await?;
 
-        let metadata = format!(
-            "[zemtik] format={} file_size={} hash={}{} Attestation logged.",
-            file_format.as_deref().unwrap_or("text"),
-            size_bytes,
-            raw_file_hash,
-            anon_note,
-        );
         Ok(CallToolResult::success(vec![
             Content::text(final_content),
             Content::text(metadata),
@@ -1126,9 +1133,8 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
     let path = if !path.exists() {
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let remapped = if !filename.is_empty() {
-            state.allowed_paths.iter().find_map(|allowed| {
-                let dir = allowed.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
-                let candidate = Path::new(dir).join(filename);
+            state.allowed_paths.iter().find_map(|dir| {
+                let candidate = dir.join(filename);
                 if candidate.exists() { Some(candidate) } else { None }
             })
         } else {
@@ -1168,12 +1174,9 @@ pub fn read_file_blocking(path_str: &str, state: &McpHandlerState) -> Result<Rea
         }
         // STDIO + empty allowlist → allow all (except the P0 key-protection above)
     } else {
-        let path_str_norm = canonical.to_string_lossy();
-        let allowed = state.allowed_paths.iter().any(|prefix| {
-            // Strip glob suffixes (/** or /*) so "/allowed/dir/**" matches "/allowed/dir/file.pdf"
-            let dir = prefix.trim_end_matches("/**").trim_end_matches("/*").trim_end_matches('/');
-            path_str_norm.starts_with(dir)
-        });
+        // Component-aware prefix check — Path::starts_with prevents string-prefix bypasses
+        // (e.g. /allowed/dir-evil/ would not match prefix /allowed/dir).
+        let allowed = state.allowed_paths.iter().any(|dir| canonical.starts_with(dir));
         if !allowed {
             return Err(rmcp::ErrorData::new(
                 rmcp::model::ErrorCode(-32002),
@@ -1358,10 +1361,16 @@ pub fn open_mcp_audit_db(db_path: &Path) -> anyhow::Result<Connection> {
         );",
     )
     .context("create mcp_audit table")?;
-    // v2 migration: add file_format column for zemtik_read_file format tracking
-    conn.execute_batch(
-        "ALTER TABLE mcp_audit ADD COLUMN file_format TEXT;",
-    ).ok(); // ignore error if column already exists
+    // v2 migration: add file_format column for zemtik_read_file format tracking.
+    // Check first via PRAGMA to distinguish "column exists" from real DB errors.
+    let has_file_format: bool = conn
+        .prepare("PRAGMA table_info('mcp_audit')")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|r| r.map(|name| name == "file_format").unwrap_or(false));
+    if !has_file_format {
+        conn.execute_batch("ALTER TABLE mcp_audit ADD COLUMN file_format TEXT;")
+            .context("add file_format column to mcp_audit")?;
+    }
     Ok(conn)
 }
 
@@ -1525,11 +1534,20 @@ fn warn_if_anonymizer_needs_docker(config: &AppConfig) {
         || std::path::Path::new("/run/docker.sock").exists()
         || cfg!(target_os = "windows"); // Docker Desktop on Windows uses named pipes; skip
     if !docker_running {
-        eprintln!(
-            "[MCP] WARNING: ZEMTIK_ANONYMIZER_ENABLED=true but Docker does not appear to be running. \
-             PII anonymization will use the regex fallback (less accurate). \
-             Start Docker Desktop and re-run 'zemtik mcp' for full sidecar anonymization."
-        );
+        if config.anonymizer_fallback_regex {
+            eprintln!(
+                "[MCP] WARNING: ZEMTIK_ANONYMIZER_ENABLED=true but Docker does not appear to be running. \
+                 PII anonymization will use the regex fallback (structured PII only, less accurate). \
+                 Start Docker Desktop and re-run 'zemtik mcp' for full sidecar anonymization."
+            );
+        } else {
+            eprintln!(
+                "[MCP] WARNING: ZEMTIK_ANONYMIZER_ENABLED=true but Docker does not appear to be running \
+                 and ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false. The sidecar is unavailable — \
+                 anonymizer_unavailable errors will occur at runtime. \
+                 Start Docker Desktop and re-run 'zemtik mcp' for full sidecar anonymization."
+            );
+        }
     }
 }
 
