@@ -1267,9 +1267,9 @@ fn sign_and_write(
     let sig_hex = format!("{}:{}", sig.r_b8.x, sig.s);
 
     // Use caller-supplied plaintext previews when available (e.g. ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true
-    // on zemtik_analyze); otherwise fall back to the first PREVIEW_LEN chars of the hash/content.
-    let preview_in = preview_override_in.unwrap_or_else(|| truncate(&input_hash, PREVIEW_LEN));
-    let preview_out = preview_override_out.unwrap_or_else(|| truncate(&output_hash, PREVIEW_LEN));
+    // on zemtik_analyze); otherwise store a sentinel so auditors know preview is disabled, not missing.
+    let preview_in = preview_override_in.unwrap_or_else(|| "[preview disabled]".to_string());
+    let preview_out = preview_override_out.unwrap_or_else(|| "[preview disabled]".to_string());
     let record = McpAuditRecord {
         receipt_id,
         ts,
