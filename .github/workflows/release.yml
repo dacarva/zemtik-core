@@ -118,7 +118,14 @@ jobs:
 
           cd dist
           if [ "$EXT" = "zip" ]; then
-            zip -r "${ARCHIVE_NAME}.zip" "$ARCHIVE_NAME"
+            # zip is not in Git Bash on windows-latest; fall back to pwsh Compress-Archive
+            if command -v zip &>/dev/null; then
+              zip -r "${ARCHIVE_NAME}.zip" "$ARCHIVE_NAME"
+            elif command -v pwsh &>/dev/null; then
+              pwsh -Command "Compress-Archive -Path '${ARCHIVE_NAME}' -DestinationPath '${ARCHIVE_NAME}.zip'"
+            else
+              echo "ERROR: neither zip nor pwsh available" >&2; exit 1
+            fi
             echo "ARCHIVE=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
             echo "ARCHIVE_NAME=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
           else
