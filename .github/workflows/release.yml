@@ -307,6 +307,10 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist/
+          # Explicit pattern excludes Docker GHA cache blobs (*.dockerbuild) which
+          # are large, transient, and not needed for the release upload.
+          pattern: "{x86_64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-pc-windows-msvc,mcpb-linux,mcpb-macos,mcpb-windows}"
+          merge-multiple: false
 
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
