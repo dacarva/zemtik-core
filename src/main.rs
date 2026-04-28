@@ -53,6 +53,9 @@ enum Commands {
         /// Maximum number of records to show (default: 20)
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Show full detail for a single receipt by UUID
+        #[arg(long)]
+        id: Option<String>,
     },
 }
 
@@ -145,7 +148,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::McpServe) => {
             return mcp_proxy::run_mcp_serve(app_config).await;
         }
-        Some(Commands::ListMcp { limit }) => {
+        Some(Commands::ListMcp { limit, id }) => {
+            if let Some(receipt_id) = id {
+                return run_show_mcp_receipt(app_config, receipt_id);
+            }
             return run_list_mcp(app_config, *limit);
         }
         _ => {}
@@ -489,6 +495,65 @@ fn run_list(config: config::AppConfig) -> anyhow::Result<()> {
             direct_count, det_count, llm_count, list.len()
         );
     }
+    Ok(())
+}
+
+fn run_show_mcp_receipt(config: config::AppConfig, receipt_id: &str) -> anyhow::Result<()> {
+    let record = mcp_proxy::get_mcp_audit_record(&config.mcp_audit_db_path, receipt_id)
+        .context("query MCP audit DB")?;
+
+    let r = match record {
+        Some(r) => r,
+        None => {
+            eprintln!("Receipt not found: {}", receipt_id);
+            std::process::exit(1);
+        }
+    };
+
+    let sig_verified = if r.attestation_sig.contains(':') { "present" } else { "missing" };
+    let format_str = r.file_format.as_deref().unwrap_or("—");
+
+    println!("┌─────────────────────────────────────────────────────────────────┐");
+    println!("│  MCP Audit Receipt                                              │");
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  ID          {}  │", r.receipt_id);
+    println!("│  Tool        {:<52} │", r.tool_name);
+    println!("│  Timestamp   {:<52} │", r.ts);
+    println!("│  Duration    {:<52} │", format!("{}ms", r.duration_ms));
+    println!("│  Mode        {:<52} │", r.mode);
+    println!("│  Format      {:<52} │", format_str);
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Hashes                                                         │");
+    println!("│  input   {}  │", r.input_hash);
+    println!("│  output  {}  │", r.output_hash);
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Attestation   {}                                              │", sig_verified);
+    if !r.attestation_sig.is_empty() {
+        let sig_parts: Vec<&str> = r.attestation_sig.splitn(2, ':').collect();
+        if sig_parts.len() == 2 {
+            println!("│  pubkey  {:<58} │", &r.public_key_hex[..r.public_key_hex.len().min(60)]);
+            println!("│  sig     {:<58} │", &sig_parts[1][..sig_parts[1].len().min(60)]);
+        }
+    }
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Preview input                                                  │");
+    if r.preview_input.is_empty() {
+        println!("│  (none)                                                         │");
+    } else {
+        for chunk in r.preview_input.chars().collect::<Vec<_>>().chunks(65) {
+            println!("│  {:<65} │", chunk.iter().collect::<String>());
+        }
+    }
+    println!("├─────────────────────────────────────────────────────────────────┤");
+    println!("│  Preview output                                                 │");
+    if r.preview_output.is_empty() {
+        println!("│  (none)                                                         │");
+    } else {
+        for chunk in r.preview_output.chars().collect::<Vec<_>>().chunks(65) {
+            println!("│  {:<65} │", chunk.iter().collect::<String>());
+        }
+    }
+    println!("└─────────────────────────────────────────────────────────────────┘");
     Ok(())
 }
 

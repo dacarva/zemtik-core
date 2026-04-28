@@ -489,8 +489,20 @@ impl ZemtikMcpHandler {
                     (anon, note)
                 }
                 Err(e) => {
-                    eprintln!("[MCP] read_file anonymizer error: {}", e);
-                    (result.content.clone(), String::new())
+                    // Anonymizer failed and no fallback succeeded — return an error rather
+                    // than passing raw un-anonymized content to the LLM, which would violate
+                    // the ZEMTIK_ANONYMIZER_ENABLED=true guarantee.
+                    eprintln!("[MCP] read_file anonymizer unavailable: {}", e);
+                    return Err(rmcp::ErrorData::new(
+                        rmcp::model::ErrorCode(-32603),
+                        format!(
+                            "anonymizer_unavailable: Cannot read file — PII anonymization is enabled \
+                             but the sidecar is unreachable. Start Docker and run \
+                             `docker compose --profile anonymizer up -d`, or set \
+                             ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true to use regex-only mode. Error: {}", e
+                        ),
+                        None,
+                    ));
                 }
             }
         } else {
@@ -515,7 +527,7 @@ impl ZemtikMcpHandler {
         self.attest_for_mode(AttestParams { tool_name: "zemtik_read_file".to_string(), input_hash, output_hash, duration_ms, preview_in, preview_out, file_format: file_format.clone() }).await?;
 
         let metadata = format!(
-            "[zemtik] format={} size={} hash={}{} Attestation logged.",
+            "[zemtik] format={} file_size={} hash={}{} Attestation logged.",
             file_format.as_deref().unwrap_or("text"),
             size_bytes,
             raw_file_hash,
@@ -1374,6 +1386,35 @@ pub fn list_mcp_audit_records(db_path: &Path, limit: usize) -> anyhow::Result<Ve
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(records)
+}
+
+pub fn get_mcp_audit_record(db_path: &Path, receipt_id: &str) -> anyhow::Result<Option<McpAuditRecord>> {
+    let conn = open_mcp_audit_db(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT receipt_id, ts, tool_name, input_hash, output_hash, \
+                preview_input, preview_output, attestation_sig, public_key_hex, \
+                duration_ms, mode, file_format \
+         FROM mcp_audit WHERE receipt_id = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![receipt_id], |row| {
+        let duration_raw: i64 = row.get(9)?;
+        let duration_ms = u64::try_from(duration_raw).unwrap_or(0);
+        Ok(McpAuditRecord {
+            receipt_id: row.get(0)?,
+            ts: row.get(1)?,
+            tool_name: row.get(2)?,
+            input_hash: row.get(3)?,
+            output_hash: row.get(4)?,
+            preview_input: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            preview_output: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            attestation_sig: row.get(7)?,
+            public_key_hex: row.get(8)?,
+            duration_ms,
+            mode: row.get(10)?,
+            file_format: row.get(11)?,
+        })
+    })?;
+    rows.next().transpose().map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------

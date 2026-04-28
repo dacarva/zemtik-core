@@ -264,7 +264,8 @@ jobs:
           # Keep .exe extension on Windows — stripping it breaks execution.
           # manifest.json entry_point "zemtik" matches on macOS/Linux; Windows uses "zemtik.exe".
           if [ "${{ matrix.bin_name }}" = "zemtik.exe" ]; then
-            mv packages/zemtik-mcp/zemtik.exe packages/zemtik-mcp/zemtik.exe 2>/dev/null || true
+            # Windows: keep zemtik.exe as-is; mcpb resolves "zemtik" entry_point to zemtik.exe on Windows.
+            true
           else
             mv packages/zemtik-mcp/${{ matrix.bin_name }} packages/zemtik-mcp/zemtik 2>/dev/null || true
             chmod +x packages/zemtik-mcp/zemtik 2>/dev/null || true
