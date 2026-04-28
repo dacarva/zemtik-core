@@ -276,4 +276,21 @@ def build_custom_recognizers():
             ],
             context=["ci", "cédula", "cedula", "identidad", "venezuela", "venezolano"],
         ),
+
+        # PASSPORT: International passport numbers
+        # Covers common formats:
+        #   A1234567  (1 letter + 7 digits — US, Colombia, many LatAm)
+        #   AB123456  (2 letters + 6 digits — UK, EU)
+        #   123456789 (9 digits — some EU)
+        # Requires "passport" / "pasaporte" context to avoid collisions with IBANs/NITs.
+        PatternRecognizer(
+            supported_entity="PASSPORT",
+            supported_language="en",
+            patterns=[
+                Pattern("PASSPORT_LETTER_DIGITS", r"\b[A-Z]{1,2}\d{6,8}\b", 0.75),
+                Pattern("PASSPORT_ALL_DIGITS",    r"\b\d{9}\b",              0.40),
+            ],
+            context=["passport", "pasaporte", "passaporte", "reisepass", "passeport",
+                     "travel document", "documento de viaje"],
+        ),
     ]

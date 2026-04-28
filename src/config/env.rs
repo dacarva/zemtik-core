@@ -332,7 +332,7 @@ impl Default for AppConfig {
             anonymizer_sidecar_addr: "http://localhost:50051".to_owned(),
             anonymizer_sidecar_timeout_ms: 1500,
             anonymizer_fallback_regex: true,
-            anonymizer_entity_types: "PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY".to_owned(),
+            anonymizer_entity_types: "PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI,PASSPORT".to_owned(),
             anonymizer_debug_preview: false,
             anonymizer_vault_ttl_secs: 300,
             mcp_anonymizer_enabled: false,
