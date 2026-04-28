@@ -48,7 +48,7 @@ enum Commands {
     },
     /// Run MCP HTTP server on :4001 (Streamable HTTP transport)
     McpServe,
-    /// List recent MCP audit records
+    /// List recent MCP audit records (use --id <uuid> to inspect a single receipt)
     ListMcp {
         /// Maximum number of records to show (default: 20)
         #[arg(long, default_value = "20")]
