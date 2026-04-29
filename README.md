@@ -107,7 +107,7 @@ flowchart TD
 
 | Lane | Trigger | Privacy mechanism | Latency |
 |---|---|---|---|
-| **ZK SlowLane** | `"sensitivity": "critical"` in `schema_config.json` | Noir + UltraHonk proof; raw rows as private witnesses | ~17–20s |
+| **ZK SlowLane** | `"sensitivity": "critical"` in `schema_config.json` | Noir + UltraHonk proof; raw rows as private witnesses (v1: witnesses generated; proof generation via `bb prove` blocked upstream — see Known Limitations) | ~17–20s |
 | **FastLane** | `"sensitivity": "low"` | Key-bound BabyJubJub signature receipt; no ZK constraint | < 50ms |
 | **General Passthrough** | No table match + `ZEMTIK_GENERAL_PASSTHROUGH=1` | Anonymizer only; no data query | LLM latency |
 | **Document Mode** | `"zemtik_mode": "document"` in request | Anonymizer only; skips intent routing | LLM latency |
@@ -145,7 +145,11 @@ The GLiNER/Presidio sidecar detects named entities and replaces them with typed 
 → "Can [[Z:a1b2:0]] help with our payroll?"
 ```
 
-The `[[Z:xxxx:n]]` format encodes the entity type (4-char CRC hash) and a per-session counter. A session vault maps each token to its original value.
+The `[[Z:xxxx:n]]` format encodes the entity type (4-char SHA-256-derived hash) and a per-session counter. A session vault maps each token to its original value.
+
+> **Pseudonymization, not anonymization:** PII is replaced with reversible tokens before the request reaches the model — this is pseudonymization, not legal anonymization under GDPR Recital 26. The vault is reversible; tokens can be mapped back to originals within the session.
+
+> **Not in v1 (planned Phase 2):** Multi-turn vault persistence across restarts, MCP tool-result anonymization, and streaming anonymization are not implemented in this release.
 
 **Quick start:**
 
@@ -162,7 +166,7 @@ Use `"zemtik_mode": "document"` in any request to skip intent routing and send s
 
 **Detection quality:** tokenization accuracy depends on GLiNER entity boundary precision. Compound organizational names, abbreviated identifiers, and code-switched text may be partially tokenized. Verify output via `POST /v1/anonymize/preview` before relying on this in regulated environments. The regex fallback (`ZEMTIK_ANONYMIZER_FALLBACK_REGEX`) covers obvious patterns only.
 
-See [sidecar/README.md](sidecar/README.md) for sidecar setup and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all anonymizer env vars (15-type default entity set; 22 types total — `PHONE_NUMBER`, `EMAIL_ADDRESS`, `EC_RUC`, `PE_RUC`, `BO_NIT`, `UY_CI`, `VE_CI` excluded from default).
+See [sidecar/README.md](sidecar/README.md) for sidecar setup and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all anonymizer env vars (21 entity types on by default; 23 supported total — `PHONE_NUMBER` and `EMAIL_ADDRESS` excluded from the default).
 
 ---
 
@@ -192,8 +196,17 @@ ZEMTIK_ANONYMIZER_ENABLED=true docker compose --profile anonymizer --profile mcp
 | Command | Transport | Use case |
 |---|---|---|
 | `zemtik mcp` | stdio | Claude Desktop (local binary, no Docker needed) |
+| `zemtik mcp --dry-run` | — | Validate config + create test audit record; exits 0 (success) or 1 (failure) |
 | `zemtik mcp-serve` | Streamable HTTP on `:4001` | Docker, IDE plugins, CI |
-| `zemtik list-mcp --id <uuid>` | local audit DB | Inspect a single MCP receipt by UUID |
+| `zemtik list-mcp --id <uuid>` | local audit DB | Inspect a single MCP audit receipt by ID (incident investigation) |
+
+**Claude Desktop config file locations:**
+
+| OS | Path |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
 
 See [docs/MCP_ATTESTATION.md](docs/MCP_ATTESTATION.md) for full setup, audit record schema, and governed mode.
 
@@ -262,10 +275,10 @@ Numbers from `audit/2026-03-25T17-46-43Z.json`:
 
 ## Known Limitations (POC)
 
+- **`bb prove` blocked** — `eddsa v0.1.3` × Barretenberg v4+ incompatibility. `nargo execute` validates all constraints. Unblocked when upstream library updates.
 - **Hard 500-row circuit limit** — queries matching > 500 rows error. See [docs/SCALING.md](docs/SCALING.md).
 - **No raw Postgres connector** — supports `sqlite` (demo) and `supabase` (PostgREST). Native `sqlx` connector planned for v2.
 - **File-based signing key** — `~/.zemtik/keys/bank_sk`. A compromised file produces validly-signed but fraudulent proofs. Production requires HSM/KMS.
-- **`bb prove` blocked** — `eddsa v0.1.3` × Barretenberg v4+ incompatibility. `nargo execute` validates all constraints. Unblocked when upstream library updates.
 - **Aggregation support** — FastLane: `SUM`, `COUNT`. ZK SlowLane: `SUM`, `COUNT`, `AVG` (composite). No JOINs or GROUP BY.
 - **CLI pipeline hardcoded** — 500 txs, client 123, `aws_spend`, Q1 2024. Proxy mode supports arbitrary tables via `schema_config.json`.
 - **Local CPU proving** — ~17s per query. Sub-second latency requires GPU/FPGA on-prem. See [docs/SCALING.md](docs/SCALING.md).
@@ -292,7 +305,10 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 
 ## Docs
 
+- [For legal/compliance (plain language)](docs/FOR_LEGAL.md) — plain-language guide for lawyers, DPOs, and compliance officers
 - [Getting Started](docs/GETTING_STARTED.md) — end-to-end setup: Docker, build-from-source, Anthropic backend, MCP
+- [Operator Runbook](docs/RUNBOOK.md) — production operations: key rotation, audit DB retention, incident response
+- [LATAM/EU Regulatory Mapping](docs/COMPLIANCE_LATAM.md) — LGPD, Habeas Data, GDPR field-by-field mapping
 - [Configuration](docs/CONFIGURATION.md) — all env vars, `schema_config.json` format, general passthrough, query rewriter
 - [Architecture](docs/ARCHITECTURE.md) — component breakdown, data flow, cryptographic properties
 - [ZK Circuits](docs/ZK_CIRCUITS.md) — Poseidon Merkle tree, mini-circuit layout, public input schema, offline verification, threat model
@@ -303,6 +319,7 @@ This repository is the MIT-licensed core layer. The commercial product adds:
 - [Intent Engine](docs/INTENT_ENGINE.md) — EmbeddingBackend, DeterministicTimeParser, confidence thresholds
 - [Tunnel Mode](docs/TUNNEL_MODE.md) — full config, audit record schema, dashboard endpoints, match status variants
 - [MCP Attestation](docs/MCP_ATTESTATION.md) — `zemtik_analyze`, Claude Desktop setup, governed mode, audit schema
+- [Key Concepts](docs/CONCEPTS.md) — pseudonymization vs anonymization, token format, five lanes, vault lifecycle
 - [Industry Use Cases](docs/INDUSTRY_USE_CASES.md) — SQL schemas and `schema_config.json` examples per vertical
 - [Scaling](docs/SCALING.md) — recursive proofs, GPU/FPGA path, why remote proving breaks the privacy guarantee
 - [Anonymizer Sidecar](sidecar/README.md) — GLiNER + Presidio gRPC sidecar, entity types, byte-offset invariant

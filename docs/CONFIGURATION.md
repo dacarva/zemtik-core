@@ -221,7 +221,7 @@ Set `ZEMTIK_MODE=tunnel` to enable transparent verification mode. See [docs/TUNN
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
 | `ZEMTIK_MODE` | `standard` | `standard`, `tunnel` | Operating mode. `tunnel` enables transparent forwarding + background ZK verification. Unrecognized values are rejected at startup. |
-| `ZEMTIK_TUNNEL_API_KEY` | — | OpenAI API key | **Required in tunnel mode.** Key forwarded to OpenAI in FORK 1 and used for FORK 2 verification calls. Proxy refuses to start if unset — ensures verification is billed to zemtik, not the pilot customer. |
+| `ZEMTIK_TUNNEL_API_KEY` | — | any non-empty string | **Required in tunnel mode.** Proxy refuses to start if unset — this is an acknowledgment that you have designated a separate billing account for verification calls. The value is checked for presence but is not forwarded as a bearer token; the actual API key used for requests comes from the incoming `authorization` header or `OPENAI_API_KEY`. |
 | `ZEMTIK_TUNNEL_MODEL` | `gpt-5.4-nano` | model identifier | Model used by Zemtik's background verification pipeline. |
 | `ZEMTIK_TUNNEL_TIMEOUT_SECS` | `180` | positive integer | Seconds FORK 2 is allowed to run before `match_status=timeout`. |
 | `ZEMTIK_TUNNEL_SEMAPHORE_PERMITS` | `50` | positive integer | Max concurrent background verifications. Excess requests get `x-zemtik-verified: false`. |
@@ -261,7 +261,9 @@ zemtik mcp-serve   # binds to 127.0.0.1:4001 by default
 
 **List recent MCP audit records:**
 ```bash
-zemtik list-mcp
+zemtik list-mcp                           # Last 20 records, table format
+zemtik list-mcp --id <uuid>               # Full detail for a single receipt (incident investigation)
+zemtik mcp --dry-run                      # Validate config + create test audit record; exits 0 or 1
 ```
 
 See [docs/MCP_ATTESTATION.md](MCP_ATTESTATION.md) for the full MCP integration guide, audit record schema, and governed-mode enforcement details.
@@ -275,10 +277,10 @@ PII anonymization pipeline. Detects and tokenizes sensitive entities before forw
 | Variable | Default | Values | Description |
 |----------|---------|--------|-------------|
 | `ZEMTIK_ANONYMIZER_ENABLED` | `false` | `true`, `false` | Master switch. Anonymizer is a no-op when disabled. |
-| `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` | `http://127.0.0.1:50051` | URI | gRPC address of the Python sidecar. Set to `http://sidecar:50051` when using Docker Compose. Deprecated alias `ZEMTIK_ANONYMIZER_SIDECAR_URL` accepted with a warning. |
+| `ZEMTIK_ANONYMIZER_SIDECAR_ADDR` | `http://localhost:50051` | URI | gRPC address of the Python sidecar. Set to `http://sidecar:50051` when using Docker Compose. Deprecated alias `ZEMTIK_ANONYMIZER_SIDECAR_URL` accepted with a warning. |
 | `ZEMTIK_ANONYMIZER_SIDECAR_TIMEOUT_MS` | `1500` | integer >= 1 | gRPC call timeout in milliseconds. Increase for long documents (>2000 tokens). |
-| `ZEMTIK_ANONYMIZER_FALLBACK_REGEX` | `true` | `true`, `false` | When `true`, use regex-only detection if the sidecar is unreachable. PERSON/ORG/LOCATION will not be detected in fallback mode — only structured IDs (CO_CEDULA, BR_CPF, etc.). When `false`, sidecar failure returns HTTP 503 (fail-closed). **For production deployments where PERSON/ORG/LOCATION detection is required, set this to `false` to fail-closed if the sidecar becomes unavailable.** |
-| `ZEMTIK_ANONYMIZER_ENTITY_TYPES` | `PERSON,ORG,LOCATION` | Comma-separated list | Entity types sent to the sidecar for detection. See the entity types table below. |
+| `ZEMTIK_ANONYMIZER_FALLBACK_REGEX` | `true` | `true`, `false` | When `true`, use regex-only detection if the sidecar is unreachable. PERSON/ORG/LOCATION will not be detected in fallback mode — only structured IDs (CO_CEDULA, BR_CPF, etc.). When `false`, sidecar failure returns HTTP 503 (fail-closed). Default: `true`. **Production recommendation: set to `false`** to fail-closed when the sidecar is unreachable. |
+| `ZEMTIK_ANONYMIZER_ENTITY_TYPES` | (21-type default — see below) | Comma-separated list | Entity types sent to the sidecar for detection. 21 enabled by default (PHONE_NUMBER and EMAIL_ADDRESS are supported but excluded from the default); 23 types total. Default value: `PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI,PASSPORT` |
 | `ZEMTIK_ANONYMIZER_DEBUG_PREVIEW` | `false` | `true`, `false` | When `true`, emits a 200-character preview of the sanitized outgoing prompt in `zemtik_meta.anonymizer.outgoing_preview`. **Disable in production** — the preview contains no PII but reveals the token structure. |
 | `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` | `300` | positive integer | Seconds before a session vault is evicted from memory by the background TTL eviction task (runs every 60s). |
 
@@ -305,7 +307,7 @@ PII anonymization pipeline. Detects and tokenizes sensitive entities before forw
 
 Sidecar-detected types (`PERSON`, `ORG`, `LOCATION`) require the Python sidecar to be running. Regex types are processed in the Rust process and are available even in fallback mode.
 
-**Production recommendation:** Start with `ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION"` (default). Add LATAM structured IDs as needed for your jurisdiction. Include all 16 types only if your documents contain all categories — unnecessary types add detection overhead.
+**Production recommendation:** The 21-type default covers most enterprise use cases. Add `PHONE_NUMBER` and `EMAIL_ADDRESS` if your documents contain contact information. Include all 23 types only if your documents contain all categories — unnecessary types add detection overhead.
 
 ---
 
@@ -504,6 +506,59 @@ List recent receipts:
 cargo run -- list
 ```
 
+### MCP audit database schema (`~/.zemtik/mcp_audit.db`)
+
+```sql
+CREATE TABLE IF NOT EXISTS mcp_audit (
+    receipt_id      TEXT PRIMARY KEY,        -- UUIDv4
+    ts              TEXT NOT NULL,           -- ISO 8601 UTC
+    tool_name       TEXT NOT NULL,           -- e.g. "zemtik_fetch"
+    input_hash      TEXT NOT NULL,           -- SHA-256 of JSON-serialized tool arguments
+    output_hash     TEXT NOT NULL,           -- SHA-256 of JSON-serialized tool result
+    preview_input   TEXT,                    -- first 500 chars of input (null if disabled)
+    preview_output  TEXT,                    -- first 500 chars of output (null if disabled)
+    attestation_sig TEXT NOT NULL,           -- BabyJubJub EdDSA: "pubkey_hex:sig_hex"
+    public_key_hex  TEXT NOT NULL,           -- BabyJubJub public key
+    duration_ms     INTEGER NOT NULL,        -- FORK 1 execution time
+    mode            TEXT NOT NULL,           -- "tunnel" or "governed"
+    file_format     TEXT                     -- "pdf"/"docx"/"text" for zemtik_read_file; NULL otherwise
+);
+```
+
+There is no automatic expiry or rotation. See RUNBOOK.md for manual retention procedure.
+
+### Tunnel audit database schema (`~/.zemtik/tunnel_audit.db`)
+
+```sql
+CREATE TABLE IF NOT EXISTS tunnel_audit (
+    id                          TEXT PRIMARY KEY,   -- UUIDv4
+    receipt_id                  TEXT,               -- links to receipts.db
+    created_at                  TEXT NOT NULL,      -- ISO 8601 UTC
+    match_status                TEXT NOT NULL,      -- Matched/Diverged/Unmatched/Error/Timeout/Backpressure
+    matched_table               TEXT,
+    matched_agg_fn              TEXT,
+    original_status_code        INTEGER,
+    original_response_body_hash TEXT,
+    original_latency_ms         INTEGER,
+    zemtik_aggregate            REAL,
+    zemtik_row_count            INTEGER,
+    zemtik_engine               TEXT,
+    zemtik_latency_ms           INTEGER,
+    diff_detected               INTEGER,            -- 1 if diff outside tolerance
+    diff_summary                TEXT,
+    diff_details                TEXT,
+    original_response_preview   TEXT,               -- 500-char snippet (only when ZEMTIK_TUNNEL_DEBUG_PREVIEWS=1)
+    zemtik_response_preview     TEXT,               -- 500-char snippet (only when ZEMTIK_TUNNEL_DEBUG_PREVIEWS=1)
+    error_message               TEXT,
+    request_hash                TEXT,
+    prompt_hash                 TEXT,
+    intent_confidence           REAL,
+    tunnel_model                TEXT
+);
+```
+
+There is no automatic expiry or rotation.
+
 ---
 
 ## Embedding model
@@ -537,6 +592,7 @@ The regex backend uses keyword and substring matching against table keys and ali
 ├── zemtik.db             # SQLite transaction database (sqlite backend)
 ├── receipts.db           # Receipts ledger
 ├── tunnel_audit.db       # Tunnel mode audit log (created when ZEMTIK_MODE=tunnel)
+├── mcp_audit.db          # MCP attestation audit log (created on first zemtik mcp or mcp-serve start)
 ├── keys/
 │   └── bank_sk           # BabyJubJub private key (mode 0600)
 ├── circuit/              # Compiled Noir artifacts (Prover.toml, bytecode)

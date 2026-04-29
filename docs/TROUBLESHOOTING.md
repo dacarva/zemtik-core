@@ -1,5 +1,7 @@
 # Troubleshooting
 
+> **Moved:** Troubleshooting content has been consolidated into [docs/RUNBOOK.md](RUNBOOK.md) under the "Troubleshooting" section. This file is kept for link compatibility but is no longer maintained independently.
+
 **Document type:** Reference  
 **Audience:** On-site integrators and support engineers  
 **Use when:** Something is broken at a customer site and you need a fast diagnosis

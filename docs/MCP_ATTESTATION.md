@@ -41,6 +41,22 @@ To disable anonymization (reads succeed without Docker, but no PII protection):
 
 Zemtik ships an MCP server that makes Claude Desktop safe for regulated industries. Every tool call is attested with a BabyJubJub EdDSA signature and logged to a tamper-evident audit database. In v0.18.0, `zemtik_read_file` supports PDF and DOCX extraction with hash separation (content hash vs. raw file hash). The `zemtik_analyze` tool adds PII tokenization: Claude calls it before reasoning on sensitive documents, so raw names, tax IDs, and financial identifiers never appear in Claude's context.
 
+**Verify setup before connecting Claude Desktop:**
+
+```bash
+zemtik mcp --dry-run
+```
+
+This validates configuration, creates a test audit record in `mcp_audit.db`, and exits 0 (success) or 1 (failure). Use to confirm the signing key, audit DB, and anonymizer connectivity are all working before you point Claude Desktop at the server.
+
+**Claude Desktop config file locations:**
+
+| OS | Path |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
 ## How attestation works
 
 For each tool call, Zemtik:
@@ -48,7 +64,7 @@ For each tool call, Zemtik:
 1. Executes the tool (FORK 1) and returns the result to Claude with zero added latency.
 2. Simultaneously (FORK 2, async, 1-second timeout): signs the call with a BabyJubJub EdDSA key and writes a signed audit record to `~/.zemtik/mcp_audit.db`.
 
-The result is a tamper-evident chain of every file read, HTTP fetch, and PII anonymization Claude performed, who authorized it, and when.
+The result is a tamper-evident log of every file read, HTTP fetch, and PII anonymization Claude performed, who authorized it, and when. Note: records are individually signed but not hash-chained — a deleted record leaves a gap without cryptographic evidence. See Known Audit/Compliance Limitations below.
 
 ---
 
@@ -117,6 +133,25 @@ Each record in `mcp_audit.db` (and in `GET /mcp/audit` JSON output) contains:
 | `duration_ms` | integer | FORK 1 execution time in milliseconds |
 | `mode` | string | `tunnel` (observe-only) or `governed` (attestation sidecar in response) |
 
+### Audit Database Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS mcp_audit (
+    receipt_id      TEXT PRIMARY KEY,        -- UUIDv4
+    ts              TEXT NOT NULL,           -- ISO 8601 UTC
+    tool_name       TEXT NOT NULL,           -- e.g. "zemtik_fetch"
+    input_hash      TEXT NOT NULL,           -- SHA-256 of JSON-serialized tool arguments
+    output_hash     TEXT NOT NULL,           -- SHA-256 of JSON-serialized tool result
+    preview_input   TEXT,                    -- first 500 chars of input (null if disabled)
+    preview_output  TEXT,                    -- first 500 chars of output (null if disabled)
+    attestation_sig TEXT NOT NULL,           -- BabyJubJub EdDSA: "pubkey_hex:sig_hex"
+    public_key_hex  TEXT NOT NULL,           -- BabyJubJub public key
+    duration_ms     INTEGER NOT NULL,        -- FORK 1 execution time
+    mode            TEXT NOT NULL,           -- "tunnel" or "governed"
+    file_format     TEXT                     -- "pdf"/"docx"/"text" for zemtik_read_file; NULL otherwise
+);
+```
+
 ### Special records: bypass events
 
 When `zemtik_fetch` is called with a domain not in `ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`:
@@ -134,6 +169,44 @@ These bypass records are audit artifacts only — they document that an out-of-p
 zemtik list-mcp               # Last 20 records, table format
 zemtik list-mcp --limit 100   # Last 100 records
 ```
+
+### Inspecting a Single Receipt
+
+To retrieve full detail for one receipt by UUID (e.g., during incident investigation):
+
+```bash
+zemtik list-mcp --id ab8095b8-a7f4-4ce7-bc36-9c8470aba1bf
+```
+
+Output:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  MCP Audit Receipt                                              │
+├─────────────────────────────────────────────────────────────────┤
+│  ID          ab8095b8-a7f4-4ce7-bc36-9c8470aba1bf              │
+│  Tool        zemtik_fetch                                       │
+│  Timestamp   2026-04-29T14:23:01.456Z                          │
+│  Duration    312ms                                              │
+│  Mode        tunnel                                             │
+│  Format      —                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  Hashes                                                         │
+│  input   sha256:a1b2c3d4...                                    │
+│  output  sha256:e5f6a7b8...                                    │
+├─────────────────────────────────────────────────────────────────┤
+│  Attestation   present                                          │
+│  pubkey  <64-char BabyJubJub public key hex>                   │
+│  sig     <BabyJubJub EdDSA signature>                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Preview input                                                  │
+│  (none — preview disabled)                                      │
+├─────────────────────────────────────────────────────────────────┤
+│  Preview output                                                 │
+│  (none — preview disabled)                                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Preview fields are populated only when the tool was called with preview logging enabled. Previews contain the first 500 chars of tool input/output — never enable in production if inputs may contain PII.
 
 **HTTP server mode (`zemtik mcp-serve`):**
 ```bash
@@ -189,7 +262,8 @@ fn verify(record: &McpAuditRecord, public_key_x: &BigInt, public_key_y: &BigInt)
     // Parse sig: "r_b8.x:s"
     let parts: Vec<&str> = record.attestation_sig.splitn(2, ':').collect();
     // ... use babyjubjub_rs::verify(pk, sig, msg_bigint)
-    true // placeholder
+    // TODO: Working BabyJubJub signature verification recipe — see issue in TODOS.md
+    unimplemented!("verification not yet wired — see TODOS.md")
 }
 ```
 
@@ -212,8 +286,8 @@ def verify_record(record: dict, pub_key_x: int, pub_key_y: int) -> bool:
     # Parse attestation_sig: "<r_b8.x>:<s>"
     r_x_str, s_str = record["attestation_sig"].split(":", 1)
     # Use a babyjubjub Python library to verify (r_b8.x, s) against (pub_key_x, pub_key_y)
-    # ...
-    return True  # placeholder
+    # TODO: Working BabyJubJub signature verification recipe — see issue in TODOS.md
+    raise NotImplementedError("verification not yet wired — see TODOS.md")
 ```
 
 ---
@@ -284,3 +358,56 @@ Common `<reason>` values:
 - `invalid URL: ...` — malformed input
 
 **No audit record is written for SSRF blocks.** The `outcome` field in the audit DB is only populated for calls that reach the HTTP client. Blocks by the domain allowlist (`ZEMTIK_MCP_ALLOWED_FETCH_DOMAINS`) do write an audit record with `outcome: zemtik_fetch_bypass`; SSRF blocks do not.
+
+**Known bypass:** If the `HTTP_PROXY` or `HTTPS_PROXY` environment variables are set on the host, the reqwest HTTP client will tunnel `zemtik_fetch` requests through that proxy, bypassing the DNS-based SSRF guard. Do not set proxy environment variables on the host running zemtik in production. This is tracked as a code-level fix in the issue backlog (see TODOS.md).
+
+---
+
+## Known Audit/Compliance Limitations (v1)
+
+The following gaps are documented and tracked in the issue backlog (see TODOS.md):
+
+- **No hash chain**: mcp_audit.db rows are individually signed (BabyJubJub EdDSA) but there is no `prev_record_hash` linking records into a chain. A deleted record leaves a gap with no cryptographic evidence of the deletion.
+- **No replay protection**: Evidence Pack receipts do not include a server-generated nonce. An old valid receipt could be re-presented as evidence of a new query.
+- **No algorithm versioning**: Receipt records do not include an `alg` or `sig_version` field. Future algorithm changes will require a migration strategy.
+- **No NTP requirement**: Timestamps are written from the local system clock. Clock skew or manipulation is not detected.
+- **Audit DB file permissions**: Not enforced at create time in v1. Recommended: `chmod 0600 ~/.zemtik/mcp_audit.db`.
+- **Single-operator separation of duties**: The same operator who runs the proxy can read and (silently) delete audit records. SOC 2 CC6.3 multi-party access control is not enforced.
+- **No automatic audit DB expiry or rotation**: See RUNBOOK.md for manual retention procedure.
+- **`ZEMTIK_MCP_TRANSPORT=sse` removed**: SSE transport was sunset on 2026-04-01. Setting this variable now causes a hard startup error (`SSE transport removed — use ZEMTIK_MCP_TRANSPORT=http or mcp-serve`). Remove the variable or set it to `http`.
+
+---
+
+## Custom Tools (`mcp_tools.json`)
+
+Register additional MCP tools beyond the built-in `zemtik_fetch` and `zemtik_read_file` by pointing `ZEMTIK_MCP_TOOLS_PATH` at a JSON file.
+
+**Schema:** [`docs/mcp_tools.schema.json`](docs/mcp_tools.schema.json)
+
+**Example `mcp_tools.json`:**
+
+```json
+[
+  {
+    "name": "search_contracts",
+    "description": "Search indexed contracts by keyword or clause type. Returns matching document IDs and excerpts.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query — keywords, clause names, or party names"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum results to return (default 10, max 50)",
+          "default": 10
+        }
+      },
+      "required": ["query"]
+    }
+  }
+]
+```
+
+Tool names must be lowercase ASCII alphanumeric + underscores. `input_schema` must be a JSON object with `"type": "object"`. Custom tools are attested and logged identically to built-in tools — each call produces an `McpAuditRecord` in `mcp_audit.db`.

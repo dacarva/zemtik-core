@@ -386,6 +386,14 @@ The anonymizer replaces sensitive entities (names, organizations, locations) wit
 
 Scope: single-turn only. The vault that maps tokens back to real values is cleared after each request. Multi-turn vault persistence is planned for Phase 2-3.
 
+### Enable Anonymizer in 5 Minutes (Docker Compose path)
+
+1. Add to your `.env`: `ZEMTIK_ANONYMIZER_ENABLED=true`
+2. (First time) Set `HF_TOKEN=<your HuggingFace token>` for faster model download
+3. Start: `docker compose --profile anonymizer up --build`
+4. Wait for sidecar health: `curl http://localhost:4000/health | grep sidecar_status`
+5. Test: send a prompt with PII; verify `zemtik_meta.anonymizer.entities_replaced > 0` in the response
+
 ### Prerequisites — start the sidecar
 
 The anonymizer runs a Python gRPC sidecar (GLiNER + Presidio) for entity recognition. The sidecar is not included in `docker-compose.yml` and must be started separately.
@@ -999,7 +1007,15 @@ curl http://localhost:4001/mcp/health
 > # System / volta / fnm: check `which node` after activating v20+
 > ```
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`, replacing
+**Claude Desktop config file locations:**
+
+| OS | Path |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+Add to the macOS config file (or the equivalent path above for your OS), replacing
 `/path/to/node18/bin` with the output of the command above — **both fields are required**:
 
 ```json
@@ -1046,6 +1062,12 @@ Expected: Claude calls `zemtik_analyze` first, then summarizes using only `[[Z:.
 **Verify the audit trail:**
 ```bash
 curl -s -H "Authorization: Bearer $ZEMTIK_MCP_API_KEY" http://localhost:4001/mcp/audit
+
+# Or use the CLI for a table view of recent records:
+zemtik list-mcp
+
+# For full detail on a specific receipt (e.g., during incident investigation):
+zemtik list-mcp --id <receipt-uuid>
 ```
 
 ### Reading local files from Docker
