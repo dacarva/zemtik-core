@@ -85,17 +85,22 @@ Every detected entity is replaced with a structured token:
 
 ### Detection backends
 
-```
-ZEMTIK_ANONYMIZER_ENABLED=true?
-    │
-    └─ Yes → gRPC call to sidecar (default http://localhost:50051)
-                  │
-                  ├─ Sidecar responds → GLiNER + Presidio: all 23 entity types
-                  │
-                  └─ Sidecar unreachable or timed out
-                        ├─ ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true  → in-process Rust regex
-                        │     covers 19 structured types; NOT: PERSON, ORG, LOCATION, PASSPORT
-                        └─ ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false → HTTP 503 (fail-closed)
+```mermaid
+flowchart TD
+    Enabled{{"ZEMTIK_ANONYMIZER_ENABLED=true?"}}
+    Enabled -->|"No"| Passthrough["Passthrough — no tokenization"]
+    Enabled -->|"Yes"| gRPC["gRPC call to sidecar\n(default http://localhost:50051)"]
+
+    gRPC -->|"Sidecar responds"| Full["GLiNER + Presidio\nAll 23 entity types"]
+    gRPC -->|"Unreachable or timed out"| Fallback{{"ZEMTIK_ANONYMIZER_FALLBACK_REGEX?"}}
+
+    Fallback -->|"true"| Regex["In-process Rust regex\n19 structured types\nNot covered: PERSON, ORG,\nLOCATION, PASSPORT"]
+    Fallback -->|"false (recommended)"| Error["HTTP 503 — fail-closed\nRequest not forwarded"]
+
+    style Passthrough fill:#f5f5f5,stroke:#aaa
+    style Full fill:#e8f0e8,stroke:#3a7a3a
+    style Regex fill:#fff8e1,stroke:#f9a825
+    style Error fill:#fdecea,stroke:#c62828
 ```
 
 **Production recommendation:** `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false`. A sidecar outage should be a visible failure, not a silent downgrade to partial detection.
