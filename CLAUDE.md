@@ -140,7 +140,7 @@ POST /v1/chat/completions (user prompt)
 | `mcp_auth.rs` | MCP authentication: bearer key validation for `/mcp/audit` and `/mcp/summary`; startup error if `ZEMTIK_MCP_API_KEY` unset in `mcp-serve` mode |
 | `mcp_tools.rs` | MCP built-in tool definitions (`zemtik_fetch`, `zemtik_read_file`); dynamic tool registration from `mcp_tools.json` (`ZEMTIK_MCP_TOOLS_PATH`); path and domain allowlist enforcement |
 | `anonymizer.rs` | PII tokenization pipeline (`anonymize_conversation()`); `VaultStore` (in-memory `HashMap<session_id, (Vault, Instant)>` with TTL eviction); gRPC path (sidecar) + regex fallback; `AuditMeta` for `zemtik_meta.anonymizer` block; `count_dropped_tokens()`; `SYSTEM_PROMPT_INJECT` constant |
-| `entity_hashes.rs` | Entity-type CRC hash table (`ENTITY_HASHES` const); `type_hash()` → 4-char hex code for `[[Z:xxxx:n]]` token format; must stay in sync with `sidecar/entity_hashes.py` |
+| `entity_hashes.rs` | SHA-256-derived 4-hex type hash table (`ENTITY_HASHES` const — 23 entries); `type_hash()` → 4-char hex code for `[[Z:xxxx:n]]` token format; must stay in sync with `sidecar/entity_hashes.py` and `sidecar/zemtik_entity_hashes.py` |
 
 ### ZK Circuit (`circuit/`)
 

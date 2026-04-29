@@ -68,6 +68,54 @@ we will bump our minor version and document the required axum version in the cha
 | ZK proof verification | `bb verify` with configurable timeout (`ZEMTIK_VERIFY_TIMEOUT_SECS`) |
 | PII anonymization | Sidecar gRPC + regex fallback; vault TTL eviction |
 
+## PII Anonymizer
+
+The anonymizer is an optional pipeline stage that pseudonymizes user input before forwarding it to the AI model, then restores original values in the model's response. It is disabled by default (`ZEMTIK_ANONYMIZER_ENABLED=false`).
+
+### Token format
+
+Every detected entity is replaced with a structured token:
+
+```
+[[Z:{type_hash}:{counter}]]
+```
+
+- `type_hash` — 4-hex code = `hex(SHA-256(entity_type)[0..2])`. Hardcoded in `src/entity_hashes.rs` (23 types). The Python sidecar uses `sidecar/entity_hashes.py` and `sidecar/zemtik_entity_hashes.py` — all three must agree.
+- `counter` — per-session monotonic integer starting at 1. The same entity within one request always gets the same counter so the model sees consistent references.
+
+### Detection backends
+
+```
+ZEMTIK_ANONYMIZER_ENABLED=true?
+    │
+    └─ Yes → gRPC call to sidecar (default http://localhost:50051)
+                  │
+                  ├─ Sidecar responds → GLiNER + Presidio: all 23 entity types
+                  │
+                  └─ Sidecar unreachable or timed out
+                        ├─ ZEMTIK_ANONYMIZER_FALLBACK_REGEX=true  → in-process Rust regex
+                        │     covers 19 structured types; NOT: PERSON, ORG, LOCATION, PASSPORT
+                        └─ ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false → HTTP 503 (fail-closed)
+```
+
+**Production recommendation:** `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false`. A sidecar outage should be a visible failure, not a silent downgrade to partial detection.
+
+### Default entity set
+
+21 types by default (from `src/config/env.rs`). `PHONE_NUMBER` and `EMAIL_ADDRESS` are supported (entries in `entity_hashes.rs`) but excluded from the default. Override with `ZEMTIK_ANONYMIZER_ENTITY_TYPES`.
+
+### Vault lifecycle
+
+A fresh in-memory vault is created per request. `scopeguard::defer!` clears it immediately after the response is returned. A background goroutine evicts any vault older than `ZEMTIK_ANONYMIZER_VAULT_TTL_SECS` (default 300s). The vault is never written to disk.
+
+**v1 limitations:** Tokens do not persist across turns. MCP tool-result de-tokenization is not implemented. Both are planned for Phase 2.
+
+### What pseudonymization is not
+
+Zemtik performs **pseudonymization**, not legal anonymization. The vault holds the mapping between original values and tokens. Anyone with access to the process memory can reverse the substitution. Pseudonymized data remains personal data under GDPR Recital 26, LGPD, and equivalent laws. See `docs/FOR_LEGAL.md` and `docs/COMPLIANCE_LATAM.md`.
+
+---
+
 ## Module Tree
 
 ```text
