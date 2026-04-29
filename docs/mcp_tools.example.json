@@ -27,7 +27,7 @@
           "description": "Maximum number of results to return. Default is 10. Maximum is 50."
         }
       },
-      "required": ["party_name"],
+      "required": [],
       "additionalProperties": false
     }
   }

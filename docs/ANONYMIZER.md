@@ -59,12 +59,7 @@ Expected response (with default `ZEMTIK_ANONYMIZER_ENTITY_TYPES=PERSON,ORG,LOCAT
 
 `tokens`, `originals`, and `entity_types` are parallel arrays with identical length and ordering — consumers can zip them to reconstruct `(original, token, type)` triples.
 
-> **Note:** With the default entity types, `79.123.456` (Colombian cédula) is not anonymized.
-> To include LATAM structured IDs, add them to `ZEMTIK_ANONYMIZER_ENTITY_TYPES`:
-> ```bash
-> export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_CEDULA"
-> ```
-> This would produce `entities_found: 3` with `[[Z:5b46:1]]` for the cédula.
+> **Note:** `CO_CEDULA` is included in the 21-type default set, so `79.123.456` (Colombian cédula) **is** anonymized by default. The output above would show `entities_found: 3` with `[[Z:5b46:1]]` for the cédula. To add the two non-default types (`PHONE_NUMBER`, `EMAIL_ADDRESS`), set `ZEMTIK_ANONYMIZER_ENTITY_TYPES` explicitly (see [Configuring entity types](#configuring-entity-types)).
 
 ### 3. Full E2E (with LLM)
 

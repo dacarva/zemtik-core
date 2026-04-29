@@ -148,7 +148,6 @@ The GLiNER/Presidio sidecar detects named entities and replaces them with typed 
 The `[[Z:xxxx:n]]` format encodes the entity type (4-char SHA-256-derived hash) and a per-session counter. A session vault maps each token to its original value.
 
 > **Pseudonymization, not anonymization:** PII is replaced with reversible tokens before the request reaches the model — this is pseudonymization, not legal anonymization under GDPR Recital 26. The vault is reversible; tokens can be mapped back to originals within the session.
-
 > **Not in v1 (planned Phase 2):** Multi-turn vault persistence across restarts, MCP tool-result anonymization, and streaming anonymization are not implemented in this release.
 
 **Quick start:**

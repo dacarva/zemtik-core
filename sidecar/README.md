@@ -36,13 +36,13 @@ print(hg.HealthStub(ch).Check(h.HealthCheckRequest()).status)
 
 ## Entity types
 
-Zemtik supports 23 entity types. The canonical hash codes are SHA-256-derived 4-hex codes (first 2 bytes of SHA-256 hash of the entity type name, encoded as 4 hex chars) — values defined in `src/entity_hashes.rs` and mirrored in `sidecar/zemtik_entity_hashes.py`. Both files must stay in sync with each other.
+Zemtik supports 23 entity types. The canonical hash codes are SHA-256-derived 4-hex codes (first 2 bytes of SHA-256 hash of the entity type name, encoded as 4 hex chars) — values defined in `src/entity_hashes.rs` and mirrored in `sidecar/entity_hashes.py`. Both files must stay in sync with each other.
 
 To inspect entity type hash codes, see `src/entity_hashes.rs`.
 
 **Two entity hash files exist:**
-- `zemtik_entity_hashes.py` — canonical file used by `server.py`
-- `entity_hashes.py` — compatibility shim that imports from `zemtik_entity_hashes.py`
+- `entity_hashes.py` — canonical file; defines `ENTITY_HASHES` and `type_hash()`, kept in sync with `src/entity_hashes.rs`
+- `zemtik_entity_hashes.py` — compatibility shim; re-exports `type_hash` and `ENTITY_HASHES` from `entity_hashes.py` so `server.py` can import from a stable name
 
 Both must stay in sync with `src/entity_hashes.rs`. Never edit hash values manually — regenerate from the canonical derivation (`SHA256(entity_type.encode('utf-8'))[:2].hex()`).
 
