@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/dacarva/zemtik-core/docs/mcp_tools.schema.json",
+  "title": "zemtik MCP Tools Definition",
+  "$comment": "Schema for the mcp_tools.json file loaded via ZEMTIK_MCP_TOOLS_PATH. The file must be a JSON array of tool objects. Each tool is registered as an MCP tool alongside the built-in zemtik_read_file and zemtik_fetch tools. If the file is absent, only built-in tools are available. Malformed JSON causes a hard startup error. See docs/mcp_tools.example.json for a complete example.",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/McpToolDef"
+  },
+  "definitions": {
+    "McpToolDef": {
+      "type": "object",
+      "title": "MCP Tool Definition",
+      "description": "A single custom tool definition. All three fields are required. Tools are registered in the order they appear in the array.",
+      "required": ["name", "description", "input_schema"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "title": "Tool name",
+          "description": "Unique identifier for the tool. Must contain only ASCII alphanumeric characters and underscores. No spaces, hyphens, or other punctuation. Must be unique across all entries in the array and must not collide with built-in tool names (zemtik_read_file, zemtik_fetch, zemtik_analyze).",
+          "pattern": "^[a-zA-Z0-9_]+$",
+          "minLength": 1,
+          "maxLength": 64,
+          "examples": ["search_contracts", "get_customer_record"]
+        },
+        "description": {
+          "type": "string",
+          "title": "Tool description",
+          "description": "Human-readable description of what the tool does. Shown to the LLM in the tool list. Write this as you would write a docstring — precise, active-voice, one or two sentences. The LLM uses this description to decide when to call the tool.",
+          "minLength": 1,
+          "examples": ["Search the contract database by party name and return matching contract summaries."]
+        },
+        "input_schema": {
+          "type": "object",
+          "title": "Input JSON Schema",
+          "description": "JSON Schema (draft-07) describing the tool's input parameters. Must be a JSON object with type: 'object' and a 'properties' key. The LLM generates arguments that conform to this schema when calling the tool. Zemtik validates that this field is a JSON object at startup but does not enforce the full JSON Schema specification.",
+          "required": ["type", "properties"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["object"],
+              "description": "Must be 'object'. Zemtik rejects tool definitions where input_schema is not of type object."
+            },
+            "properties": {
+              "type": "object",
+              "description": "Map of parameter names to their JSON Schema definitions.",
+              "additionalProperties": {
+                "type": "object",
+                "description": "JSON Schema for a single parameter.",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["string", "number", "integer", "boolean", "array", "object", "null"]
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Human-readable description of this parameter. Shown to the LLM."
+                  },
+                  "enum": {
+                    "type": "array",
+                    "description": "Restrict parameter to a fixed set of values."
+                  }
+                }
+              }
+            },
+            "required": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "List of parameter names that must be present in every tool call.",
+              "uniqueItems": true
+            },
+            "additionalProperties": {
+              "type": "boolean",
+              "description": "Whether the LLM may pass parameters not listed in 'properties'. Recommend false for strict validation."
+            }
+          }
+        }
+      }
+    }
+  }
+}
