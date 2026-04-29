@@ -373,7 +373,7 @@ async fn main() -> Result<(), ZemtikError> {
 `zemtik::types` (`EvidencePack`, `EngineResult`, `FastLaneResult`, …) are stable across
 patch and minor releases. All other items are `#[doc(hidden)]` internal modules.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full stable API reference and semver policy.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full stable API reference and semver policy.
 
 ---
 
