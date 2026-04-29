@@ -220,8 +220,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub anonymizer_fallback_regex: bool,
     /// Comma-separated list of entity types to detect.
-    /// Default: 15-type set (excludes PHONE_NUMBER and EMAIL_ADDRESS from the 17-type hash table).
-    /// Full list: see entity_hashes.rs (17 types).
+    /// Default: 21-type set (excludes PHONE_NUMBER and EMAIL_ADDRESS from the 23-type hash table).
+    /// Full list: see entity_hashes.rs (23 types).
     /// Env: ZEMTIK_ANONYMIZER_ENTITY_TYPES
     pub anonymizer_entity_types: String,
     /// Expose outgoing_preview (first 200 chars of anonymized text) in zemtik_meta. Default: false.

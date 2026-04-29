@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.1] - 2026-04-29
+
+### Added
+- **`docs/FOR_LEGAL.md`**: Plain-language guide for lawyers, DPOs, and compliance officers — covers data flow, sub-processor table, LATAM/EU regulation map, and questions to ask before approving a deployment.
+- **`docs/COMPLIANCE_LATAM.md`**: Deep-reference mapping of GDPR, LGPD, Habeas Data (Ley 1581/Decreto 1377), LFPDPPP, and Ley 25.326 controls to zemtik's technical measures. Includes controller/processor role matrix, DPIA starter questions, and 9 ordered compliance gaps.
+- **`docs/RUNBOOK.md`**: Operator playbook — production checklist, Docker Compose profiles, key rotation procedure, audit DB hygiene, incident playbooks, and troubleshooting.
+- **`docs/CONCEPTS.md`**: Conceptual reference — pseudonymization vs anonymization (GDPR Recital 26), full 23-type token format table, five-lane v1 status, vault lifecycle, and sidecar-vs-regex decision tree.
+- **`docs/mcp_tools.schema.json`** + **`docs/mcp_tools.example.json`**: JSON Schema and example for `mcp_tools.json` dynamic tool registration.
+- **`docs/MCP_ATTESTATION.md`**: `zemtik list-mcp --id`, `mcp --dry-run`, `mcp_audit.db` schema, `mcp_tools.json` example, SSE-sunset notice, and HTTP_PROXY SSRF bypass warning.
+- **12 draft GitHub issue bodies** in `TODOS.md`: hash chain, DB file permissions, bearer-token rotation, NTP, algorithm versioning, Evidence Pack replay protection, production debug-preview guard, default entity set widening, nargo/bb checksum pinning, model hash verification, DSAR/erasure workflow, SSRF bypass fix.
+
+### Changed
+- **`docs/ANONYMIZER.md`**: Entity counts corrected to 21 default / 23 total. PASSPORT added to fallback-gap list. `cargo test entity_hashes` replaces broken CLI subcommand reference.
+- **`docs/CONFIGURATION.md`**: Full 21-type entity default list; `mcp_audit.db` and `tunnel_audit.db` schemas; corrected sidecar addr default (`http://localhost:50051`); corrected `ZEMTIK_TUNNEL_API_KEY` description (presence-guard, not forwarded bearer token).
+- **`docs/EVIDENCE_PACK_AUDITOR_GUIDE.md`**: `zemtik list-mcp --id` workflow, COMPLIANCE_LATAM cross-link, Known Limitations subsection.
+- **`docs/GETTING_STARTED.md`**: "Enable Anonymizer in 5 Minutes" section; cross-OS Claude Desktop config paths.
+- **`sidecar/README.md`**: Entity count corrected to 23; SHA-256 hash algorithm noted (not CRC); broken CLI reference removed.
+- **`docs/FOR_LEGAL.md`**: Anonymizer-off-by-default qualifier; vault per-request clear clarified; HuggingFace sub-processor entry split into GLiNER + BGE-small-en downloads.
+- **`docs/MCP_ATTESTATION.md`**: "Tamper-evident chain" → "tamper-evident log" with no-hash-chain caveat; FastLane ≠ ZK proof compliance note.
+- **`docs/COMPLIANCE_LATAM.md`**: GDPR Art. 25 off-by-default qualifier; Colombia rights acronym corrected to ARSOP.
+- **`src/config/env.rs`**: Doc comment corrected from 15-type/17-total to 21-type/23-total.
+- **`CLAUDE.md`**: Entity type counts corrected to 21 default / 23 total.
+
 ## [0.18.0] - 2026-04-28
 
 ### Added
