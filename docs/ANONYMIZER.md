@@ -4,6 +4,10 @@
 **Audience:** Developers integrating Zemtik's PII anonymization into LLM pipelines
 **Goal:** Enable zero-PII LLM calls without changing client code
 
+> **Not in v1 (planned Phase 2):** Multi-turn vault persistence across restarts, anonymization of MCP tool results, and streaming anonymization are not implemented in this release.
+
+See [docs/FOR_LEGAL.md](FOR_LEGAL.md) for a plain-language guide for lawyers and DPOs.
+
 ---
 
 ## Quick Start
@@ -14,8 +18,11 @@
 export OPENAI_API_KEY=sk-...
 export ZEMTIK_ANONYMIZER_ENABLED=true
 
-# Start the full stack (sidecar + proxy)
+# First-time setup (builds sidecar image with GLiNER model baked in):
 docker compose --profile anonymizer up --build
+
+# Subsequent starts (image already built, skip --build):
+# docker compose --profile anonymizer up
 ```
 
 Wait for the `anonymizer` service to report `healthy` (~30s — GLiNER model load).
@@ -52,12 +59,7 @@ Expected response (with default `ZEMTIK_ANONYMIZER_ENTITY_TYPES=PERSON,ORG,LOCAT
 
 `tokens`, `originals`, and `entity_types` are parallel arrays with identical length and ordering — consumers can zip them to reconstruct `(original, token, type)` triples.
 
-> **Note:** With the default entity types, `79.123.456` (Colombian cédula) is not anonymized.
-> To include LATAM structured IDs, add them to `ZEMTIK_ANONYMIZER_ENTITY_TYPES`:
-> ```bash
-> export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_CEDULA"
-> ```
-> This would produce `entities_found: 3` with `[[Z:5b46:1]]` for the cédula.
+> **Note:** `CO_CEDULA` is included in the 21-type default set, so `79.123.456` (Colombian cédula) **is** anonymized by default. The output above would show `entities_found: 3` with `[[Z:5b46:1]]` for the cédula. To add the two non-default types (`PHONE_NUMBER`, `EMAIL_ADDRESS`), set `ZEMTIK_ANONYMIZER_ENTITY_TYPES` explicitly (see [Configuring entity types](#configuring-entity-types)).
 
 ### 3. Full E2E (with LLM)
 
@@ -91,7 +93,7 @@ Check `zemtik_meta.anonymizer` in the response body:
 
 > **Single-turn vault:** The vault that maps tokens back to original values is cleared after each request via `scopeguard::defer!`. Tokens assigned in one turn are NOT available in the next — each request starts with a fresh vault. Multi-turn vault persistence is planned for Phase 2-3.
 
-> ⚠️ **Sidecar fallback indicator:** If `sidecar_used: false` appears in `zemtik_meta.anonymizer`, the sidecar was unreachable and only regex patterns were active. PERSON, ORG, and LOCATION detection requires the sidecar — structured IDs (emails, phone numbers, LATAM IDs) still work via the regex fallback, but named entity recognition is disabled.
+> ⚠️ **Sidecar fallback indicator:** If `sidecar_used: false` appears in `zemtik_meta.anonymizer`, the sidecar was unreachable and only regex patterns were active. PERSON, ORG, LOCATION, and PASSPORT detection requires the sidecar — structured IDs (emails, phone numbers, LATAM IDs) still work via the regex fallback, but named entity recognition and passport numbers are not covered. In regulated environments, treat a sidecar outage as a data protection gap.
 
 ### Sidecar address — local dev vs Docker Compose
 
@@ -128,7 +130,7 @@ The anonymizer pipeline uses two detection backends:
 
 ## Entity Types
 
-Zemtik v1 supports 22 entity types across two detection backends. 15 are enabled by default; `PHONE_NUMBER`, `EMAIL_ADDRESS`, `EC_RUC`, `PE_RUC`, `BO_NIT`, `UY_CI`, and `VE_CI` are supported but excluded from the default set (set `ZEMTIK_ANONYMIZER_ENTITY_TYPES` explicitly to include them).
+Zemtik v1 supports 23 entity types across two detection backends. 21 are enabled by default; `PHONE_NUMBER` and `EMAIL_ADDRESS` are supported but excluded from the default set (set `ZEMTIK_ANONYMIZER_ENTITY_TYPES` explicitly to include them).
 
 ### Sidecar-detected (GLiNER + Presidio)
 
@@ -171,14 +173,11 @@ These are detected by the Rust process itself via regex patterns. Available even
 ### Configuring entity types
 
 ```bash
-# Default: 15-type set
-export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY"
+# Default: 21-type set
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI,PASSPORT"
 
-# Extended: add LatAm IDs (EC_RUC, PE_RUC, BO_NIT, UY_CI, VE_CI) + contact types
-export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI"
-
-# Include all 22 types:
-export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI,PHONE_NUMBER,EMAIL_ADDRESS"
+# Include all 23 types (adds PHONE_NUMBER and EMAIL_ADDRESS):
+export ZEMTIK_ANONYMIZER_ENTITY_TYPES="PERSON,ORG,LOCATION,CO_NIT,CO_CEDULA,AR_DNI,CL_RUT,BR_CPF,BR_CNPJ,MX_CURP,MX_RFC,ES_NIF,IBAN_CODE,DATE_TIME,MONEY,EC_RUC,PE_RUC,BO_NIT,UY_CI,VE_CI,PASSPORT,PHONE_NUMBER,EMAIL_ADDRESS"
 ```
 
 ### Token format
@@ -223,14 +222,11 @@ Each detected entity is replaced with an opaque token:
 Verify cross-layer hash parity (Rust ↔ Python):
 
 ```bash
-# Rust
-cargo run --bin zemtik -- anonymizer hashes
-
 # Python
 cd sidecar && python -c "from entity_hashes import print_canonical_hashes; print_canonical_hashes()"
-
-# Diff must be zero bytes
 ```
+
+To inspect the entity type hash table from the Rust side, see `src/entity_hashes.rs` — it lists all 23 types and their SHA-256-derived 4-hex codes.
 
 ---
 
@@ -269,6 +265,8 @@ Treat them as opaque identifiers.
 This instructs the LLM to return tokens verbatim so deanonymization can succeed. If the LLM paraphrases or omits a token, `dropped_tokens` in `zemtik_meta.anonymizer` will be greater than 0. Consistently high `dropped_tokens` indicates the model is not following the instruction — consider switching to a stronger instruction-following model via `ZEMTIK_OPENAI_MODEL`.
 
 ### What "fail-closed" means
+
+`ZEMTIK_ANONYMIZER_FALLBACK_REGEX` default: `true` (regex fallback enabled). **Production recommendation: set to `false`** to fail-closed when the sidecar is unreachable — this ensures PERSON/ORG/LOCATION detection is never silently skipped.
 
 When `ZEMTIK_ANONYMIZER_FALLBACK_REGEX=false` and the sidecar is unreachable:
 
@@ -443,11 +441,16 @@ The LLM did not return one or more tokens verbatim. Check:
 ### Hash parity mismatch (Rust ↔ Python)
 
 ```bash
-cargo run --bin zemtik -- anonymizer hashes
 cd sidecar && python -c "from entity_hashes import print_canonical_hashes; print_canonical_hashes()"
 ```
 
-If hashes differ, check that `src/entity_hashes.rs` and `sidecar/entity_hashes.py` were generated from the same source (`SHA256(entity_type.encode('utf-8'))[:2].hex()`). Do not manually edit either file — regenerate from the canonical test.
+To inspect the Rust side, see `src/entity_hashes.rs`. Hashes are derived from `SHA256(entity_type.encode('utf-8'))[:2].hex()`. To verify Rust↔Python hash parity after adding a new entity type:
+
+```bash
+cargo test entity_hashes
+```
+
+The test at `tests/test_entity_hashes.rs` compares the Rust `ENTITY_HASHES` table against the expected SHA-256-derived values. If hashes differ between Python and Rust, check that both files were updated together when a new entity type was added — do not manually edit either file.
 
 ### Byte offset errors (accented characters)
 

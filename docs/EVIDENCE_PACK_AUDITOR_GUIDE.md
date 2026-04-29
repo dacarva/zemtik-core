@@ -242,6 +242,26 @@ If you are conducting a compliance review, these questions will help you assess 
 
 ---
 
+## Gathering Evidence for a Specific Incident
+
+If you know the `receipt_id` of the MCP call in question (e.g., from a log or user report):
+
+```bash
+zemtik list-mcp --id ab8095b8-a7f4-4ce7-bc36-9c8470aba1bf
+```
+
+This prints a formatted receipt box containing: receipt ID, tool name, timestamp, duration, mode, file format, input hash, output hash, BabyJubJub attestation signature and public key, and (if enabled) previews of the first 500 chars of input and output.
+
+For compliance evidence purposes, the fields most relevant to an auditor are:
+- `receipt_id`: unique identifier for chain-of-custody
+- `ts`: UTC timestamp of the tool call
+- `input_hash` / `output_hash`: SHA-256 commitments to the tool arguments and result
+- `attestation_sig` + `public_key_hex`: BabyJubJub EdDSA signature over (tool_name||input_hash||output_hash||ts)
+
+For GDPR/LGPD/Habeas Data regulatory mapping, see [docs/COMPLIANCE_LATAM.md](COMPLIANCE_LATAM.md).
+
+---
+
 ## SOC 2 Mapping (Preliminary — Pending Auditor Validation)
 
 The following is a preliminary mapping of Evidence Pack fields to SOC 2 Trust Services Criteria. **This mapping has not been validated by an independent SOC 2 auditor.** It is provided as a starting point for discussion.
@@ -264,6 +284,20 @@ The following is a preliminary mapping of Evidence Pack fields to SOC 2 Trust Se
 | v1 | Initial release: `engine_used`, `attestation_hash`, `proof_hash`, `data_exfiltrated`, `row_count`, `receipt_id` |
 | v2 | Added `actual_row_count` (real rows vs padding in ZK proofs), AVG dual-proof support |
 | v3 | Added `human_summary` (plain-language narrative) and `checks_performed` (ordered check list). AVG produces 11 checks (corrected from initial 9-check claim that omitted COUNT circuit signing/commitment steps). |
+
+---
+
+---
+
+## Known Limitations (Auditor's Perspective)
+
+The following gaps affect the strength of audit evidence in v1. They are tracked for future releases.
+
+- **No hash chain between records**: mcp_audit.db rows are individually signed (BabyJubJub EdDSA) but there is no `prev_record_hash` linking records into a chain. A deleted row leaves a gap with no cryptographic evidence of the deletion — an auditor cannot distinguish a complete record set from one with rows removed.
+- **No replay nonce**: Evidence Pack receipts do not include a server-generated nonce. An old valid receipt could be re-presented as evidence of a new query.
+- **No algorithm versioning**: Receipt records do not include an `alg` or `sig_version` field. Future algorithm changes will require a migration strategy.
+- **No NTP requirement**: Timestamps are written from the local system clock. A compromised operator can backdate audit records and they will still verify.
+- **No automatic audit DB expiry or rotation**: Records accumulate indefinitely. Operators must manage retention manually (see RUNBOOK.md).
 
 ---
 

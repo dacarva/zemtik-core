@@ -933,3 +933,45 @@ Added from `/plan-eng-review` of the Audit Trail Integrity plan (worktree-groovy
 - **Error:** `audit record must be written for zemtik_analyze call`
 - **Action needed:** Investigate `zemtik_analyze` MCP tool audit record persistence — likely a race condition or missing fixture setup in the test
 - **Priority:** P0 — blocks CI reliability
+
+---
+
+## Issue Backlog: Audit/Compliance Gaps (v1)
+
+The following items require code changes and are tracked for future releases. They were identified during the documentation review of 2026-04-29.
+
+### ISSUE: Audit DB hash chain
+Add `prev_record_hash` (SHA-256 of the previous row's receipt_id + ts + input_hash + output_hash) and a signed monotonic sequence counter to mcp_audit.db, tunnel_audit.db, and receipts.db. Without this, "tamper-evident" claims are incomplete — a deleted row leaves a gap with no cryptographic evidence.
+
+### ISSUE: Audit DB file permissions
+Enforce 0600 on mcp_audit.db, tunnel_audit.db, and receipts.db at create time. Currently only bank_sk (keys/bank_sk) has mode 0600 enforced. Any local user with read access to ~/.zemtik/ can read audit records including preview_input/preview_output fields.
+
+### ISSUE: Bearer token rotation without downtime
+Implement a `kid` (key ID) field on bearer tokens for ZEMTIK_MCP_API_KEY, ZEMTIK_DASHBOARD_API_KEY, and ZEMTIK_TUNNEL_API_KEY. Support dual-key overlap window (old key valid for 24h after rotation). Currently rotation requires a full restart with downtime.
+
+### ISSUE: NTP / signed timestamp requirement
+Document an NTP hard requirement and consider supporting RFC 3161 timestamp authority for high-assurance deployments. Currently timestamps are sourced from the local system clock; a compromised operator can backdate audit records and they will still verify.
+
+### ISSUE: Algorithm versioning in receipts
+Add `alg` and `sig_version` fields to McpAuditRecord, TunnelAuditRecord, and ReceiptRecord. Required for cryptographic agility — future algorithm changes (e.g., post-quantum) need to be distinguishable from old records.
+
+### ISSUE: Evidence Pack replay protection
+Add a server-generated nonce and signed counter to the Evidence Pack. Without this, an old valid receipt can be re-presented as evidence of a new query (receipt_id is UUIDv4 but nothing prevents replay).
+
+### ISSUE: Production debug-preview guard
+Add ZEMTIK_PROFILE=production mode that hard-rejects ZEMTIK_ANONYMIZER_DEBUG_PREVIEW=true and ZEMTIK_TUNNEL_DEBUG_PREVIEWS=1 at startup. Currently both default to false but there is no enforcement preventing accidental enablement in production.
+
+### ISSUE: Default entity set — include PHONE_NUMBER and EMAIL_ADDRESS
+Add PHONE_NUMBER and EMAIL_ADDRESS to the default ZEMTIK_ANONYMIZER_ENTITY_TYPES in src/config/env.rs:335. Both are PII under all relevant data protection regimes. Currently excluded from the default (privacy lawyer finding: data-minimization violation).
+
+### ISSUE: Supply chain — nargo/bb binary checksum pinning
+Pin nargo 1.0.0-beta.19 and bb v4.0.0-nightly to known-good SHA-256 hashes at install/startup. Currently both are resolved from PATH with no signature verification. Add SLSA provenance attestation to release workflow.
+
+### ISSUE: Model hash verification at download
+Add SHA-256 verification for BGE-small-en (~130MB) and GLiNER model downloads to ~/.zemtik/models/. Publish expected hashes in docs and verify at startup before loading the model.
+
+### ISSUE: DSAR / right-to-erasure workflow
+Design and implement a per-subject erasure workflow for audit records. Challenge: signed BabyJubJub records cannot be deleted without breaking the integrity claim. Options: tombstone + Merkle re-anchoring, or crypto-shredding the preview fields while preserving the hash/signature structure.
+
+### ISSUE: SSRF guard — document bypass conditions
+Add explicit documentation and code coverage for: HTTP_PROXY/HTTPS_PROXY env var bypass, custom DNS resolver override, DNS64/NAT64 environments, SNI vs Host mismatch. Currently these bypass conditions are undocumented.

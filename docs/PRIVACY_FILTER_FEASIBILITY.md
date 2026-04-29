@@ -1,3 +1,5 @@
+> **Note:** This document is a legacy design feasibility study from early development. The features it describes are now implemented — see [docs/ANONYMIZER.md](ANONYMIZER.md) for current documentation. This document is retained for historical reference only.
+
 # openai/privacy-filter — Feasibility & Integration Analysis
 
 ## Overview
