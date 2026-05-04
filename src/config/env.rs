@@ -917,6 +917,12 @@ pub fn load_from_sources(
             config.mcp_api_key = None;
         }
     }
+    // Normalize gemini_api_key from YAML: whitespace-only treated as absent.
+    if let Some(ref k) = config.gemini_api_key.clone() {
+        if k.trim().is_empty() {
+            config.gemini_api_key = None;
+        }
+    }
     if let Some(url) = config.public_url.take() {
         let normalized = url.trim().trim_end_matches('/').to_owned();
         if !normalized.is_empty() {
@@ -933,6 +939,17 @@ pub fn load_from_sources(
         anyhow::ensure!(
             config.proxy_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
             "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic"
+        );
+    }
+    // Post-layer validation: Gemini requires both API key and proxy auth key.
+    if config.llm_provider == "gemini" {
+        anyhow::ensure!(
+            config.gemini_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+            "ZEMTIK_GEMINI_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini"
+        );
+        anyhow::ensure!(
+            config.proxy_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+            "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini"
         );
     }
 

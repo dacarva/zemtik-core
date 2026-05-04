@@ -795,7 +795,12 @@ Step 3 (`cargo run`) writes a complete JSON audit record to `audit/<timestamp>.j
 
 The proxy does **not** support `stream: true`. Set `stream: false` in your client configuration.
 
-All responses are returned as a single buffered JSON object after pipeline completion. If `stream: true` is detected in the request body, the proxy returns HTTP 400 immediately:
+All responses are returned as a single buffered JSON object after pipeline completion. The status code on a streaming rejection depends on the configured provider:
+
+- **OpenAI provider** (`ZEMTIK_LLM_PROVIDER=openai`, default): `POST /v1/chat/completions` with `stream: true` returns **HTTP 400** when `ZEMTIK_GENERAL_PASSTHROUGH` is disabled.
+- **Gemini or Anthropic provider**: `POST /v1/chat/completions` with `stream: true` always returns **HTTP 501 Not Implemented**, regardless of passthrough setting. The error code is `StreamingUnsupported`.
+
+HTTP 400 example (OpenAI, passthrough disabled):
 
 ```json
 {
@@ -805,6 +810,18 @@ All responses are returned as a single buffered JSON object after pipeline compl
     "message": "Set stream: false in your client configuration.",
     "hint": "The ZK pipeline must complete before any part of the response can be sent.",
     "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+  }
+}
+```
+
+HTTP 501 example (Gemini or Anthropic):
+
+```json
+{
+  "error": {
+    "type": "streaming_not_supported",
+    "code": "StreamingUnsupported",
+    "message": "Streaming is not supported with llm_provider=anthropic or gemini in this version. Set stream: false."
   }
 }
 ```

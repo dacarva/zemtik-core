@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 - **`ZEMTIK_VALIDATE_ONLY=1`** now checks Gemini (and Anthropic) key presence before exiting, matching the startup error behaviour of `build_proxy_router`.
 - **Streaming guard**: `stream: true` returns HTTP 501 (`StreamingUnsupported`) for Gemini (same as Anthropic; SSE deferred to v2).
 - **New env vars**: `ZEMTIK_GEMINI_API_KEY`, `ZEMTIK_GEMINI_MODEL` (default `gemini-2.5-flash`), `ZEMTIK_GEMINI_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta/openai` — already includes `/v1beta/openai`, do not append `/v1/chat/completions`).
-- **11 new tests**: 4 unit tests for `GeminiBackend` (Send+Sync, operator-key injection, model override, error shape); 2 tests for `ProviderRegistry`; 6 integration tests (5 startup failure paths + `/v1/models` gemini response).
+- **12 new tests**: 4 unit tests for `GeminiBackend` (Send+Sync, operator-key injection, model override, error shape); 2 tests for `ProviderRegistry`; 6 integration tests (5 startup failure paths + `/v1/models` gemini response).
 
 ### Fixed
 - `tunnel.rs` error code `anthropic_tunnel_chat_only` renamed to `tunnel_chat_only` — the guard now applies to both Anthropic and Gemini providers.

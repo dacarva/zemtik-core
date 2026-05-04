@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zemtik::llm_backend::{AnthropicBackend, GeminiBackend, LlmBackend, OpenAiBackend};
 
@@ -92,16 +92,21 @@ async fn test_gemini_backend_model_override() {
     // Non-gemini- prefix model → substituted with ZEMTIK_GEMINI_MODEL.
     // gemini-* prefix → passed through as-is.
     let server = MockServer::start().await;
-    // First request: model=gpt-5.4-nano → expect gemini-2.5-flash in outbound body
+
+    let flash_response = json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "model": "gemini-2.5-flash",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
+    });
+
+    // Request 1: non-gemini model → verify outbound body substitutes to gemini-2.5-flash
     Mock::given(method("POST"))
         .and(path("/v1beta/openai/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "model": "gemini-2.5-flash",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
-        })))
+        .and(body_json(json!({"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hi"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(flash_response))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -112,12 +117,30 @@ async fn test_gemini_backend_model_override() {
         format!("{}/v1beta/openai", server.uri()),
     );
 
-    // Non-gemini model → override
     let body = json!({"model": "gpt-5.4-nano", "messages": [{"role": "user", "content": "hi"}]});
     let (status, resp) = backend.complete(&body, "").await.unwrap();
     assert_eq!(status, 200);
-    // Response should have _zemtik_resolved_model set to the substituted model
     assert_eq!(resp["_zemtik_resolved_model"], "gemini-2.5-flash");
+
+    // Request 2: gemini-* prefix → passed through unchanged in the outbound body
+    Mock::given(method("POST"))
+        .and(path("/v1beta/openai/chat/completions"))
+        .and(body_json(json!({"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "hi"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-2",
+            "object": "chat.completion",
+            "model": "gemini-2.0-flash",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let body2 = json!({"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "hi"}]});
+    let (status2, resp2) = backend.complete(&body2, "").await.unwrap();
+    assert_eq!(status2, 200);
+    assert_eq!(resp2["_zemtik_resolved_model"], "gemini-2.0-flash");
 }
 
 #[tokio::test]

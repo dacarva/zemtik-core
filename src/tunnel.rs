@@ -974,7 +974,7 @@ pub(crate) async fn handle_tunnel_passthrough(
             StatusCode::NOT_IMPLEMENTED,
             Json(serde_json::json!({
                 "error": {
-                    "message": "Tunnel mode with ZEMTIK_LLM_PROVIDER=anthropic only supports /v1/chat/completions. Other OpenAI endpoints have no Anthropic equivalent.",
+                    "message": "Tunnel mode only supports /v1/chat/completions with this LLM provider. Other OpenAI endpoints have no equivalent in the configured provider.",
                     "type": "not_implemented",
                     "code": "tunnel_chat_only"
                 }
