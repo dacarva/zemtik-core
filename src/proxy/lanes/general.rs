@@ -151,11 +151,35 @@ pub(in crate::proxy) async fn handle_general_lane(
 
     let is_streaming = body.get("stream").and_then(|v| v.as_bool()) == Some(true);
 
+    // Resolve provider, endpoint, and model from config + request body.
+    let provider = state.config.llm_provider.clone();
+    let endpoint = if provider == "anthropic" {
+        state.config.anthropic_base_url.clone()
+    } else {
+        state.config.openai_base_url.clone()
+    };
+    let config_model = if provider == "anthropic" {
+        state.config.anthropic_model.clone()
+    } else {
+        state.config.openai_model.clone()
+    };
+    // Use model from request body if present (client may override); fall back to config default.
+    let request_model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&config_model)
+        .to_owned();
+
     let mut zemtik_meta = serde_json::json!({
         "engine_used": "general_lane",
         "zk_coverage": "none",
         "reason": reason,
         "receipt_id": receipt_id,
+        "provider": provider,
+        // endpoint is intentionally omitted: it is server-side config that may
+        // contain internal hostnames, Azure resource names, or credentials as
+        // query parameters. Persisted to evidence_json (DB/verify) only.
+        "model": request_model,
     });
     let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
 
@@ -203,9 +227,12 @@ pub(in crate::proxy) async fn handle_general_lane(
 
     let resp_status = StatusCode::from_u16(status_u16).unwrap_or(StatusCode::OK);
 
-    // Extract _zemtik_resolved_model from AnthropicBackend and inject into zemtik_meta
+    // Extract _zemtik_resolved_model from AnthropicBackend and inject into zemtik_meta.
+    // Also update the "model" field so the evidence pack reflects the actual model used,
+    // not the config default (Anthropic may resolve an alias like "claude-sonnet-4-6-20251101").
     if let Some(obj) = resp_body.as_object_mut() {
         if let Some(resolved) = obj.remove("_zemtik_resolved_model") {
+            zemtik_meta["model"] = resolved.clone();
             zemtik_meta["resolved_model"] = resolved;
         }
     }
@@ -235,11 +262,30 @@ pub(in crate::proxy) async fn handle_general_lane(
         }
     }
 
+    // If the vault is empty but the prompt already contains [[Z:...]] tokens, the caller
+    // pre-anonymized the text before sending (e.g. zemtik-app client-side anonymization).
+    // Count unique tokens so the stored evidence_json and /verify page reflect the real
+    // entity count instead of 0.
+    let prior_token_count: usize = if vault.as_ref().is_none_or(|v| v.is_empty()) && !prompt.is_empty() {
+        // Static regex — compiled once, safe to call on every request.
+        static TOKEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\[\[Z:[0-9a-f]{4}:\d+\]\]").expect("valid token regex")
+        });
+        TOKEN_RE.find_iter(&prompt)
+            .map(|m| m.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    } else {
+        0
+    };
+
     // Augment zemtik_meta with anonymizer stats (entities, dropped tokens)
     if let Some(ref meta) = anon_meta {
         let (dropped, injected) = general_lane_token_counts;
+        // Use prior_token_count when the sidecar found 0 entities on pre-tokenized text.
+        let effective_entities = if prior_token_count > 0 { prior_token_count } else { meta.entities_found };
         let mut anon_block = serde_json::json!({
-            "entities_found": meta.entities_found,
+            "entities_found": effective_entities,
             "entity_types": meta.entity_types,
             "sidecar_used": meta.sidecar_used,
             "sidecar_ms": meta.sidecar_ms,
@@ -261,6 +307,9 @@ pub(in crate::proxy) async fn handle_general_lane(
             "engine_used": "general_lane",
             "zk_coverage": "none",
             "reason": zemtik_meta.get("reason"),
+            "provider": zemtik_meta.get("provider"),
+            "endpoint": &endpoint,  // server-side only — not in client-visible zemtik_meta
+            "model": zemtik_meta.get("model"),
         });
         if let Some(anon) = zemtik_meta.get("anonymizer") {
             evidence["anonymizer"] = anon.clone();
