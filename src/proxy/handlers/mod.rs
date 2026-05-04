@@ -93,6 +93,8 @@ pub(super) async fn handle_models(
 
     let (model_id, owned_by) = if state.config.llm_provider == "anthropic" {
         (state.config.anthropic_model.clone(), "anthropic")
+    } else if state.config.llm_provider == "gemini" {
+        (state.config.gemini_model.clone(), "google")
     } else {
         (state.config.openai_model.clone(), "openai")
     };

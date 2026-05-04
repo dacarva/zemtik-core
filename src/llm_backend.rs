@@ -320,6 +320,92 @@ impl LlmBackend for AnthropicBackend {
 }
 
 // ---------------------------------------------------------------------------
+// GeminiBackend — operator key model, uses Gemini OpenAI-compat endpoint
+// ---------------------------------------------------------------------------
+
+pub struct GeminiBackend {
+    client: reqwest::Client,
+    // INVARIANT: Always from ZEMTIK_GEMINI_API_KEY (operator-configured).
+    // Never set from the client's incoming Authorization header.
+    api_key: String,
+    model: String,
+    base_url: String,
+}
+
+impl GeminiBackend {
+    pub fn new(
+        client: reqwest::Client,
+        api_key: String,
+        model: String,
+        base_url: String,
+    ) -> Self {
+        Self { client, api_key, model, base_url }
+    }
+}
+
+impl LlmBackend for GeminiBackend {
+    fn complete<'a>(
+        &'a self,
+        body: &'a Value,
+        _api_key: &'a str, // INTENTIONALLY IGNORED — see INVARIANT
+    ) -> BoxFuture<'a, anyhow::Result<(u16, Value)>> {
+        Box::pin(async move {
+            // Model override: absent/null/"" or non-gemini- prefix → use self.model
+            let incoming_model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
+            let resolved_model = if incoming_model.starts_with("gemini-") {
+                incoming_model.to_owned()
+            } else {
+                if !incoming_model.is_empty() {
+                    eprintln!(
+                        "[LLM] INFO: model '{}' substituted with '{}' (ZEMTIK_GEMINI_MODEL)",
+                        incoming_model, self.model
+                    );
+                }
+                self.model.clone()
+            };
+
+            let mut req_body = body.clone();
+            req_body["model"] = serde_json::Value::String(resolved_model.clone());
+
+            // NOTE: base_url already includes /v1beta/openai — do NOT append /v1/chat/completions
+            let url = format!(
+                "{}/chat/completions",
+                self.base_url.trim_end_matches('/')
+            );
+            let resp = self
+                .client
+                .post(&url)
+                // INVARIANT: Use self.api_key (operator key), never the incoming client token
+                .bearer_auth(&self.api_key)
+                .json(&req_body)
+                .send()
+                .await
+                .context("Gemini API request failed")?;
+
+            let status = resp.status();
+            let status_u16 = status.as_u16();
+
+            // Pass through non-2xx verbatim. Defensive fallback for non-JSON error bodies
+            // (HTML 502 from Google gateway, etc.).
+            if !status.is_success() {
+                let resp_body: Value = resp.json().await.unwrap_or_else(|_| {
+                    serde_json::json!({"error": {"type": "upstream_error", "message": "upstream returned non-JSON error body"}})
+                });
+                return Ok((status_u16, resp_body));
+            }
+
+            let mut resp_body: Value = resp.json().await.context("parse Gemini response")?;
+
+            // Inject resolved model for zemtik_meta.resolved_model (same pattern as Anthropic).
+            resp_body["_zemtik_resolved_model"] = serde_json::Value::String(resolved_model);
+
+            Ok((status_u16, resp_body))
+        })
+    }
+    // forward_raw() inherits the default (returns error) — streaming not supported in v1.
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

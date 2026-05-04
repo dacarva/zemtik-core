@@ -965,9 +965,9 @@ pub(crate) async fn handle_tunnel_passthrough(
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
-    // S7: Anthropic tunnel only supports POST /v1/chat/completions (mapped to /v1/messages).
-    // Non-chat paths and non-POST methods have no Anthropic equivalent.
-    if state.config.llm_provider == "anthropic"
+    // S7: Anthropic/Gemini tunnel only supports POST /v1/chat/completions.
+    // Non-chat paths and non-POST methods have no equivalent in these providers' APIs.
+    if (state.config.llm_provider == "anthropic" || state.config.llm_provider == "gemini")
         && !(uri.path() == "/v1/chat/completions" && method == Method::POST)
     {
         return (

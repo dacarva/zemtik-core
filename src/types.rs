@@ -388,7 +388,7 @@ pub struct EvidencePack {
     /// Empty vec for pre-v3 packs deserialized from historical JSON.
     #[serde(default)]
     pub checks_performed: Vec<String>,
-    /// LLM provider used for this request. "openai" or "anthropic".
+    /// LLM provider used for this request. "openai", "anthropic", or "gemini".
     /// Defaults to "openai" for legacy rows deserialized from historical JSON.
     #[serde(default = "default_llm_provider")]
     pub llm_provider: String,

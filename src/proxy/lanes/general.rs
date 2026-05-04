@@ -155,11 +155,15 @@ pub(in crate::proxy) async fn handle_general_lane(
     let provider = state.config.llm_provider.clone();
     let endpoint = if provider == "anthropic" {
         state.config.anthropic_base_url.clone()
+    } else if provider == "gemini" {
+        state.config.gemini_base_url.clone()
     } else {
         state.config.openai_base_url.clone()
     };
     let config_model = if provider == "anthropic" {
         state.config.anthropic_model.clone()
+    } else if provider == "gemini" {
+        state.config.gemini_model.clone()
     } else {
         state.config.openai_model.clone()
     };
@@ -184,17 +188,16 @@ pub(in crate::proxy) async fn handle_general_lane(
     let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
 
     if is_streaming {
-        // Anthropic SSE uses a different event schema than OpenAI SSE.
-        // Translation is deferred to a future release; return 501 so clients
-        // get a clear error instead of unparseable chunks.
-        if state.config.llm_provider == "anthropic" {
+        // Anthropic and Gemini streaming not supported in v1. Return 501 so clients
+        // get a clear error instead of an unparseable response.
+        if state.config.llm_provider == "anthropic" || state.config.llm_provider == "gemini" {
             return Ok((
                 StatusCode::NOT_IMPLEMENTED,
                 Json(serde_json::json!({
                     "error": {
                         "type": "streaming_not_supported",
-                        "code": "AnthropicStreamingUnsupported",
-                        "message": "Streaming is not supported with llm_provider=anthropic in this version. Set stream: false."
+                        "code": "StreamingUnsupported",
+                        "message": "Streaming is not supported with llm_provider=anthropic or gemini in this version. Set stream: false."
                     }
                 })),
             ).into_response());

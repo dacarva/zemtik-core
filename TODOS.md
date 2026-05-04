@@ -1,5 +1,65 @@
 # TODOS
 
+## P2 — Live Gemini endpoint verification before shipping to legal customer (added 2026-05-04, /plan-ceo-review)
+
+- **What:** Run the 7 Success Criteria from the Gemini design doc against a real `ZEMTIK_GEMINI_API_KEY` before handing off to legal customer. CI tests mock the Gemini compat endpoint — they prove the code compiles and routes correctly but don't verify Google's actual contract (error shapes, model name behavior, Bearer auth acceptance).
+- **Why:** Gemini's OpenAI-compat endpoint is maintained by Google but under-documented. Error response shapes may differ from OpenAI's `{"error": {"type": ..., "message": ...}}` schema. A 5-minute live run catches contract mismatches before legal customer hits them.
+- **Context:** Codex outside voice flagged this: "Mock tests assert your own fixtures, not Google's contract." The design doc already has a Success Criterion 7: "Verify empirically during implementation: Gemini compat error responses match OpenAI error schema." This TODO ensures that criterion doesn't get skipped.
+- **How:** Run curl commands from the design doc Success Criteria (3 + 4 + 7) against a live Gemini key. ~5 min manual test. Record pass/fail for each criterion.
+- **Effort:** S (human: ~5 min / CC: n/a — requires real API key)
+- **Priority:** P2 — required before handing off demo URL to legal customer
+- **Depends on:** Gemini backend implementation complete; real `ZEMTIK_GEMINI_API_KEY` available
+
+---
+
+## P2 — Rate limiting for zemtik-app /api/extract and /api/chat (added 2026-04-30, /plan-eng-review)
+
+- **What:** Add per-IP rate limiting to `/api/extract` (PDF/DOCX upload) and `/api/chat`. Recommended: `upstash/ratelimit` with Redis for distributed limiting (if Vercel deployment), or in-memory `lru-cache` based limiter for single-instance.
+- **Why:** Without rate limiting, a single bad actor can OOM the server by sending 1000 parallel PDF uploads. At pilot scale (1-2 users), irrelevant. When Heidy shares the app link with 10+ law firm clients, the risk becomes real. Cost blowout from parallel OpenAI calls is the secondary risk.
+- **How:** In `middleware.ts`, check rate limit before forwarding to API routes. Upstash: `bun add @upstash/ratelimit @upstash/redis`. In-memory: use `lru-cache` with a sliding window per IP. Default: 10 extractions/min per IP, 30 chat messages/min per IP.
+- **Context:** Identified by Codex outside voice during Eng Review of zemtik-app design doc. Acceptable to defer for v0 founder-led demo and initial Heidy channel pilot. Required before public URL is shared broadly.
+- **Effort:** S (human: ~2h / CC: ~30 min)
+- **Priority:** P2 — needed before Heidy shares link externally
+- **Depends on:** zemtik-app deployment spec (above) — rate limit strategy depends on single-instance vs multi-instance
+
+---
+
+## P1 — zemtik-app deployment spec (added 2026-04-30, /plan-ceo-review)
+
+- **What:** Specify deployment target for zemtik-app (Vercel vs Fly.io vs local Docker). Document env var injection, production `ZEMTIK_CORE_URL`, `ZEMTIK_CORS_ORIGINS`, `BETTER_AUTH_DB_PATH`, and `ZEMTIK_ALLOWED_EMAILS` management.
+- **Why:** Heidy can't share the app with her clients until it has a stable URL. `localhost:3001` only works for founder-led demos. Client onboarding requires a public URL with TLS.
+- **How:** Evaluate Vercel (easiest, free tier) vs Fly.io (more control, better for zemtik-core co-location). Decision should consider: latency to zemtik-core, GDPR residency (eu-central-1 for EU clients), cost at pilot scale.
+- **Context:** zemtik-app v0 built on branch `claude/sweet-wilson-39b35f`. Needs deployment before Heidy shares the link with external clients.
+- **Effort:** S (human: ~2 hours / CC: ~30 min)
+- **Priority:** P1 — blocks channel partner go-live
+- **Depends on:** zemtik-app v0 build complete
+
+---
+
+## P1 — Better Auth: Resend email integration for magic links (added 2026-04-30, /plan-ceo-review)
+
+- **What:** Replace `console.error` magic link logging in `lib/auth.ts` with Resend email delivery. `bun add resend`. Configure `RESEND_API_KEY` env var.
+- **Why:** v0 requires the founder to be at the terminal to copy the magic link URL. Heidy cannot onboard clients independently until email is wired. This blocks the canal partner from operating autonomously.
+- **How:** In `lib/auth.ts` `sendMagicLink` handler: `await resend.emails.send({ from: 'access@zemtik.io', to: email, subject: 'Your Zemtik sign-in link', html: '<a href="${url}">Sign in to Zemtik</a>' })`. Register domain at resend.com (~15 min).
+- **Context:** Better Auth magic link setup in Fase 4d of zemtik-app design doc. Console.error is intentional for v0 (demo mode). Replace before Heidy shares the link with her first client.
+- **Effort:** S (human: ~1 hour / CC: ~15 min)
+- **Priority:** P1 — blocks channel partner autonomy
+- **Depends on:** zemtik-app deployment spec (above)
+
+---
+
+## P1 — Generate 185-query eval PDF from /audit/ directory (added 2026-04-30, /plan-ceo-review)
+
+- **What:** Generate the "185 LATAM lawyer queries — 100% PII detection, 0 leaks" evaluation PDF that is the primary sales asset for the Heidy channel call and all ICP-B demos.
+- **Why:** The asset is referenced 3 times in the GTM design doc as the core evidence piece for legal clients. Heidy needs it before her first client meeting. Currently exists as raw audit records in `~/.zemtik/audit/` but no presentation-ready PDF.
+- **How:** (1) Run `cargo run -- list-mcp` or inspect `~/.zemtik/audit/*.json` to confirm 185 records exist. (2) Write a script (`scripts/generate-eval-pdf.ts`) using `jsPDF` or `puppeteer` to render: entity detection rate, zero-leak evidence, sample tokenized excerpts (anonymized), per-entity-type breakdown. (3) Export as PDF. Alternative: render as HTML and print-to-PDF manually.
+- **Context:** The 185 queries come from prior MCP demo sessions with LATAM legal content. Verify the count before the Heidy call. If count is less than 185, adjust the sales asset to match reality.
+- **Effort:** M (human: ~3 hours / CC: ~1 hour)
+- **Priority:** P1 — needed before Heidy call (Week 1)
+- **Owner:** Founder
+
+---
+
 ## P2 — Opt-in telemetry ping on first zemtik_read_file success (added 2026-04-27, /plan-devex-review)
 
 - **What:** When `zemtik_read_file` succeeds for the first time after install, send an anonymous usage ping: `{ event: 'first_read', file_format: 'pdf', version: '0.17.2', platform: 'macos' }`. Gated on `ZEMTIK_TELEMETRY_ENABLED=true` (opt-in, default off). No file contents, no paths, no PII.

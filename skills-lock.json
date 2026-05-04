@@ -14,6 +14,7 @@
     "documentation-writer": {
       "source": "github/awesome-copilot",
       "sourceType": "github",
+      "skillPath": "skills/documentation-writer/SKILL.md",
       "computedHash": "ee53d65b163cd7eb953a930c95841cfe398cc2c0bd24c06508bbaa07c432be35"
     },
     "excalidraw-diagram-generator": {

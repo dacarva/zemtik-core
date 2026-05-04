@@ -45,12 +45,13 @@ pub async fn run_startup_validation(
         );
     }
 
-    // D11: Tunnel + Anthropic cross-provider warning.
+    // Tunnel + Anthropic cross-provider warning. (Gemini+tunnel is rejected at startup in
+    // build_proxy_router before run_startup_validation is ever called.)
     if config.mode == ZemtikMode::Tunnel && config.llm_provider == "anthropic" {
         eprintln!(
-            "[WARN] Tunnel mode FORK 2 verification uses OpenAI (rewriter_base_url) regardless of\n\
-             \x20     ZEMTIK_LLM_PROVIDER. FORK 1 forwards to Anthropic, FORK 2 verifies via OpenAI.\n\
-             \x20     Audit comparisons will be cross-provider in v1. Anthropic FORK 2 support deferred to v2."
+            "[WARN] Tunnel mode FORK 1 and FORK 2 both use ZEMTIK_OPENAI_BASE_URL regardless of\n\
+             \x20     ZEMTIK_LLM_PROVIDER=anthropic. The tunnel is transparent passthrough — clients\n\
+             \x20     must supply their own OpenAI key. Anthropic-native tunnel support deferred to v2."
         );
     }
 
@@ -60,6 +61,8 @@ pub async fn run_startup_validation(
             "llm_model: {}",
             if config.llm_provider == "anthropic" {
                 &config.anthropic_model
+            } else if config.llm_provider == "gemini" {
+                &config.gemini_model
             } else {
                 &config.openai_model
             }

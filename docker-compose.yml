@@ -10,6 +10,11 @@
 #   export ZEMTIK_PROXY_API_KEY=sk-...   # clients send this as Bearer token (required)
 #   ZEMTIK_LLM_PROVIDER=anthropic docker compose up --build
 #
+# Quick start — proxy only (Gemini, no OpenAI key needed):
+#   export ZEMTIK_GEMINI_API_KEY=AIza-...
+#   export ZEMTIK_PROXY_API_KEY=sk-...   # clients send this as Bearer token (required)
+#   ZEMTIK_LLM_PROVIDER=gemini docker compose up --build
+#
 # MCP attestation server only (no LLM API key needed — use with Claude Desktop):
 #   export ZEMTIK_MCP_API_KEY=<secret>
 #   docker compose --profile mcp up
@@ -109,7 +114,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ZEMTIK_ANTHROPIC_API_KEY=${ZEMTIK_ANTHROPIC_API_KEY:-}
       - ZEMTIK_ANTHROPIC_MODEL=${ZEMTIK_ANTHROPIC_MODEL:-}
-      # Required when ZEMTIK_LLM_PROVIDER=anthropic: clients must send this as Bearer token.
+      - ZEMTIK_GEMINI_API_KEY=${ZEMTIK_GEMINI_API_KEY:-}
+      - ZEMTIK_GEMINI_MODEL=${ZEMTIK_GEMINI_MODEL:-}
+      # Required when ZEMTIK_LLM_PROVIDER=anthropic or gemini: clients send this as Bearer token.
+      # Keeps the provider API key server-side — clients never see it.
       - ZEMTIK_PROXY_API_KEY=${ZEMTIK_PROXY_API_KEY:-}
       # Anonymizer v1: enabled only when running with --profile anonymizer.
       # The sidecar address uses the Docker Compose service name as the hostname.
