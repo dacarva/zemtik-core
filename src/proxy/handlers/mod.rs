@@ -294,10 +294,13 @@ pub(super) async fn handle_anonymize_preview(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     // Prefer the dedicated preview key (ZEMTIK_ANONYMIZER_PREVIEW_KEY) when set.
+    // Falls back to ZEMTIK_PROXY_API_KEY so Gemini/Anthropic deployments work without
+    // adding a new env var — the proxy key already in use covers the preview endpoint.
     // Falls back to OPENAI_API_KEY for backwards compatibility with existing deployments.
     // Empty strings are rejected — a blank configured key must never grant access.
     let expected_key = state.config.anonymizer_preview_key.clone()
         .filter(|k| !k.is_empty())
+        .or_else(|| state.config.proxy_api_key.clone().filter(|k| !k.is_empty()))
         .or_else(|| state.config.openai_api_key.clone().filter(|k| !k.is_empty()))
         .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()));
     let authorized = match (provided_key, expected_key.as_deref()) {
