@@ -264,7 +264,7 @@ pub(in crate::proxy) async fn handle_general_lane(
     // pre-anonymized the text before sending (e.g. zemtik-app client-side anonymization).
     // Count unique tokens so the stored evidence_json and /verify page reflect the real
     // entity count instead of 0.
-    let prior_token_count: usize = if vault.as_ref().map_or(true, |v| v.is_empty()) && !prompt.is_empty() {
+    let prior_token_count: usize = if vault.as_ref().is_none_or(|v| v.is_empty()) && !prompt.is_empty() {
         // Static regex — compiled once, safe to call on every request.
         static TOKEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
             regex::Regex::new(r"\[\[Z:[0-9a-f]{4}:\d+\]\]").expect("valid token regex")
