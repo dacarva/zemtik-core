@@ -2105,6 +2105,32 @@ async fn general_lane_gemini_streaming_returns_501() {
 }
 
 #[tokio::test]
+async fn models_endpoint_returns_gemini_model_with_google_owner() {
+    let (addr, _mock_gemini) = spawn_test_proxy_gemini().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/v1/models"))
+        .header("Authorization", "Bearer proxy-key")
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let models = body["data"].as_array().expect("data must be array");
+    let gemini_model = models
+        .iter()
+        .find(|m| m["id"].as_str() == Some("gemini-2.5-flash"))
+        .expect("gemini-2.5-flash must be in /v1/models");
+    assert_eq!(
+        gemini_model["owned_by"].as_str(),
+        Some("google"),
+        "owned_by must be google for gemini provider"
+    );
+}
+
+#[tokio::test]
 async fn startup_fails_gemini_plus_tunnel_mode() {
     let mut config = gemini_base_config();
     config.mode = zemtik::config::ZemtikMode::Tunnel;

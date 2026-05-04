@@ -976,7 +976,7 @@ pub(crate) async fn handle_tunnel_passthrough(
                 "error": {
                     "message": "Tunnel mode with ZEMTIK_LLM_PROVIDER=anthropic only supports /v1/chat/completions. Other OpenAI endpoints have no Anthropic equivalent.",
                     "type": "not_implemented",
-                    "code": "anthropic_tunnel_chat_only"
+                    "code": "tunnel_chat_only"
                 }
             })),
         ).into_response();
