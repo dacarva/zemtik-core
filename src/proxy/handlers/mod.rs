@@ -161,6 +161,7 @@ pub(super) async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl 
             crate::config::ZemtikMode::Standard => "standard",
         };
         obj.insert("mode".to_string(), serde_json::json!(mode_str));
+        obj.insert("llm_provider".to_string(), serde_json::json!(state.config.llm_provider));
         if let Some(ref sem) = state.tunnel_semaphore {
             use std::sync::atomic::Ordering;
             obj.insert("tunnel_semaphore_available".to_string(),
