@@ -243,7 +243,7 @@ pub struct AppConfig {
 
     // --- Multi-model LLM backend (v0.16.0+) ---
 
-    /// Active LLM provider. Default: "openai". Env: ZEMTIK_LLM_PROVIDER=openai|anthropic.
+    /// Active LLM provider. Default: "openai". Env: ZEMTIK_LLM_PROVIDER=openai|anthropic|gemini.
     pub llm_provider: String,
     /// Anthropic API key (operator-configured, server-side). Env: ZEMTIK_ANTHROPIC_API_KEY.
     /// Hard startup error when ZEMTIK_LLM_PROVIDER=anthropic and this is unset.
@@ -256,8 +256,16 @@ pub struct AppConfig {
     // this URL selection becomes user-controlled and requires ssrf_block_reason + ssrf_dns_guard
     // treatment (matching zemtik_fetch in mcp_proxy.rs).
     pub anthropic_base_url: String,
-    /// Proxy bearer key for inbound requests when provider=anthropic.
-    /// Required hard startup error when ZEMTIK_LLM_PROVIDER=anthropic. Env: ZEMTIK_PROXY_API_KEY.
+    /// Gemini API key (operator-configured, server-side). Env: ZEMTIK_GEMINI_API_KEY.
+    /// Hard startup error when ZEMTIK_LLM_PROVIDER=gemini and this is unset.
+    pub gemini_api_key: Option<String>,
+    /// Gemini model identifier. Default: "gemini-2.5-flash". Env: ZEMTIK_GEMINI_MODEL.
+    pub gemini_model: String,
+    /// Gemini OpenAI-compat base URL. Default: Gemini OpenAI-compat endpoint.
+    /// Env: ZEMTIK_GEMINI_BASE_URL. Override in tests to point at a mock server.
+    pub gemini_base_url: String,
+    /// Proxy bearer key for inbound requests when provider=anthropic or gemini.
+    /// Required hard startup error when ZEMTIK_LLM_PROVIDER=anthropic or gemini. Env: ZEMTIK_PROXY_API_KEY.
     /// Also gates GET /v1/models when set.
     pub proxy_api_key: Option<String>,
 }
@@ -341,6 +349,9 @@ impl Default for AppConfig {
             anthropic_api_key: None,
             anthropic_model: "claude-sonnet-4-6".to_owned(),
             anthropic_base_url: "https://api.anthropic.com".to_owned(),
+            gemini_api_key: None,
+            gemini_model: "gemini-2.5-flash".to_owned(),
+            gemini_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_owned(),
             proxy_api_key: None,
         }
     }
@@ -813,9 +824,9 @@ pub fn load_from_sources(
     if let Some(v) = env.get("ZEMTIK_LLM_PROVIDER") {
         let s = v.trim().to_lowercase();
         match s.as_str() {
-            "openai" | "anthropic" => config.llm_provider = s,
+            "openai" | "anthropic" | "gemini" => config.llm_provider = s,
             other => anyhow::bail!(
-                "ZEMTIK_LLM_PROVIDER: unrecognized value {:?}; accepted: openai, anthropic",
+                "ZEMTIK_LLM_PROVIDER: unrecognized value {:?}; accepted: openai, anthropic, gemini",
                 other
             ),
         }
@@ -836,6 +847,24 @@ pub fn load_from_sources(
         let trimmed = v.trim();
         if !trimmed.is_empty() {
             config.anthropic_base_url = trimmed.to_owned();
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_GEMINI_API_KEY") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.gemini_api_key = Some(trimmed.to_owned());
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_GEMINI_MODEL") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.gemini_model = trimmed.to_owned();
+        }
+    }
+    if let Some(v) = env.get("ZEMTIK_GEMINI_BASE_URL") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            config.gemini_base_url = trimmed.to_owned();
         }
     }
     if let Some(v) = env.get("ZEMTIK_PROXY_API_KEY") {
@@ -872,9 +901,9 @@ pub fn load_from_sources(
     // that may arrive from YAML (serde deserializes freely; env-layer validates its own inputs).
     config.llm_provider = config.llm_provider.trim().to_lowercase();
     match config.llm_provider.as_str() {
-        "openai" | "anthropic" => {}
+        "openai" | "anthropic" | "gemini" => {}
         other => anyhow::bail!(
-            "llm_provider: unrecognized value {:?}; accepted: openai, anthropic",
+            "llm_provider: unrecognized value {:?}; accepted: openai, anthropic, gemini",
             other
         ),
     }
@@ -886,6 +915,12 @@ pub fn load_from_sources(
     if let Some(ref k) = config.mcp_api_key.clone() {
         if k.trim().is_empty() {
             config.mcp_api_key = None;
+        }
+    }
+    // Normalize gemini_api_key from YAML: whitespace-only treated as absent.
+    if let Some(ref k) = config.gemini_api_key.clone() {
+        if k.trim().is_empty() {
+            config.gemini_api_key = None;
         }
     }
     if let Some(url) = config.public_url.take() {
@@ -904,6 +939,17 @@ pub fn load_from_sources(
         anyhow::ensure!(
             config.proxy_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
             "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic"
+        );
+    }
+    // Post-layer validation: Gemini requires both API key and proxy auth key.
+    if config.llm_provider == "gemini" {
+        anyhow::ensure!(
+            config.gemini_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+            "ZEMTIK_GEMINI_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini"
+        );
+        anyhow::ensure!(
+            config.proxy_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+            "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini"
         );
     }
 

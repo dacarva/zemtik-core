@@ -16,7 +16,8 @@ use uuid::Uuid;
 use constant_time_eq::constant_time_eq;
 use crate::config::{AggFn, AppConfig, RewriterConfig, ZemtikMode};
 use crate::intent::{IntentBackend, IntentError};
-use crate::llm_backend::{AnthropicBackend, LlmBackend, OpenAiBackend};
+use crate::llm_backend::LlmBackend;
+use crate::provider_registry::ProviderRegistry;
 use crate::types::{
     MessageContent,
     RequestedMode, RewriteMethod, Route,
@@ -67,13 +68,14 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
         prover::validate_circuit_dir(&config.circuit_dir).context("circuit directory validation")?;
     }
 
-    // D8: hard startup error — rewriter calls OpenAI internally; incompatible with Anthropic
-    if config.query_rewriter_enabled && config.llm_provider == "anthropic" {
+    // D8: hard startup error — rewriter calls OpenAI internally; incompatible with Anthropic/Gemini
+    if config.query_rewriter_enabled && (config.llm_provider == "anthropic" || config.llm_provider == "gemini") {
         anyhow::bail!(
-            "ZEMTIK_QUERY_REWRITER=1 is incompatible with ZEMTIK_LLM_PROVIDER=anthropic. \
+            "ZEMTIK_QUERY_REWRITER=1 is incompatible with ZEMTIK_LLM_PROVIDER={}. \
              The rewriter calls OpenAI internally. \
-             To use Anthropic: set ZEMTIK_QUERY_REWRITER=0. \
-             To keep the rewriter: set ZEMTIK_LLM_PROVIDER=openai."
+             To use {}: set ZEMTIK_QUERY_REWRITER=0. \
+             To keep the rewriter: set ZEMTIK_LLM_PROVIDER=openai.",
+            config.llm_provider, config.llm_provider
         );
     }
 
@@ -92,6 +94,34 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
                  billed to your Anthropic account.\n\
                  Set ZEMTIK_PROXY_API_KEY to a strong bearer token and send it from your client\n\
                  as 'Authorization: Bearer <ZEMTIK_PROXY_API_KEY>'."
+            );
+        }
+    }
+
+    // Gemini path requires both API key and proxy auth key, and is incompatible with tunnel mode.
+    if config.llm_provider == "gemini" {
+        if config.gemini_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+            anyhow::bail!(
+                "ZEMTIK_GEMINI_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini."
+            );
+        }
+        if config.proxy_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+            anyhow::bail!(
+                "ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini \
+                 (clients authenticate with this key; ZEMTIK_GEMINI_API_KEY stays server-side).\n\
+                 Set ZEMTIK_PROXY_API_KEY to a strong bearer token and send it from your client\n\
+                 as 'Authorization: Bearer <ZEMTIK_PROXY_API_KEY>'."
+            );
+        }
+        // Tunnel mode FORK 1 always forwards to openai_base_url using the client's bearer token.
+        // With Gemini, clients send ZEMTIK_PROXY_API_KEY (not ZEMTIK_GEMINI_API_KEY), so FORK 1
+        // would hit the Gemini endpoint with the wrong key and fail with 401 on every request.
+        if config.mode == crate::config::ZemtikMode::Tunnel {
+            anyhow::bail!(
+                "ZEMTIK_MODE=tunnel is not supported with ZEMTIK_LLM_PROVIDER=gemini in v1.\n\
+                 Tunnel FORK 1 always forwards to ZEMTIK_OPENAI_BASE_URL using the client's bearer token.\n\
+                 Gemini requires a server-side operator key (ZEMTIK_GEMINI_API_KEY) — the two models\n\
+                 are incompatible in this version. To use tunnel mode: set ZEMTIK_LLM_PROVIDER=openai."
             );
         }
     }
@@ -233,21 +263,7 @@ pub async fn build_proxy_router(config: AppConfig) -> anyhow::Result<Router> {
     // Build provider-specific LLM backend (constructed once at startup)
     let llm_backend: Arc<dyn LlmBackend> = {
         let http_client = reqwest::Client::new();
-        if config.llm_provider == "anthropic" {
-            // config validation (load_from_sources) guarantees anthropic_api_key is Some and non-empty.
-            let api_key = config.anthropic_api_key.clone().unwrap_or_default();
-            Arc::new(AnthropicBackend::new(
-                http_client,
-                api_key,
-                config.anthropic_model.clone(),
-                config.anthropic_base_url.clone(),
-            )) as Arc<dyn LlmBackend>
-        } else {
-            Arc::new(OpenAiBackend::new(
-                http_client,
-                config.openai_base_url.clone(),
-            )) as Arc<dyn LlmBackend>
-        }
+        ProviderRegistry::build(&config, http_client)?
     };
 
     let state = Arc::new(ProxyState {
@@ -449,11 +465,11 @@ async fn handle_chat_completions(
 ) -> Result<Response, ProxyError> {
     let total_start = Instant::now();
 
-    // S1: When provider=anthropic, require an explicit Authorization bearer — do NOT fall back to
-    // OPENAI_API_KEY or config.openai_api_key. The server-side Anthropic key is used for all
-    // outbound calls; the incoming bearer is purely to authenticate requests to this proxy.
-    // Missing key is a startup error (build_proxy_router), but we defend in-depth here.
-    let api_key = if state.config.llm_provider == "anthropic" {
+    // S1: When provider=anthropic or gemini, require an explicit Authorization bearer.
+    // The server-side operator key is used for all outbound calls; the incoming bearer
+    // authenticates requests to this proxy. Missing key is a startup error (build_proxy_router),
+    // but we defend in-depth here.
+    let api_key = if state.config.llm_provider == "anthropic" || state.config.llm_provider == "gemini" {
         let bearer = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())

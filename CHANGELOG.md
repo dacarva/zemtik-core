@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0] - 2026-05-04
+
+### Added
+- **Gemini backend** (`ZEMTIK_LLM_PROVIDER=gemini`): routes `POST /v1/chat/completions` through Google's OpenAI-compatible endpoint (`/v1beta/openai/chat/completions`). Operator-key model — `ZEMTIK_GEMINI_API_KEY` is server-side; clients authenticate via the existing `ZEMTIK_PROXY_API_KEY`.
+- **Model substitution**: non-`gemini-*` client model names (e.g. `gpt-5.4-nano`) are substituted with `ZEMTIK_GEMINI_MODEL` (default: `gemini-2.5-flash`). Model names with a `gemini-` prefix pass through unchanged to the API.
+- **`GET /v1/models`** returns the configured Gemini model with `owned_by: "google"` when `ZEMTIK_LLM_PROVIDER=gemini`.
+- **`src/provider_registry.rs`**: startup factory (`ProviderRegistry::build`) centralising backend construction for openai / anthropic / gemini; returns `Err` for unknown providers or missing required keys.
+- **Startup guards**: hard errors on missing `ZEMTIK_GEMINI_API_KEY`, missing `ZEMTIK_PROXY_API_KEY`, `ZEMTIK_QUERY_REWRITER=1` with gemini (rewriter calls OpenAI internally), and `ZEMTIK_MODE=tunnel` with gemini (tunnel FORK 1 uses client bearer; incompatible with operator-key model).
+- **`ZEMTIK_VALIDATE_ONLY=1`** now checks Gemini (and Anthropic) key presence before exiting, matching the startup error behaviour of `build_proxy_router`.
+- **Streaming guard**: `stream: true` returns HTTP 501 (`StreamingUnsupported`) for Gemini (same as Anthropic; SSE deferred to v2).
+- **New env vars**: `ZEMTIK_GEMINI_API_KEY`, `ZEMTIK_GEMINI_MODEL` (default `gemini-2.5-flash`), `ZEMTIK_GEMINI_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta/openai` — already includes `/v1beta/openai`, do not append `/v1/chat/completions`).
+- **12 new tests**: 4 unit tests for `GeminiBackend` (Send+Sync, operator-key injection, model override, error shape); 2 tests for `ProviderRegistry`; 6 integration tests (5 startup failure paths + `/v1/models` gemini response).
+
+### Fixed
+- `tunnel.rs` error code `anthropic_tunnel_chat_only` renamed to `tunnel_chat_only` — the guard now applies to both Anthropic and Gemini providers.
+
+### Upgrade notes
+Set `ZEMTIK_LLM_PROVIDER=gemini`, `ZEMTIK_GEMINI_API_KEY=<your-key>`, and `ZEMTIK_PROXY_API_KEY=<proxy-key>` to switch. Clients send their existing Bearer token against `ZEMTIK_PROXY_API_KEY`; the Gemini key never leaves the server. Tunnel mode is not supported with Gemini in this version.
+
 ## [0.18.1] - 2026-04-29
 
 ### Added

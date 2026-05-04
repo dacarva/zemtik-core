@@ -1977,8 +1977,170 @@ async fn test_anthropic_streaming_returns_501() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         body["error"]["code"].as_str(),
-        Some("AnthropicStreamingUnsupported"),
-        "error code must be AnthropicStreamingUnsupported"
+        Some("StreamingUnsupported"),
+        "error code must be StreamingUnsupported"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gemini startup error tests (new pattern: is_err() assertions)
+// ---------------------------------------------------------------------------
+
+fn gemini_base_config() -> AppConfig {
+    let mut config = AppConfig::default();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.llm_provider = "gemini".to_owned();
+    config.gemini_api_key = Some("AIza-test".to_owned());
+    config.proxy_api_key = Some("proxy-key".to_owned());
+    config.gemini_model = "gemini-2.5-flash".to_owned();
+    config.gemini_base_url = "http://localhost:9999/v1beta/openai".to_owned();
+    config
+}
+
+#[tokio::test]
+async fn startup_fails_missing_gemini_api_key() {
+    let mut config = gemini_base_config();
+    config.gemini_api_key = None;
+    let result = build_proxy_router(config).await;
+    assert!(result.is_err(), "should fail without ZEMTIK_GEMINI_API_KEY");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("ZEMTIK_GEMINI_API_KEY"),
+        "error should name the missing key: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn startup_fails_missing_proxy_api_key_for_gemini() {
+    let mut config = gemini_base_config();
+    config.proxy_api_key = None;
+    let result = build_proxy_router(config).await;
+    assert!(result.is_err(), "should fail without ZEMTIK_PROXY_API_KEY when llm_provider=gemini");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("ZEMTIK_PROXY_API_KEY"),
+        "error should name the missing key: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn startup_fails_rewriter_plus_gemini() {
+    let mut config = gemini_base_config();
+    config.query_rewriter_enabled = true;
+    let result = build_proxy_router(config).await;
+    assert!(result.is_err(), "should fail when rewriter + gemini");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("ZEMTIK_QUERY_REWRITER"),
+        "error should mention ZEMTIK_QUERY_REWRITER: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gemini streaming 501 test
+// ---------------------------------------------------------------------------
+
+async fn spawn_test_proxy_gemini() -> (SocketAddr, MockServer) {
+    let mock_gemini = MockServer::start().await;
+
+    let mut config = AppConfig::default();
+    config.skip_circuit_validation = true;
+    config.intent_backend = "regex".to_owned();
+    config.client_id = 123;
+    config.cors_origins = vec!["*".to_owned()];
+    config.receipts_db_path = std::path::PathBuf::from(":memory:");
+    config.schema_config = Some(test_schema());
+    config.schema_config_hash = Some("test-schema-hash".to_owned());
+    config.general_passthrough_enabled = true;
+    config.llm_provider = "gemini".to_owned();
+    config.gemini_api_key = Some("test-gemini-key".to_owned());
+    config.gemini_model = "gemini-2.5-flash".to_owned();
+    config.gemini_base_url = format!("{}/v1beta/openai", mock_gemini.uri());
+    config.proxy_api_key = Some("proxy-key".to_owned());
+
+    let app = build_proxy_router(config).await.expect("build_proxy_router failed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum serve failed");
+    });
+    (addr, mock_gemini)
+}
+
+#[tokio::test]
+async fn general_lane_gemini_streaming_returns_501() {
+    let (addr, _mock_gemini) = spawn_test_proxy_gemini().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("Authorization", "Bearer proxy-key")
+        .json(&json!({
+            "model": "gemini-2.5-flash",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Tell me a joke"}]
+        }))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        501,
+        "Gemini streaming must return 501 in v1"
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some("StreamingUnsupported"),
+        "error code must be StreamingUnsupported"
+    );
+}
+
+#[tokio::test]
+async fn models_endpoint_returns_gemini_model_with_google_owner() {
+    let (addr, _mock_gemini) = spawn_test_proxy_gemini().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{addr}/v1/models"))
+        .header("Authorization", "Bearer proxy-key")
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let models = body["data"].as_array().expect("data must be array");
+    let gemini_model = models
+        .iter()
+        .find(|m| m["id"].as_str() == Some("gemini-2.5-flash"))
+        .expect("gemini-2.5-flash must be in /v1/models");
+    assert_eq!(
+        gemini_model["owned_by"].as_str(),
+        Some("google"),
+        "owned_by must be google for gemini provider"
+    );
+}
+
+#[tokio::test]
+async fn startup_fails_gemini_plus_tunnel_mode() {
+    let mut config = gemini_base_config();
+    config.mode = zemtik::config::ZemtikMode::Tunnel;
+    config.tunnel_api_key = Some("tunnel-key".to_owned());
+    let result = build_proxy_router(config).await;
+    assert!(result.is_err(), "should fail: tunnel+gemini unsupported in v1");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("tunnel") || msg.contains("ZEMTIK_MODE"),
+        "error should mention tunnel: {msg}"
     );
 }
 

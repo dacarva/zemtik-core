@@ -98,6 +98,32 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("[VALIDATE] ERROR: schema_config.json not found at {}. Cannot validate.", app_config.schema_config_path.display());
                     std::process::exit(1);
                 }
+                // Mirror the provider key checks from build_proxy_router so validate-only catches
+                // missing keys before the real server would fail to start.
+                if app_config.llm_provider == "anthropic" {
+                    if app_config.anthropic_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+                        eprintln!("[VALIDATE] ERROR: ZEMTIK_ANTHROPIC_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic.");
+                        std::process::exit(1);
+                    }
+                    if app_config.proxy_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+                        eprintln!("[VALIDATE] ERROR: ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=anthropic.");
+                        std::process::exit(1);
+                    }
+                }
+                if app_config.llm_provider == "gemini" {
+                    if app_config.gemini_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+                        eprintln!("[VALIDATE] ERROR: ZEMTIK_GEMINI_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini.");
+                        std::process::exit(1);
+                    }
+                    if app_config.proxy_api_key.as_deref().map(|k| k.is_empty()).unwrap_or(true) {
+                        eprintln!("[VALIDATE] ERROR: ZEMTIK_PROXY_API_KEY is required when ZEMTIK_LLM_PROVIDER=gemini.");
+                        std::process::exit(1);
+                    }
+                    if app_config.mode == zemtik::config::ZemtikMode::Tunnel {
+                        eprintln!("[VALIDATE] ERROR: ZEMTIK_MODE=tunnel is not supported with ZEMTIK_LLM_PROVIDER=gemini in v1.");
+                        std::process::exit(1);
+                    }
+                }
                 let schema = app_config.schema_config.clone().unwrap();
                 let config = std::sync::Arc::new(app_config);
                 let result = zemtik::startup::run_startup_validation(&config, &schema).await;

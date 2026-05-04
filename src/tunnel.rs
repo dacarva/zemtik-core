@@ -965,18 +965,18 @@ pub(crate) async fn handle_tunnel_passthrough(
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
-    // S7: Anthropic tunnel only supports POST /v1/chat/completions (mapped to /v1/messages).
-    // Non-chat paths and non-POST methods have no Anthropic equivalent.
-    if state.config.llm_provider == "anthropic"
+    // S7: Anthropic/Gemini tunnel only supports POST /v1/chat/completions.
+    // Non-chat paths and non-POST methods have no equivalent in these providers' APIs.
+    if (state.config.llm_provider == "anthropic" || state.config.llm_provider == "gemini")
         && !(uri.path() == "/v1/chat/completions" && method == Method::POST)
     {
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(serde_json::json!({
                 "error": {
-                    "message": "Tunnel mode with ZEMTIK_LLM_PROVIDER=anthropic only supports /v1/chat/completions. Other OpenAI endpoints have no Anthropic equivalent.",
+                    "message": "Tunnel mode only supports /v1/chat/completions with this LLM provider. Other OpenAI endpoints have no equivalent in the configured provider.",
                     "type": "not_implemented",
-                    "code": "anthropic_tunnel_chat_only"
+                    "code": "tunnel_chat_only"
                 }
             })),
         ).into_response();

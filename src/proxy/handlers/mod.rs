@@ -93,6 +93,8 @@ pub(super) async fn handle_models(
 
     let (model_id, owned_by) = if state.config.llm_provider == "anthropic" {
         (state.config.anthropic_model.clone(), "anthropic")
+    } else if state.config.llm_provider == "gemini" {
+        (state.config.gemini_model.clone(), "google")
     } else {
         (state.config.openai_model.clone(), "openai")
     };
@@ -159,6 +161,7 @@ pub(super) async fn handle_health(State(state): State<Arc<ProxyState>>) -> impl 
             crate::config::ZemtikMode::Standard => "standard",
         };
         obj.insert("mode".to_string(), serde_json::json!(mode_str));
+        obj.insert("llm_provider".to_string(), serde_json::json!(state.config.llm_provider));
         if let Some(ref sem) = state.tunnel_semaphore {
             use std::sync::atomic::Ordering;
             obj.insert("tunnel_semaphore_available".to_string(),

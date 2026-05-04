@@ -1,6 +1,7 @@
 // ── Internal modules (not part of the stable public API) ────────────────────
 #[doc(hidden)] pub mod audit;
 #[doc(hidden)] pub mod llm_backend;
+#[doc(hidden)] pub mod provider_registry;
 #[doc(hidden)] pub mod bundle;
 #[doc(hidden)] pub mod db;
 #[doc(hidden)] pub mod engine_fast;

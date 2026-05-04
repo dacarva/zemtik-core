@@ -86,114 +86,121 @@ curl -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" http://localhost:4000/v1/m
 
 ---
 
-## Adding a Future Provider (e.g., Gemini)
+## Switching to Gemini
 
-Zemtik uses the `LlmBackend` trait (`src/llm_backend.rs`) to isolate provider-specific logic from the proxy. Adding a new provider — Gemini, Mistral, Bedrock, or any OpenAI-compatible endpoint — requires four steps and touches three files.
+If your deployment requires Google Gemini instead of OpenAI, Zemtik routes requests through Gemini's OpenAI-compatible endpoint. No format translation is needed — the request shape is identical. **Note:** `stream: true` is not supported with the Gemini backend (returns HTTP 501). This is an operator-key model — `ZEMTIK_GEMINI_API_KEY` stays server-side; clients authenticate via `ZEMTIK_PROXY_API_KEY` instead.
+
+**Why `ZEMTIK_PROXY_API_KEY` is required:** without it, any client that can reach your proxy at `:4000` gets free API calls billed to your Google AI Studio account. The proxy key is the only gate between the internet and your Gemini quota.
+
+**In your `.env` file:**
+
+```bash
+ZEMTIK_LLM_PROVIDER=gemini
+ZEMTIK_GEMINI_API_KEY=AIza-...your-key-here...  # from https://aistudio.google.com/app/apikey
+ZEMTIK_GEMINI_MODEL=gemini-2.5-flash            # or gemini-2.5-pro, gemini-2.0-flash, etc.
+
+# Required when using Gemini — protects the proxy from unauthorized use.
+ZEMTIK_PROXY_API_KEY=your-strong-random-secret
+```
+
+Verify at startup: the validation block shows `llm_provider: gemini` and `llm_model: gemini-2.5-flash`.
+
+**Send a request:**
+
+```bash
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" \
+  -d '{"model":"gpt-5.4-nano","messages":[{"role":"user","content":"What was our total AWS spend for Q1 2024?"}]}'
+```
+
+A successful response includes `"llm_provider": "gemini"` and `"data_exfiltrated": 0` in the `evidence` block.
+
+**Model substitution:** Zemtik replaces any non-`gemini-*` model name in your request (e.g. `gpt-5.4-nano`) with the value of `ZEMTIK_GEMINI_MODEL`. Model names that already start with `gemini-` are passed through unchanged. The actual model used is recorded in `zemtik_meta.resolved_model`.
+
+**Auth asymmetry:** When using Gemini, Zemtik uses `ZEMTIK_GEMINI_API_KEY` for all outbound Gemini calls. The `Authorization: Bearer` header your client sends to Zemtik is validated against `ZEMTIK_PROXY_API_KEY` — it is **not** forwarded to Google. This is expected behavior.
+
+**Check the configured model:**
+
+```bash
+curl -H "Authorization: Bearer $ZEMTIK_PROXY_API_KEY" http://localhost:4000/v1/models
+# → {"object":"list","data":[{"id":"gemini-2.5-flash","owned_by":"google",...}]}
+```
+
+---
+
+## Adding a Future Provider (e.g., Mistral / Bedrock)
+
+Zemtik uses the `LlmBackend` trait (`src/llm_backend.rs`) to isolate provider-specific logic from the proxy. Gemini and Anthropic are already built in. Adding another provider — Mistral, Amazon Bedrock, or any proprietary API — requires four steps and touches three files.
 
 ### Step 1 — Implement `LlmBackend`
 
-Create `src/llm_backend_gemini.rs` (or add a struct to `llm_backend.rs`) and implement the trait:
+Add a struct to `src/llm_backend.rs` and implement the trait:
 
 ```rust
-use crate::llm_backend::LlmBackend;
-
-pub struct GeminiBackend {
+pub struct MistralBackend {
     client: reqwest::Client,
-    api_key: String,      // from ZEMTIK_GEMINI_API_KEY
-    model: String,        // from ZEMTIK_GEMINI_MODEL
-    base_url: String,     // e.g. https://generativelanguage.googleapis.com
+    api_key: String,   // from ZEMTIK_MISTRAL_API_KEY
+    model: String,     // from ZEMTIK_MISTRAL_MODEL
+    base_url: String,  // e.g. https://api.mistral.ai/v1
 }
 
-impl LlmBackend for GeminiBackend {
+impl LlmBackend for MistralBackend {
     fn complete<'a>(
         &'a self,
         body: &'a serde_json::Value,
         _api_key: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<(u16, serde_json::Value)>> {
         Box::pin(async move {
-            // 1. Translate OpenAI message format → Gemini generateContent format
-            let gemini_body = translate_to_gemini(body)?;
-
-            // 2. Call Gemini API (key goes in query param or x-goog-api-key header)
-            let url = format!(
-                "{}/v1beta/models/{}:generateContent?key={}",
-                self.base_url, self.model, self.api_key
-            );
-            let resp = self.client.post(&url).json(&gemini_body).send().await?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| {
-                    serde_json::json!({"error": {"type": "upstream_error"}})
-                });
-                return Ok((status.as_u16(), body));
-            }
-
-            let resp_body: serde_json::Value = resp.json().await?;
-
-            // 3. Normalize to OpenAI response shape (same pattern as AnthropicBackend)
-            let text = extract_gemini_text(&resp_body)?;
-            let normalized = serde_json::json!({
-                "id": uuid::Uuid::new_v4().to_string(),
-                "object": "chat.completion",
-                "model": self.model,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                "_zemtik_resolved_model": self.model,
-            });
-            Ok((200, normalized))
+            let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+            let resp = self.client.post(&url)
+                .bearer_auth(&self.api_key)
+                .json(body)
+                .send().await
+                .context("Mistral API request failed")?;
+            let status = resp.status().as_u16();
+            let resp_body: Value = resp.json().await.context("parse Mistral response")?;
+            Ok((status, resp_body))
         })
     }
-    // Optionally implement forward_raw() for streaming
 }
 ```
 
-Key invariants to follow (same as `AnthropicBackend`):
+Key invariants to follow (same as `AnthropicBackend` and `GeminiBackend`):
 
 - Use `self.api_key` (operator key) for outbound calls — **never** the incoming `_api_key` argument.
-- Return `_zemtik_resolved_model` in the normalized body; the proxy strips and injects it into `zemtik_meta.resolved_model`.
+- Return `_zemtik_resolved_model` in the response body; the proxy strips and injects it into `zemtik_meta.resolved_model`.
 - Check `!status.is_success()` before parsing the body to handle non-JSON error payloads from the upstream (gateways sometimes return HTML 502).
-- Return `(501, ...)` for any Gemini-specific capability (e.g., function calling, grounding) not yet supported instead of silently returning a 500.
 
-### Step 2 — Wire into `config.rs`
+### Step 2 — Add config fields
 
-Add new config fields alongside the existing Anthropic fields:
+In `src/config/env.rs`, add fields alongside the existing Anthropic/Gemini fields:
 
 ```rust
-// src/config.rs
-pub gemini_api_key: Option<String>,   // ZEMTIK_GEMINI_API_KEY
-pub gemini_model: String,             // ZEMTIK_GEMINI_MODEL (default: gemini-2.0-flash)
-pub gemini_base_url: String,          // ZEMTIK_GEMINI_BASE_URL
+pub mistral_api_key: Option<String>,   // ZEMTIK_MISTRAL_API_KEY
+pub mistral_model: String,             // ZEMTIK_MISTRAL_MODEL (default: mistral-large-latest)
+pub mistral_base_url: String,          // ZEMTIK_MISTRAL_BASE_URL
 ```
 
-Populate them from env vars in the config loading block, following the same pattern as `anthropic_api_key`.
+Update **both** match blocks in `env.rs` (env-layer parse and post-merge normalization) to accept `"mistral"`.
 
-### Step 3 — Add the match arm in `proxy.rs`
+### Step 3 — Register in `ProviderRegistry`
 
-In `build_llm_backend()` (or equivalent factory function in `proxy.rs`), add a match arm:
+In `src/provider_registry.rs`, add a match arm:
 
 ```rust
-"gemini" => {
-    let api_key = config.gemini_api_key.clone()
-        .ok_or_else(|| anyhow!("ZEMTIK_GEMINI_API_KEY required when llm_provider=gemini"))?;
-    Box::new(GeminiBackend::new(client, api_key, config.gemini_model.clone(), config.gemini_base_url.clone()))
+"mistral" => {
+    let api_key = config.mistral_api_key.clone()
+        .ok_or_else(|| anyhow::anyhow!("ZEMTIK_MISTRAL_API_KEY is required when llm_provider=mistral"))?;
+    Ok(Arc::new(MistralBackend::new(client, api_key, config.mistral_model.clone(), config.mistral_base_url.clone())))
 }
 ```
 
-At startup, follow the same hard-error pattern as Anthropic: if `llm_provider=gemini` and `ZEMTIK_GEMINI_API_KEY` is unset, refuse to start with a clear error. Do not silently fall back.
+At startup the proxy hard-errors if `ZEMTIK_MISTRAL_API_KEY` is unset. Do not silently fall back — the error message must name the missing variable and explain why `ZEMTIK_PROXY_API_KEY` is also required.
 
-### Step 4 — Add env vars to `.env.example` and `CLAUDE.md`
+### Step 4 — Update docs
 
-Add to `.env.example`:
-
-```bash
-# Gemini backend (set ZEMTIK_LLM_PROVIDER=gemini to activate)
-# ZEMTIK_GEMINI_API_KEY=AIza...
-# ZEMTIK_GEMINI_MODEL=gemini-2.0-flash
-# ZEMTIK_GEMINI_BASE_URL=https://generativelanguage.googleapis.com
-```
-
-Add to the env vars table in `CLAUDE.md` so future maintainers know the keys exist.
+Add to `.env.example` and the env vars table in `CLAUDE.md` so future maintainers know the keys exist. Add a `## Switching to Mistral` section here following the same structure as the Anthropic and Gemini sections above.
 
 ### OpenAI-compatible endpoints (simpler path)
 
@@ -788,7 +795,12 @@ Step 3 (`cargo run`) writes a complete JSON audit record to `audit/<timestamp>.j
 
 The proxy does **not** support `stream: true`. Set `stream: false` in your client configuration.
 
-All responses are returned as a single buffered JSON object after pipeline completion. If `stream: true` is detected in the request body, the proxy returns HTTP 400 immediately:
+All responses are returned as a single buffered JSON object after pipeline completion. The status code on a streaming rejection depends on the configured provider:
+
+- **OpenAI provider** (`ZEMTIK_LLM_PROVIDER=openai`, default): `POST /v1/chat/completions` with `stream: true` returns **HTTP 400** when `ZEMTIK_GENERAL_PASSTHROUGH` is disabled.
+- **Gemini or Anthropic provider**: `POST /v1/chat/completions` with `stream: true` always returns **HTTP 501 Not Implemented**, regardless of passthrough setting. The error code is `StreamingUnsupported`.
+
+HTTP 400 example (OpenAI, passthrough disabled):
 
 ```json
 {
@@ -798,6 +810,18 @@ All responses are returned as a single buffered JSON object after pipeline compl
     "message": "Set stream: false in your client configuration.",
     "hint": "The ZK pipeline must complete before any part of the response can be sent.",
     "doc_url": "https://github.com/dacarva/zemtik-core/blob/main/docs/GETTING_STARTED.md#streaming"
+  }
+}
+```
+
+HTTP 501 example (Gemini or Anthropic):
+
+```json
+{
+  "error": {
+    "type": "streaming_not_supported",
+    "code": "StreamingUnsupported",
+    "message": "Streaming is not supported with llm_provider=anthropic or gemini in this version. Set stream: false."
   }
 }
 ```
