@@ -176,7 +176,9 @@ pub(in crate::proxy) async fn handle_general_lane(
         "reason": reason,
         "receipt_id": receipt_id,
         "provider": provider,
-        "endpoint": endpoint,
+        // endpoint is intentionally omitted: it is server-side config that may
+        // contain internal hostnames, Azure resource names, or credentials as
+        // query parameters. Persisted to evidence_json (DB/verify) only.
         "model": request_model,
     });
     let meta_header_val = urlencoding::encode(&zemtik_meta.to_string()).into_owned();
@@ -306,7 +308,7 @@ pub(in crate::proxy) async fn handle_general_lane(
             "zk_coverage": "none",
             "reason": zemtik_meta.get("reason"),
             "provider": zemtik_meta.get("provider"),
-            "endpoint": zemtik_meta.get("endpoint"),
+            "endpoint": &endpoint,  // server-side only — not in client-visible zemtik_meta
             "model": zemtik_meta.get("model"),
         });
         if let Some(anon) = zemtik_meta.get("anonymizer") {
